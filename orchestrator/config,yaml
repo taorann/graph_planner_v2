@@ -1,0 +1,9 @@
+context:
+  mode: "wsd"            # 仅允许 "wsd" 或 "full"
+  token_budget: 8000     # 文本预算（仅 WSD 生效；FULL 模式须能容纳全文）
+  window_radius: 12      # 仅 WSD：窗口两侧补 r 行
+  deps_per_file: 3       # 仅 WSD：每文件本地依赖片段上限
+  cross_deps_limit: 8    # 仅 WSD：跨文件依赖片段总上限
+cgm:
+  max_new_tokens: 2048
+  max_patch_lines: 200   # 补丁行数硬阈值
