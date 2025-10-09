@@ -1,0 +1,2 @@
+def hello(name):  # ACI: smoke edit  # ACI: smoke edit  # ACI: smoke edit
+    return f"hi, {name}"
