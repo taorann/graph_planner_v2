@@ -54,6 +54,8 @@ class SandboxRuntime:
             mode = "repoenv" if (_HAS_R2E and cfg.r2e_ds_json and os.path.exists(cfg.r2e_ds_json)) else "docker"
         self._mode = mode
 
+        self._env = None  # only populated when using RepoEnv as the backend
+
         if self._mode == "repoenv":
             self._init_repoenv_backend()
         elif self._mode == "r2e":
@@ -65,14 +67,20 @@ class SandboxRuntime:
     def _init_repoenv_backend(self):
         if not _HAS_R2E:
             raise RuntimeError("r2egym is not available but backend='repoenv' was requested.")
-        if not (self.cfg.r2e_ds_json and os.path.exists(self.cfg.r2e_ds_json)):
+        ds_path = self.cfg.r2e_ds_json
+        if ds_path:
+            ds_path = os.path.expanduser(ds_path)
+            if not os.path.isabs(ds_path):
+                ds_path = os.path.abspath(ds_path)
+        if not (ds_path and os.path.exists(ds_path)):
             raise ValueError(f"r2e ds json not found: {self.cfg.r2e_ds_json}")
 
-        with open(self.cfg.r2e_ds_json, "r") as f:
+        with open(ds_path, "r") as f:
             ds = json.load(f)
 
         env_args = EnvArgs(ds=ds)
         env = RepoEnv(env_args)
+        self._env = env
         self._rt = env.runtime  # r2e 的 DockerRuntime
         _dbg("repoenv initialized")
 
@@ -95,10 +103,15 @@ class SandboxRuntime:
     def _init_r2e_backend(self):
         if not _HAS_R2E:
             raise RuntimeError("r2egym is not available but backend='r2e' was requested.")
-        if not (self.cfg.r2e_ds_json and os.path.exists(self.cfg.r2e_ds_json)):
+        ds_path = self.cfg.r2e_ds_json
+        if ds_path:
+            ds_path = os.path.expanduser(ds_path)
+            if not os.path.isabs(ds_path):
+                ds_path = os.path.abspath(ds_path)
+        if not (ds_path and os.path.exists(ds_path)):
             raise ValueError(f"r2e ds json not found: {self.cfg.r2e_ds_json}")
 
-        with open(self.cfg.r2e_ds_json, "r") as f:
+        with open(ds_path, "r") as f:
             ds = json.load(f)
 
         # 宿主挂载（只为把你的代码带进容器；真正工作目录在 /work）
@@ -157,7 +170,11 @@ class SandboxRuntime:
     def _exec(self, cmd: str, timeout: int = 900) -> Tuple[str, int]:
         if self._mode in ("r2e", "repoenv"):
             out, rc = self._rt.run(cmd, timeout=timeout)
-            return out, rc
+            try:
+                rc_int = int(rc)
+            except (TypeError, ValueError):
+                rc_int = 0 if str(rc).strip() == "" else 1
+            return out, rc_int
         # docker-py
         q = "'" + cmd.replace("'", "'\"'\"'") + "'"
         exec_cmd = f"bash -lc {q}"
@@ -238,10 +255,19 @@ class SandboxRuntime:
 
     def close(self):
         if self._mode in ("r2e", "repoenv"):
-            try: self._rt.container.stop(timeout=5)
-            except Exception: pass
-            try: self._rt.container.remove(force=True)
-            except Exception: pass
+            try:
+                close = getattr(self._rt, "close", None)
+                if callable(close):
+                    close()
+            except Exception:
+                pass
+            if self._env is not None:
+                try:
+                    self._env.runtime = None
+                except Exception:
+                    pass
+                self._env = None
+            self._rt = None
         else:
             try: self.container.stop(timeout=5)
             except Exception: pass
