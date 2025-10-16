@@ -1,9 +1,12 @@
 # graph_planner/runtime/sandbox.py
-import os, json, random, string
+import os, json, random, string, time
 from dataclasses import dataclass
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple, Any
 
 import docker
+
+# 遥测
+from infra import telemetry as telemetry_mod
 
 # R2E 组件（可选）
 try:
@@ -54,6 +57,8 @@ class SandboxRuntime:
             mode = "repoenv" if (_HAS_R2E and cfg.r2e_ds_json and os.path.exists(cfg.r2e_ds_json)) else "docker"
         self._mode = mode
 
+        self._env = None  # only populated when using RepoEnv as the backend
+
         if self._mode == "repoenv":
             self._init_repoenv_backend()
         elif self._mode == "r2e":
@@ -65,14 +70,20 @@ class SandboxRuntime:
     def _init_repoenv_backend(self):
         if not _HAS_R2E:
             raise RuntimeError("r2egym is not available but backend='repoenv' was requested.")
-        if not (self.cfg.r2e_ds_json and os.path.exists(self.cfg.r2e_ds_json)):
+        ds_path = self.cfg.r2e_ds_json
+        if ds_path:
+            ds_path = os.path.expanduser(ds_path)
+            if not os.path.isabs(ds_path):
+                ds_path = os.path.abspath(ds_path)
+        if not (ds_path and os.path.exists(ds_path)):
             raise ValueError(f"r2e ds json not found: {self.cfg.r2e_ds_json}")
 
-        with open(self.cfg.r2e_ds_json, "r") as f:
+        with open(ds_path, "r") as f:
             ds = json.load(f)
 
         env_args = EnvArgs(ds=ds)
         env = RepoEnv(env_args)
+        self._env = env
         self._rt = env.runtime  # r2e 的 DockerRuntime
         _dbg("repoenv initialized")
 
@@ -95,10 +106,15 @@ class SandboxRuntime:
     def _init_r2e_backend(self):
         if not _HAS_R2E:
             raise RuntimeError("r2egym is not available but backend='r2e' was requested.")
-        if not (self.cfg.r2e_ds_json and os.path.exists(self.cfg.r2e_ds_json)):
+        ds_path = self.cfg.r2e_ds_json
+        if ds_path:
+            ds_path = os.path.expanduser(ds_path)
+            if not os.path.isabs(ds_path):
+                ds_path = os.path.abspath(ds_path)
+        if not (ds_path and os.path.exists(ds_path)):
             raise ValueError(f"r2e ds json not found: {self.cfg.r2e_ds_json}")
 
-        with open(self.cfg.r2e_ds_json, "r") as f:
+        with open(ds_path, "r") as f:
             ds = json.load(f)
 
         # 宿主挂载（只为把你的代码带进容器；真正工作目录在 /work）
@@ -157,7 +173,11 @@ class SandboxRuntime:
     def _exec(self, cmd: str, timeout: int = 900) -> Tuple[str, int]:
         if self._mode in ("r2e", "repoenv"):
             out, rc = self._rt.run(cmd, timeout=timeout)
-            return out, rc
+            try:
+                rc_int = int(rc)
+            except (TypeError, ValueError):
+                rc_int = 0 if str(rc).strip() == "" else 1
+            return out, rc_int
         # docker-py
         q = "'" + cmd.replace("'", "'\"'\"'") + "'"
         exec_cmd = f"bash -lc {q}"
@@ -196,7 +216,8 @@ class SandboxRuntime:
         return rc == 0
 
     def test(self, selector: Optional[List[str]] = None, timeout: int = 1800) -> Dict:
-        sel = " ".join(selector) if selector else ""
+        selector_tuple: Tuple[str, ...] = tuple(selector or ())
+        sel = " ".join(selector_tuple)
         # RepoEnv / R2E：尝试官方脚本 → 失败再回退 pytest
         if self._mode in ("repoenv", "r2e"):
             # 探测常见官方入口
@@ -208,7 +229,10 @@ class SandboxRuntime:
             if any(self._exec(p)[1] == 0 for p in probes):
                 # 先尝试 /testbed 下的脚本；没有就 /work；再没有就 /r2e_tests
                 for candidate in ("/testbed/run_tests.sh", "/work/run_tests.sh"):
-                    out, rc = self._exec(f"bash {candidate} --json /tmp/_r2e_eval.json", timeout=timeout)
+                    cmd = f"bash {candidate} --json /tmp/_r2e_eval.json"
+                    start = time.time()
+                    out, rc = self._exec(cmd, timeout=timeout)
+                    duration = time.time() - start
                     if rc == 0 or "No such file" not in out:
                         dump, _ = self._exec("cat /tmp/_r2e_eval.json || true")
                         passed = False
@@ -218,17 +242,40 @@ class SandboxRuntime:
                         except Exception:
                             # 退化关键词匹配
                             passed = ("PASSED" in out) and ("FAILED" not in out)
-                        return {"mode": "r2e", "passed": passed, "rc": 0 if passed else 1, "stdout": out}
+                        result = {"mode": "r2e", "passed": passed, "rc": 0 if passed else 1, "stdout": out}
+                        return self._finalize_test_result(
+                            result,
+                            command=cmd,
+                            selector=selector_tuple,
+                            duration=duration,
+                        )
                 # r2e_tests 目录的自定义入口（按需定制）
-                out, rc = self._exec("bash /r2e_tests/run.sh || true", timeout=timeout)
+                cmd = "bash /r2e_tests/run.sh || true"
+                start = time.time()
+                out, rc = self._exec(cmd, timeout=timeout)
+                duration = time.time() - start
                 passed = ("PASSED" in out) and ("FAILED" not in out)
-                return {"mode": "r2e", "passed": passed, "rc": 0 if passed else 1, "stdout": out}
+                result = {"mode": "r2e", "passed": passed, "rc": 0 if passed else 1, "stdout": out}
+                return self._finalize_test_result(
+                    result,
+                    command=cmd,
+                    selector=selector_tuple,
+                    duration=duration,
+                )
 
         # 回退 pytest（禁用 --cache-dir，统一用 python -m pytest）
         cmd = f"python -m pytest -q {sel}".strip()
         _dbg(f"pytest cmd: {cmd}")
+        start = time.time()
         out, rc = self._exec(cmd, timeout=timeout)
-        return {"mode": "pytest", "passed": rc == 0, "rc": rc, "stdout": out}
+        duration = time.time() - start
+        result = {"mode": "pytest", "passed": rc == 0, "rc": rc, "stdout": out}
+        return self._finalize_test_result(
+            result,
+            command=cmd,
+            selector=selector_tuple,
+            duration=duration,
+        )
 
     def reset_soft(self) -> None:
         if self._mode in ("r2e", "repoenv"):
@@ -236,12 +283,52 @@ class SandboxRuntime:
         else:
             self._exec("git reset --hard HEAD && git clean -fd")
 
+    def _finalize_test_result(
+        self,
+        result: Dict[str, Any],
+        *,
+        command: str,
+        selector: Tuple[str, ...],
+        duration: float,
+    ) -> Dict[str, Any]:
+        payload = {
+            "kind": "test_run",
+            "backend": self._mode,
+            "command": command,
+            "selector": list(selector),
+            "duration_sec": round(duration, 3),
+            "result": {
+                "mode": result.get("mode"),
+                "rc": result.get("rc"),
+                "passed": bool(result.get("passed")),
+            },
+            "stdout": result.get("stdout", ""),
+        }
+        if self.cfg.workdir:
+            payload["workdir"] = self.cfg.workdir
+        if self._mode in ("repoenv", "r2e") and self.cfg.r2e_ds_json:
+            payload["dataset_json"] = self.cfg.r2e_ds_json
+        try:
+            telemetry_mod.log_test_result(payload)
+        except Exception:
+            pass
+        return result
+
     def close(self):
         if self._mode in ("r2e", "repoenv"):
-            try: self._rt.container.stop(timeout=5)
-            except Exception: pass
-            try: self._rt.container.remove(force=True)
-            except Exception: pass
+            try:
+                close = getattr(self._rt, "close", None)
+                if callable(close):
+                    close()
+            except Exception:
+                pass
+            if self._env is not None:
+                try:
+                    self._env.runtime = None
+                except Exception:
+                    pass
+                self._env = None
+            self._rt = None
         else:
             try: self.container.stop(timeout=5)
             except Exception: pass

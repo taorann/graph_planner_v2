@@ -1,7 +1,7 @@
 # /map-vepfs/taoran/graph_planner/scripts/smoke_test.py
 import os
 from env.planner_env import PlannerEnv
-from agent.planner_agent import PlannerAgent
+from agents import PlannerAgent
 
 def main():
     extra = {
