@@ -8,7 +8,7 @@ from core.actions import ExploreAction, MemoryAction, RepairAction, SubmitAction
 from infra.config import Config, load as load_config
 from memory import anchor_planner, subgraph_store
 from aci.schema import Plan, PlanTarget
-from actor import cgm_adapter
+from agents.rule_based import cgm_adapter
 
 
 @dataclass
@@ -167,6 +167,8 @@ class PlannerAgent:
             plan=plan_obj,
             constraints={"max_edits": max(1, len(plan_targets))},
             snippets=snippets,
+            plan_text=plan_text,
+            issue=self.state.issue,
         )
         patch.setdefault("summary", plan_text)
 
