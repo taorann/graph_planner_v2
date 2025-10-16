@@ -5,6 +5,7 @@ from pathlib import Path
 
 from core.actions import ExploreAction, MemoryAction, RepairAction, SubmitAction
 from env.planner_env import PlannerEnv
+from infra import telemetry
 from runtime.sandbox import SandboxConfig
 
 
@@ -74,6 +75,19 @@ class FakeSandbox:
     def test(self):  # pragma: no cover - trivial
         self.tests_invocations += 1
         passed = "return a + b" in self.files[os.path.join(self.repo_root, "app", "calc.py")]
+        payload = {
+            "kind": "test_run",
+            "backend": "fake",
+            "command": "python -m pytest -q",
+            "selector": [],
+            "duration_sec": 0.0,
+            "result": {"mode": "pytest", "rc": 0 if passed else 1, "passed": passed},
+            "stdout": "FakeSandbox pytest output",
+        }
+        try:
+            telemetry.log_test_result(payload)
+        except Exception:
+            pass
         return {"passed": passed, "runs": self.tests_invocations}
 
     def get_patch(self):  # pragma: no cover - trivial
