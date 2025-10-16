@@ -1,4 +1,4 @@
-# your_project/planner/test_prioritizer.py
+# graph_planner/agents/rule_based/test_prioritizer.py
 # -*- coding: utf-8 -*-
 """
 Step 5.5 测试优先级

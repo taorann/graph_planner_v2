@@ -1,4 +1,4 @@
-# your_project/planner/step5_telemetry.py
+# graph_planner/agents/rule_based/telemetry.py
 # -*- coding: utf-8 -*-
 """
 Step 5.7 Telemetry（只关心“第5步”的可观测）

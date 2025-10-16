@@ -31,6 +31,7 @@ class LintCfg:
 @dataclass
 class TelemetryCfg:
     events_path: str = os.path.join("logs", "events.jsonl")
+    test_runs_path: str = os.path.join("logs", "test_runs.jsonl")
 
 
 @dataclass
@@ -161,6 +162,8 @@ def _apply_env_overrides(raw: Dict[str, Any]) -> Dict[str, Any]:
     # TELEMETRY
     if "EVENTS_PATH" in os.environ:
         raw.setdefault("telemetry", {})["events_path"] = os.environ["EVENTS_PATH"]
+    if "TEST_RUNS_PATH" in os.environ:
+        raw.setdefault("telemetry", {})["test_runs_path"] = os.environ["TEST_RUNS_PATH"]
 
     return raw
 
@@ -189,10 +192,11 @@ def load() -> Config:
         cfg.collate.mode = cfg.mode
 
     # 保底创建 logs 目录
-    try:
-        os.makedirs(os.path.dirname(cfg.telemetry.events_path), exist_ok=True)
-    except Exception:
-        pass
+    for path in (cfg.telemetry.events_path, cfg.telemetry.test_runs_path):
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        except Exception:
+            pass
 
     return cfg
 

@@ -1,9 +1,12 @@
 # graph_planner/runtime/sandbox.py
-import os, json, random, string
+import os, json, random, string, time
 from dataclasses import dataclass
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple, Any
 
 import docker
+
+# 遥测
+from infra import telemetry as telemetry_mod
 
 # R2E 组件（可选）
 try:
@@ -213,7 +216,8 @@ class SandboxRuntime:
         return rc == 0
 
     def test(self, selector: Optional[List[str]] = None, timeout: int = 1800) -> Dict:
-        sel = " ".join(selector) if selector else ""
+        selector_tuple: Tuple[str, ...] = tuple(selector or ())
+        sel = " ".join(selector_tuple)
         # RepoEnv / R2E：尝试官方脚本 → 失败再回退 pytest
         if self._mode in ("repoenv", "r2e"):
             # 探测常见官方入口
@@ -225,7 +229,10 @@ class SandboxRuntime:
             if any(self._exec(p)[1] == 0 for p in probes):
                 # 先尝试 /testbed 下的脚本；没有就 /work；再没有就 /r2e_tests
                 for candidate in ("/testbed/run_tests.sh", "/work/run_tests.sh"):
-                    out, rc = self._exec(f"bash {candidate} --json /tmp/_r2e_eval.json", timeout=timeout)
+                    cmd = f"bash {candidate} --json /tmp/_r2e_eval.json"
+                    start = time.time()
+                    out, rc = self._exec(cmd, timeout=timeout)
+                    duration = time.time() - start
                     if rc == 0 or "No such file" not in out:
                         dump, _ = self._exec("cat /tmp/_r2e_eval.json || true")
                         passed = False
@@ -235,23 +242,77 @@ class SandboxRuntime:
                         except Exception:
                             # 退化关键词匹配
                             passed = ("PASSED" in out) and ("FAILED" not in out)
-                        return {"mode": "r2e", "passed": passed, "rc": 0 if passed else 1, "stdout": out}
+                        result = {"mode": "r2e", "passed": passed, "rc": 0 if passed else 1, "stdout": out}
+                        return self._finalize_test_result(
+                            result,
+                            command=cmd,
+                            selector=selector_tuple,
+                            duration=duration,
+                        )
                 # r2e_tests 目录的自定义入口（按需定制）
-                out, rc = self._exec("bash /r2e_tests/run.sh || true", timeout=timeout)
+                cmd = "bash /r2e_tests/run.sh || true"
+                start = time.time()
+                out, rc = self._exec(cmd, timeout=timeout)
+                duration = time.time() - start
                 passed = ("PASSED" in out) and ("FAILED" not in out)
-                return {"mode": "r2e", "passed": passed, "rc": 0 if passed else 1, "stdout": out}
+                result = {"mode": "r2e", "passed": passed, "rc": 0 if passed else 1, "stdout": out}
+                return self._finalize_test_result(
+                    result,
+                    command=cmd,
+                    selector=selector_tuple,
+                    duration=duration,
+                )
 
         # 回退 pytest（禁用 --cache-dir，统一用 python -m pytest）
         cmd = f"python -m pytest -q {sel}".strip()
         _dbg(f"pytest cmd: {cmd}")
+        start = time.time()
         out, rc = self._exec(cmd, timeout=timeout)
-        return {"mode": "pytest", "passed": rc == 0, "rc": rc, "stdout": out}
+        duration = time.time() - start
+        result = {"mode": "pytest", "passed": rc == 0, "rc": rc, "stdout": out}
+        return self._finalize_test_result(
+            result,
+            command=cmd,
+            selector=selector_tuple,
+            duration=duration,
+        )
 
     def reset_soft(self) -> None:
         if self._mode in ("r2e", "repoenv"):
             self._rt.soft_git_reset()
         else:
             self._exec("git reset --hard HEAD && git clean -fd")
+
+    def _finalize_test_result(
+        self,
+        result: Dict[str, Any],
+        *,
+        command: str,
+        selector: Tuple[str, ...],
+        duration: float,
+    ) -> Dict[str, Any]:
+        payload = {
+            "kind": "test_run",
+            "backend": self._mode,
+            "command": command,
+            "selector": list(selector),
+            "duration_sec": round(duration, 3),
+            "result": {
+                "mode": result.get("mode"),
+                "rc": result.get("rc"),
+                "passed": bool(result.get("passed")),
+            },
+            "stdout": result.get("stdout", ""),
+        }
+        if self.cfg.workdir:
+            payload["workdir"] = self.cfg.workdir
+        if self._mode in ("repoenv", "r2e") and self.cfg.r2e_ds_json:
+            payload["dataset_json"] = self.cfg.r2e_ds_json
+        try:
+            telemetry_mod.log_test_result(payload)
+        except Exception:
+            pass
+        return result
 
     def close(self):
         if self._mode in ("r2e", "repoenv"):

@@ -1,4 +1,4 @@
-# your_project/planner/tool_policy.py
+# graph_planner/agents/rule_based/tool_policy.py
 # -*- coding: utf-8 -*-
 """
 Step 5.1 决策接口 & 规则基线

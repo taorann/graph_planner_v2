@@ -1,4 +1,4 @@
-# your_project/planner/expand_params.py
+# graph_planner/agents/rule_based/expand_params.py
 # -*- coding: utf-8 -*-
 """
 Step 5.3 扩展参数器（Hop & Terms Planner）

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 """
-actor/collater.py
+agents/rule_based/collater.py
 
 Step 4.1：Collater（可运行，占位策略）
 - collate(subgraph, plan, cfg) -> (chunks: List[DocChunk], meta: CollateMeta)
