@@ -39,7 +39,7 @@ scripts/run_rule_agent.py ─────────────┐
    - 读取 `r2e_ds_json`，构造 `EnvArgs` 并实例化 `RepoEnv`；
    - 将返回的 `RepoEnv.runtime`（即 R2E 的 `DockerRuntime`）保存下来，统一转发 `run/apply_patch/lint/test` 调用；
    - 在容器内补齐工具脚本、git safe.directory 等兜底设置。【F:runtime/sandbox.py†L27-L210】
-4. **决策循环**：`PlannerAgent.step` 负责生成 Explore/Memory/Repair/Submit 等动作；`PlannerEnv.step` 根据动作调用 `SandboxRuntime`，并将容器反馈折算成奖励和观测。【F:agents/rule_based/planner.py†L35-L205】【F:env/planner_env.py†L138-L370】
+4. **决策循环**：`PlannerAgent.step` 负责生成 Explore/Memory/Repair/Submit 等动作；`PlannerEnv.step` 根据动作调用 `SandboxRuntime`，并将容器反馈折算成奖励和观测。【F:agent/planner_agent.py†L35-L205】【F:env/planner_env.py†L138-L370】
 
 ## 3. 关键文件职责速览
 
@@ -48,20 +48,9 @@ scripts/run_rule_agent.py ─────────────┐
 | `runtime/__init__.py` | 导入时将 `R2E-Gym/src` 自动加入 `sys.path`，无需手动设置 `PYTHONPATH`。【F:runtime/__init__.py†L1-L30】 |
 | `runtime/sandbox.py` | 选择后端（repoenv/r2e/docker），持有 RepoEnv 或 docker-py 客户端，并提供统一的 `run/apply_patch/lint/test/get_patch` 接口。【F:runtime/sandbox.py†L1-L210】 |
 | `env/planner_env.py` | 包装 Agent 与运行时的交互逻辑，包括记忆维护、图扩展、CGM 调用、守卫应用和奖励统计。【F:env/planner_env.py†L48-L370】 |
-| `agents/rule_based/cgm_adapter.py` | 负责拼装 CodeFuse CGM 所需的上下文，优先通过 `CodeFuseCGMClient` 调用远端补丁服务，并在失败时回退到本地标记方案。【F:agents/rule_based/cgm_adapter.py†L1-L223】 |
-| `integrations/codefuse_cgm/client.py` | 封装 CodeFuse CGM 的 HTTP 请求、载荷打包与响应解析，支持自定义 endpoint/API Key/模型参数。【F:integrations/codefuse_cgm/client.py†L1-L172】 |
+| `actor/cgm_adapter.py` | 以容器内路径为基础构造 CGM Prompt，解析补丁、守卫元数据，并与 PlannerEnv 协作落库。【F:actor/cgm_adapter.py†L82-L150】 |
 | `aci/tools.py` | ACI 层工具集合，为 CLI/测试提供 `view_file`、`search`、`edit_lines`、`lint_check`、`run_tests` 等原子操作，内部同样复用 `SandboxRuntime`。【F:aci/tools.py†L1-L268】 |
 | `scripts/run_rule_agent.py` | 规则 Agent 冒烟测试脚本，串联环境、Agent、RepoEnv 并输出自然语言计划与补丁结果，是当前端到端验证的推荐入口。【F:scripts/run_rule_agent.py†L1-L128】 |
-
-### 3.1 本地测试容器与数据集描述
-
-为了在没有官方数据集的前提下完成端到端自测，仓库提供了一套极简的 RepoEnv 镜像与对应的 `ds` 文件：
-
-1. **构建镜像**：运行 `scripts/build_repoenv_sample.sh` 会基于 `docker/repoenv_sample/Dockerfile` 构建本地镜像 `graph-planner/repoenv-sample:latest`。镜像内预置了一个带缺陷的示例仓库与 pytest 依赖，方便代理在容器里触发真实的修复流程。【F:scripts/build_repoenv_sample.sh†L1-L32】【F:docker/repoenv_sample/Dockerfile†L1-L33】
-2. **数据集描述**：`config/r2e_ds_repoenv_sample.json` 将镜像标签与虚拟仓库元数据打包成 RepoEnv 期望的 `ds` 结构。运行 `scripts/run_rule_agent.py --backend repoenv --ds-json config/r2e_ds_repoenv_sample.json` 即可加载该镜像完成冒烟测试。【F:config/r2e_ds_repoenv_sample.json†L1-L5】
-3. **示例仓库内容**：镜像来源的 `sample_repo` 包含一个刻意写错的 `app.calc.add` 实现与配套测试，测试失败即可驱动规则代理生成修复补丁。【F:docker/repoenv_sample/sample_repo/app/calc.py†L1-L22】【F:docker/repoenv_sample/sample_repo/tests/test_calc.py†L1-L9】
-
-> ⚠️ 运行脚本前请确保宿主机已启动 Docker 守护进程，并且本地可访问该守护进程（例如 `/var/run/docker.sock`）。
 
 ## 4. 端到端工作流（规则 Agent）
 
@@ -87,7 +76,7 @@ RepoEnv.runtime (DockerRuntime)
 该流程确保：
 
 - 所有文件读写都发生在容器内，路径由 PlannerEnv 保持绝对化；
-- CGM 只接收来自 RepoEnv 的片段，生成的补丁先尝试通过 CodeFuse 服务产出，必要时再回退本地标记方案；
+- CGM 只接收来自 RepoEnv 的片段，生成的补丁再由守卫校验后写回容器；
 - `SandboxRuntime` 统一管理 lint/test，保持与 ACI 工具的一致性。
 
 ## 5. 层次图：仓库主要模块
@@ -98,11 +87,10 @@ Graph Planner Repo
 ├── scripts/
 │   └── run_rule_agent.py …… 规则 Agent 启动入口
 │
-├── agents/
-│   └── rule_based/
-│       ├── planner.py …… 决策主循环
-│       ├── cgm_adapter.py …… CGM Prompt & 补丁解析
-│       └── tool_*.py / telemetry.py …… 策略扩展点
+├── agent/
+│   └── planner_agent.py …… 决策主循环
+│
+├── planner/ …… 节点选择、读写策略
 │
 ├── memory/
 │   ├── graph_adapter.py …… 图句柄 & 1-hop 扩展
@@ -110,6 +98,9 @@ Graph Planner Repo
 │   ├── mem_ops_head.py …… 记忆操作推荐
 │   ├── memory_bank.py …… 子图持久化 & 限额
 │   └── subgraph_store.py …… 子图序列化
+│
+├── actor/
+│   └── cgm_adapter.py …… CGM Prompt & 补丁解析
 │
 ├── env/
 │   └── planner_env.py …… 动作路由 & 奖励汇总

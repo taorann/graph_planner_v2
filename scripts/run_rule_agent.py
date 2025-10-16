@@ -6,10 +6,9 @@ import json
 import os
 from typing import Dict, Tuple
 
-from agents import PlannerAgent
+from agent.planner_agent import PlannerAgent
 from core.actions import ActionUnion
 from env.planner_env import PlannerEnv
-from infra.config import load as load_config
 
 ACTION_TYPES = tuple(ActionUnion.__args__)  # type: ignore[attr-defined]
 
@@ -107,8 +106,6 @@ def main() -> None:
     finally:
         env.close()
 
-    cfg = load_config()
-
     print("=== Rule Agent Episode Summary ===")
     print("steps:", result["steps"], "reward:", result["reward"], "done:", result["done"])
     tests = result.get("tests") or {}
@@ -119,7 +116,6 @@ def main() -> None:
     if result.get("patch"):
         print("--- git diff ---")
         print(result["patch"])
-    print(f"test logs appended to {cfg.telemetry.test_runs_path}")
 
     if args.report:
         report_path = os.path.abspath(os.path.expanduser(args.report))

@@ -19,7 +19,7 @@ from memory.subgraph_store import WorkingSubgraph
 from runtime.sandbox import SandboxConfig, SandboxRuntime
 from aci.schema import Plan, PlanTarget
 from orchestrator.guard import GuardError, enforce_patch_guard
-from agents.rule_based.test_prioritizer import prioritize_tests
+from planner.test_prioritizer import prioritize_tests
 
 
 def _safe_int(value: Any, default: int = 0) -> int:

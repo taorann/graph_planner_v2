@@ -14,12 +14,12 @@
                       ┌────────────┴────────────┐
                       ▼                         ▼
         ┌─────────────── 决策面（Agent & Memory） ───────────────┐
-        │ agents/rule_based/* · memory/* · core/actions            │
+        │ agent/planner_agent · planner/* · memory/* · core/actions │
         └──────────────────────────────────────────────────────────┘
                       │                         ▲
                       ▼                         │
             ┌────────────────── 环境面（PlannerEnv） ──────────────────┐
-            │ env/planner_env · agents/rule_based/cgm_adapter · agents/rule_based/collater │
+            │ env/planner_env · actor/cgm_adapter · actor/collater    │
             └────────────────────────────────────────────────────────┘
                       │
                       ▼
@@ -34,13 +34,12 @@
 | --- | --- |
 | `scripts/run_rule_agent.py` | 规则驱动的端到端入口：拼装 Issue & Sandbox 配置，创建 `PlannerEnv` 与 `PlannerAgent`，并驱动一次完整的修复回合。 【F:scripts/run_rule_agent.py†L1-L128】 |
 | `aci/tools.py` | 将 CLI/测试传来的 JSON 请求转成对容器的原子操作（查看、搜索、编辑、lint、测试），内部统一调用 `SandboxRuntime`。 【F:aci/tools.py†L1-L268】 |
-| `agents/rule_based/planner.py` | 规则 Agent 的策略外壳：调度记忆更新、图扩展、CGM 协作，并在必要时生成自然语言计划。 【F:agents/rule_based/planner.py†L1-L205】 |
-| `agents/rule_based/*` | 规则库：包括节点选择、路径扩展、读写策略、补丁生成等，供 `PlannerAgent` 组合使用。 【F:agents/rule_based/tool_policy.py†L1-L80】 |
+| `agent/planner_agent.py` | 规则 Agent 的策略外壳：调度记忆更新、图扩展、CGM 协作，并在必要时生成自然语言计划。 【F:agent/planner_agent.py†L1-L205】 |
+| `planner/*` | 规则库：包括节点选择、路径扩展、读写策略等，供 `PlannerAgent` 组合使用。 【F:planner/__init__.py†L1-L20】 |
 | `memory/*` | 维护“记忆图”与线性化上下文，包括候选生成、操作策略、持久化、线性化等。 【F:memory/memory_bank.py†L1-L120】 |
 | `core/actions.py` | 定义 Explore/Memory/Repair/Submit 等动作的数据结构，是 Agent 与环境之间的统一协议。 【F:core/actions.py†L1-L34】 |
 | `env/planner_env.py` | 封装一次环境交互：处理动作、拉取代码片段、调用 CGM、执行 lint/test 并返回奖励。 【F:env/planner_env.py†L1-L436】 |
-| `agents/rule_based/cgm_adapter.py` | 与补丁模型（CGM）通信：优先调用 CodeFuse CGM 生成补丁，并在失败时回退本地标记方案。 【F:agents/rule_based/cgm_adapter.py†L1-L223】 |
-| `integrations/codefuse_cgm/client.py` | CodeFuse CGM 的 HTTP 适配层：构建载荷、发送请求、解析响应。 【F:integrations/codefuse_cgm/client.py†L1-L172】 |
+| `actor/cgm_adapter.py` | 与补丁模型（CGM）通信：组装 prompt、调用模型、解析补丁、生成 Guard 元数据。 【F:actor/cgm_adapter.py†L1-L161】 |
 | `runtime/__init__.py` | 导入时自动把 vendored 的 `R2E-Gym/src` 加入 `sys.path`，确保 RepoEnv 代码可直接引用。 【F:runtime/__init__.py†L1-L30】 |
 | `runtime/sandbox.py` | 按配置选择 RepoEnv / R2E / docker 后端，并提供统一的 `run/apply_patch/lint/test` 接口。 【F:runtime/sandbox.py†L1-L210】 |
 | `R2E-Gym/src/*` | 官方 RepoEnv & DockerRuntime 实现，负责真正的容器生命周期与命令执行。 |
@@ -90,14 +89,14 @@ Graph Planner Agent 在本仓库中通过规则驱动的多阶段流程完成一
 ### 6.2 决策循环
 
 - **观测构造**：`PlannerEnv.reset` 初始化 issue 摘要、子图、记忆状态，并通过 `_obs` 输出统一的观测字典（含文本记忆、子图节点、候选上下文）。【F:env/planner_env.py†L48-L136】
-- **规则策略**：`PlannerAgent.step` 调用 `_decide` 依次执行“扩展图 → 更新记忆 → 读取代码 → 生成自然语言修复计划 → 调用 CGM → 决定是否提交”，并保持动作契约与 `core.actions` 对齐。【F:agents/rule_based/planner.py†L35-L205】
+- **规则策略**：`PlannerAgent.step` 调用 `_decide` 依次执行“扩展图 → 更新记忆 → 读取代码 → 生成自然语言修复计划 → 调用 CGM → 决定是否提交”，并保持动作契约与 `core.actions` 对齐。【F:agent/planner_agent.py†L35-L205】
 - **环境步进**：`PlannerEnv.step` 根据动作类型路由到 `_handle_explore`、`_handle_memory`、`_handle_read`、`_handle_repair`、`_handle_submit` 等函数，累计奖励与终止条件。【F:env/planner_env.py†L138-L370】
 
 ### 6.3 容器与工具交互
 
 - **图扩展/记忆维护**：`PlannerEnv._handle_explore` 调用 `memory.graph_adapter.one_hop_expand` 并借助 `memory.mem_candidates` 过滤节点，随后 `memory.mem_ops_head.suggest` 决定记忆增删；`memory.memory_bank.apply_ops` 负责真正更新子图并持久化。 【F:env/planner_env.py†L185-L282】【F:memory/memory_bank.py†L33-L120】
-- **上下文拼接**：`agents.rule_based.collater.build_snippets` 与 `agents.rule_based.cgm_adapter` 中的工具函数把选中节点的代码段整理成 CGM 需要的上下文格式，保持容器路径绝对化，避免脱离 RepoEnv。【F:agents/rule_based/collater.py†L18-L138】【F:agents/rule_based/cgm_adapter.py†L23-L185】
-- **补丁生成与守卫**：`agents.rule_based.cgm_adapter.generate` 负责调用 CGM 并返回补丁，与 `PlannerEnv._apply_patch_guarded` 协同在容器内落地补丁并处理失败回退。【F:agents/rule_based/cgm_adapter.py†L188-L223】【F:env/planner_env.py†L284-L356】
+- **上下文拼接**：`actor.collater.build_snippets` 与 `actor.cgm_adapter.linearize_snippets` 把选中节点的代码段整理成 CGM 需要的上下文格式，保持容器路径绝对化，避免脱离 RepoEnv。【F:actor/collater.py†L18-L138】【F:actor/cgm_adapter.py†L82-L150】
+- **补丁生成与守卫**：`actor.cgm_adapter.generate` 负责调用 CGM 并返回补丁与 Guard 元数据；`PlannerEnv._apply_patch_guarded` 在容器内调用 `SandboxRuntime.apply_patch`，失败时记录守卫反馈并让 Agent 选择新计划。【F:env/planner_env.py†L284-L356】
 - **提交与评测**：`PlannerEnv._handle_submit` 调用 `SandboxRuntime.test()` 运行任务测试，并携带最近一次补丁供上层判定最终奖励。【F:env/planner_env.py†L358-L370】
 
 ### 6.4 CLI/工具层的补充路径
@@ -112,9 +111,9 @@ Graph Planner Agent 在本仓库中通过规则驱动的多阶段流程完成一
 | `memory/mem_candidates.py` | 根据锚点与当前子图生成候选节点并打分，包含目录多样性权重与测试文件偏好。 | `_handle_explore` 通过它筛选优先级高的节点，决定下一步扩展方向。【F:env/planner_env.py†L201-L236】 |
 | `memory/mem_ops_head.py` | 将候选与子图状态转换为记忆操作（Add/Update/Delete/Keep）。 | `_handle_memory` 在无显式动作时调用它生成默认操作，保证子图新鲜度。【F:env/planner_env.py†L238-L282】 |
 | `memory/memory_bank.py` | 持久化记忆操作与子图状态，限制容量并记录 `.aci/memlog.json`。 | 环境在应用记忆后调用 `record_memops` 与 `apply_ops`，维持多轮交互的一致性。【F:env/planner_env.py†L246-L282】 |
-| `memory/subgraph_store.py` | 定义 `WorkingSubgraph`，支持加载/保存/线性化，并把数据写入 `.aci/subgraphs/`。 | `PlannerEnv.reset` & `PlannerAgent` 读取/写回子图，并为 CGM 线性化上下文。【F:env/planner_env.py†L48-L136】【F:agents/rule_based/planner.py†L82-L153】 |
-| `memory/types.py` | 统一 TypedDict/Protocol 定义，规范候选、锚点、记忆操作等结构。 | 被 Agent、Env 多处引用，为类型检查提供约束。【F:agents/rule_based/collater.py†L27-L65】 |
-| `memory/anchor_planner.py` | 早期的锚点生成器，占位实现。 | 当前规则 Agent 直接调用 `memory.anchor_planner` 的兜底策略，此文件仍作为可替换实现保留。 |
+| `memory/subgraph_store.py` | 定义 `WorkingSubgraph`，支持加载/保存/线性化，并把数据写入 `.aci/subgraphs/`。 | `PlannerEnv.reset` & `PlannerAgent` 读取/写回子图，并为 CGM 线性化上下文。【F:env/planner_env.py†L48-L136】【F:agent/planner_agent.py†L82-L153】 |
+| `memory/types.py` | 统一 TypedDict/Protocol 定义，规范候选、锚点、记忆操作等结构。 | 被 Actor、Planner、Env 多处引用，为类型检查提供约束。【F:actor/collater.py†L27-L65】 |
+| `memory/anchor_planner.py` | 早期的锚点生成器，占位实现。 | 当前规则 Agent 使用 `planner.anchor_planner`，因此此文件暂未接线，可视为备用。 |
 
 除 `memory/anchor_planner.py` 外，其余文件均在主流程中被直接引用，需要保留。
 
@@ -127,8 +126,8 @@ scripts/run_rule_agent.py
 └── load_config() / build_issue() / build_sandbox()
     └── PlannerEnv.from_dict() → SandboxRuntime(...)
         └── PlannerAgent(step) ←→ PlannerEnv.step()
-            ├── agents.rule_based.collater / agents.rule_based.cgm_adapter
-            ├── memory.* / agents.rule_based.*
+            ├── actor.collater / actor.cgm_adapter
+            ├── memory.* / planner.*
             └── SandboxRuntime.apply_patch/lint/test → RepoEnv/DockerRuntime
 ```
 
@@ -153,7 +152,5 @@ pytest / python -m <test>
 4. **运行测试并获取奖励**：修复完成后触发 `SandboxRuntime.test()`，解析返回的测试结果和奖励，再把轨迹写入日志。
 
 该流程覆盖了 Agent 决策、记忆维护、CGM 补丁生成、容器守卫、Lint/Test 直至奖励反馈的所有关键环节，是目前验证“规则驱动 Agent 能否在 RepoEnv 容器中完成一次修复”的标准方法。
-
-> 提示：若缺少官方任务镜像，可先执行 `scripts/build_repoenv_sample.sh` 构建仓库内提供的 `graph-planner/repoenv-sample:latest`，并把 `config/r2e_ds_repoenv_sample.json` 传给 `--ds-json` 进行本地冒烟测试。【F:scripts/build_repoenv_sample.sh†L1-L32】【F:config/r2e_ds_repoenv_sample.json†L1-L5】
 
 如需更细粒度调试，可单独调用 `aci.tools` 里的原子操作，定位补丁生成、守卫或容器命令的具体问题。若需要对接 R2E 官方的 `cesium` 之类任务，需要自备对应的 `ds` 描述并通过 `scripts/run_rule_agent.py` 启动；仓库默认不包含 cesium 的运行记录，执行结果会写入 `logs/events.jsonl` 供后续分析。
