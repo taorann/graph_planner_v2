@@ -207,7 +207,7 @@ def apply_ops(
 ) -> Dict[str, Any]:
     """
     顶层函数：把 3.2 的 MemOp 列表应用到工作子图（ADD/UPDATE/DELETE），并返回 summary。
-    - 兼容 orchestrator.loop 里的 `from memory.memory_bank import apply_ops as apply_memops, ApplyPolicy`
+    - 提供 `apply_memops` 等别名，兼容旧版流水线的直接调用
     - 强制治理：配额/目录多样性/t-file 比例/安全开关
     """
     # 读取当前子图信息

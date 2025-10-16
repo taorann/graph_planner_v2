@@ -1,19 +1,20 @@
 # graph_planner/core/actions.py
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Literal, Optional, Dict, Any, Union
 
 # A) Explore（定位/阅读/扩展）
 class ExploreAction(BaseModel):
     type: Literal["explore"] = "explore"
     op: Literal["find", "read", "expand"] = "find"
-    anchors: List[str] = []
-    nodes: List[str] = []
+    anchors: List[Dict[str, Any]] = Field(default_factory=list)
+    nodes: List[str] = Field(default_factory=list)
     hop: int = 1
     limit: int = 50
 
 # B) Memory（记忆维护，外部只给策略信号）
 class MemoryAction(BaseModel):
     type: Literal["memory"] = "memory"
+    ops: List[Dict[str, Any]] = Field(default_factory=list)
     budget: int = 30
     diversify_by_dir: int = 3
 
@@ -23,6 +24,8 @@ class RepairAction(BaseModel):
     apply: bool
     issue: Dict[str, Any]
     plan: Optional[str] = None  # 仅 apply=True 时需要，用于 Collater→CGM
+    plan_targets: List[Dict[str, Any]] = Field(default_factory=list)
+    patch: Optional[Dict[str, Any]] = None
 
 # D) Submit（终局评测）
 class SubmitAction(BaseModel):

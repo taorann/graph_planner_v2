@@ -3,7 +3,7 @@
 """
 Step 5.1 决策接口 & 规则基线
 --------------------------------
-产出一个可直接被 orchestrator.loop 调用的策略函数 decide(state, cfg)：
+产出一个可直接被 `PlannerAgent`（由 `scripts/run_rule_agent.py` 启动）调用的策略函数 `decide(state, cfg)`：
 - 输入：state（ObservationPack + 运行态片段），cfg（来自 infra/config 的字典或对象）
 - 输出：Decision（should_expand, anchors, terms, hop, next_tool, priority_tests, why）
 
