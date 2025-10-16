@@ -1,13 +1,11 @@
-"""RLLM integration helpers."""
+"""RLLM integration helpers with lazy imports to avoid circular dependencies."""
+
+from __future__ import annotations
+
+from importlib import import_module
+from typing import Any
 
 from .agent import GraphPlannerRLLMAgent
-from .env import GraphPlannerRLLMEnv
-from .dataset import (
-    GRAPH_PLANNER_DATASET_NAME,
-    load_task_entries,
-    register_dataset_from_file,
-    ensure_dataset_registered,
-)
 
 __all__ = [
     "GraphPlannerRLLMAgent",
@@ -17,3 +15,18 @@ __all__ = [
     "register_dataset_from_file",
     "ensure_dataset_registered",
 ]
+
+
+def __getattr__(name: str) -> Any:  # pragma: no cover - trivial dispatcher
+    if name == "GraphPlannerRLLMEnv":
+        module = import_module("integrations.rllm.env")
+        return module.GraphPlannerRLLMEnv
+    if name in {
+        "GRAPH_PLANNER_DATASET_NAME",
+        "load_task_entries",
+        "register_dataset_from_file",
+        "ensure_dataset_registered",
+    }:
+        module = import_module("integrations.rllm.dataset")
+        return getattr(module, name)
+    raise AttributeError(name)

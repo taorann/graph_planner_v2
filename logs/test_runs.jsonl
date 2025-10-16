@@ -1,0 +1,2 @@
+{"kind": "test_run", "backend": "fake", "command": "python -m pytest -q", "selector": [], "duration_sec": 0.0, "result": {"mode": "pytest", "rc": 0, "passed": true}, "stdout": "FakeSandbox pytest output", "ts": 1760619910.223351}
+{"kind": "test_run", "backend": "fake", "command": "python -m pytest -q", "selector": [], "duration_sec": 0.0, "result": {"mode": "pytest", "rc": 0, "passed": true}, "stdout": "FakeSandbox pytest output", "ts": 1760619910.2242258}
