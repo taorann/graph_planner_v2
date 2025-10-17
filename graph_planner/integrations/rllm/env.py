@@ -1,4 +1,4 @@
-"""rLLM-compatible environment wrapper around :mod:`env.planner_env`."""
+"""rLLM-compatible environment wrapper around :mod:`graph_planner.env.planner_env`."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ except ImportError as _exc:  # pragma: no cover - optional dependency
 else:
     _ENV_IMPORT_ERROR = None
 
-from env.planner_env import PlannerEnv
-from runtime.sandbox import SandboxConfig
+from ...env.planner_env import PlannerEnv
+from ...runtime.sandbox import SandboxConfig
 
 
 if BaseEnv is None:

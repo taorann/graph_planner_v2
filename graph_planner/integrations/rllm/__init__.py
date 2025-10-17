@@ -19,7 +19,7 @@ __all__ = [
 
 def __getattr__(name: str) -> Any:  # pragma: no cover - trivial dispatcher
     if name == "GraphPlannerRLLMEnv":
-        module = import_module("integrations.rllm.env")
+        module = import_module("graph_planner.integrations.rllm.env")
         return module.GraphPlannerRLLMEnv
     if name in {
         "GRAPH_PLANNER_DATASET_NAME",
@@ -27,6 +27,6 @@ def __getattr__(name: str) -> Any:  # pragma: no cover - trivial dispatcher
         "register_dataset_from_file",
         "ensure_dataset_registered",
     }:
-        module = import_module("integrations.rllm.dataset")
+        module = import_module("graph_planner.integrations.rllm.dataset")
         return getattr(module, name)
     raise AttributeError(name)

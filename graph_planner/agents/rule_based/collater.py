@@ -24,8 +24,8 @@ from dataclasses import dataclass
 from collections import defaultdict
 
 from aci.schema import CollateMeta
-from memory.types import DocChunk
-from memory import subgraph_store
+from ...memory.types import DocChunk
+from ...memory import subgraph_store
 
 
 # ---------------- utils ----------------

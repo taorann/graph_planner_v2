@@ -15,12 +15,12 @@ Graph Planner 致力于复现 CGM + Planner 的双智能体代码修复流程：
 
 以下能力已经在仓库中实现并通过示例脚本串联：
 
-1. **rLLM Agent 封装**（`integrations/rllm/agent.py`）
+1. **rLLM Agent 封装**（`graph_planner/integrations/rllm/agent.py`）
    - `GraphPlannerRLLMAgent` 将环境观测整理成统一的系统提示，解析模型 JSON 输出，并在解析失败时回退到规则策略。
    - 统一使用 `agents.common.chat` 中的协议，将 Planner 模型与本地 CLI 保持一致。
 
-2. **rLLM Env 封装**（`integrations/rllm/env.py`）
-   - `GraphPlannerRLLMEnv` 将 `env/planner_env.PlannerEnv` 暴露给 rLLM，封装奖励、终止条件与 RepoEnv / Sandbox 初始化逻辑。
+2. **rLLM Env 封装**（`graph_planner/integrations/rllm/env.py`）
+   - `GraphPlannerRLLMEnv` 将 `graph_planner.env.planner_env.PlannerEnv` 暴露给 rLLM，封装奖励、终止条件与 RepoEnv / Sandbox 初始化逻辑。
    - 集成 `ensure_dataset_registered`，可把 JSON/JSONL 数据集写入 rLLM 的 Verl 目录。
 
 3. **训练脚本**（`scripts/train_graphplanner_rllm.py`）
@@ -28,11 +28,11 @@ Graph Planner 致力于复现 CGM + Planner 的双智能体代码修复流程：
    - 支持 `--model-path` 传入基线 checkpoint，`--use-fallback` 控制是否启用规则回退。
    - 默认通过 Ray 启动训练任务，可选择连接现有 Ray 集群。
 
-4. **本地 LLM Planner 运行链路**（`agents/model_based/planner.py` + `scripts/run_rule_agent.py`）
+4. **本地 LLM Planner 运行链路**（`graph_planner/agents/model_based/planner.py` + `scripts/run_rule_agent.py`）
    - `LocalLLMPlannerAgent` 使用 OpenAI 兼容的本地部署接口，接入 Planner 模型并与 CGM 协同。
    - CLI 支持 `--agent llm` 在有模型配置的情况下切换到本地 LLM，便于训练前做端到端冒烟测试。
 
-5. **规则策略与修复日志**（`agents/rule_based`、`tests/test_rule_agent_pipeline.py`）
+5. **规则策略与修复日志**（`graph_planner/agents/rule_based`、`tests/test_rule_agent_pipeline.py`）
    - 规则策略完整覆盖探索、记忆、检索、补丁生成流程，同时记录 `repair_trace`，确保在模型缺席时仍能验证流程正确性。
    - 日志默认写入 `logs/test_runs.jsonl`，内容包含读写片段、执行命令以及修复后的文件快照。
 

@@ -13,9 +13,9 @@ from typing import Any, Dict, List, Optional
 import os
 
 from aci.schema import Patch, PatchEdit, Plan, PlanTarget
-from infra import telemetry
-from infra.config import load as load_config
-from integrations.codefuse_cgm import CodeFuseCGMClient
+from ...infra import telemetry
+from ...infra.config import load as load_config
+from ...integrations.codefuse_cgm import CodeFuseCGMClient
 
 _MARKER = "CGM-LOCAL"
 

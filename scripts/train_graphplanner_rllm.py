@@ -9,7 +9,7 @@ from pathlib import Path
 import ray
 from omegaconf import OmegaConf
 
-from integrations.rllm import (
+from graph_planner.integrations.rllm import (
     GRAPH_PLANNER_DATASET_NAME,
     GraphPlannerRLLMAgent,
     GraphPlannerRLLMEnv,

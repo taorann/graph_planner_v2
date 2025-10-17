@@ -38,7 +38,7 @@ def _make_snippet() -> Dict[str, object]:
 
 
 def test_generate_local_fallback(monkeypatch):
-    module = importlib.import_module("agents.rule_based.cgm_adapter")
+    module = importlib.import_module("graph_planner.agents.rule_based.cgm_adapter")
     module._CLIENT_CACHE = None
     module._CLIENT_FINGERPRINT = None
 
@@ -60,10 +60,10 @@ def test_generate_remote_invocation(monkeypatch):
     monkeypatch.setenv("CGM_ENDPOINT", "http://example.com/cgm")
     monkeypatch.setenv("CGM_MODEL", "codefuse-cgm")
 
-    module = importlib.import_module("agents.rule_based.cgm_adapter")
+    module = importlib.import_module("graph_planner.agents.rule_based.cgm_adapter")
     importlib.reload(module)
 
-    from integrations import codefuse_cgm as cgm_pkg
+    from graph_planner.integrations import codefuse_cgm as cgm_pkg
 
     captured = {}
 

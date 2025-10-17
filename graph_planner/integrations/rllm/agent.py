@@ -17,7 +17,7 @@ except ImportError as _exc:  # pragma: no cover - optional dependency
 else:
     _AGENT_IMPORT_ERROR = None
 
-from agents.common.chat import (
+from ...agents.common.chat import (
     FALLBACK_REASON_KEY,
     SYSTEM_PROMPT,
     action_from_payload,
@@ -25,8 +25,8 @@ from agents.common.chat import (
     extract_json_payload,
     summarise_observation,
 )
-from agents.rule_based.planner import PlannerAgent as RuleFallbackAgent
-from core.actions import ActionUnion, SubmitAction
+from ...agents.rule_based.planner import PlannerAgent as RuleFallbackAgent
+from ...core.actions import ActionUnion, SubmitAction
 
 
 if BaseAgent is None:
