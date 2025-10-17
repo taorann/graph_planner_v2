@@ -9,8 +9,11 @@
 - `reset` 会连接代码图、加载子图、探测容器工作目录并返回统一的观测字典；`close` 在回合结束时持久化子图并释放底层 sandbox。【F:env/planner_env.py†L47-L105】
 
 ## SandboxRuntime 与容器后端
-- `SandboxRuntime` 支持 `repoenv`、`r2e` 与原生 `docker` 三种后端，并在 `apply_patch`、`lint`、`test` 等接口下屏蔽差异；`backend=repoenv` 时会读取 R2E `ds` 描述并通过 RepoEnv 的 `DockerRuntime` 管理容器生命周期。【F:runtime/sandbox.py†L31-L143】【F:runtime/sandbox.py†L69-L143】
-- 在纯 Docker 模式下，运行时会使用 `docker-py` 启动交互式容器、处理宿主挂载并注入 git safe.directory，保证规则代理与本地调试共享同一套执行接口。【F:runtime/sandbox.py†L145-L189】
+- `SandboxRuntime` 会根据 `SandboxConfig.backend` 在三种容器后端之间切换，并通过统一的 `run`、`apply_patch`、`test` 等接口向上屏蔽差异。【F:runtime/sandbox.py†L37-L68】
+- **RepoEnv**：读取 `sandbox.r2e_ds_json` 指向的 R2E 数据集描述，实例化 `RepoEnv` 及其自带的 `DockerRuntime`，并在容器内自动安装 `pytest`、配置 `git safe.directory` 与基础工具，主要用于复现官方评测镜像。【F:runtime/sandbox.py†L69-L129】
+- **R2E DockerRuntime**：直接使用 R2E 的 `DockerRuntime` 管理容器，但跳过 `RepoEnv` 的任务编排，适用于训练阶段需要灵活同步宿主挂载或自定义工作目录的场景。【F:runtime/sandbox.py†L131-L162】
+- **原生 docker-py**：完全依赖本地 Docker daemon，通过 `docker.from_env()` 拉起交互式容器、挂载宿主目录并执行 `git apply`/`pytest` 等命令，适合无 R2E 数据集时的快速调试。【F:runtime/sandbox.py†L164-L216】
+- 三种模式都会在测试后调用 `_finalize_test_result` 写入遥测日志，因此 `logs/test_runs.jsonl` 可统一回放补丁执行轨迹。【F:runtime/sandbox.py†L218-L264】
 
 ## Rule pipeline 测试桩
 - `tests/test_rule_agent_pipeline.py` 通过 `FakeSandbox` 模拟容器命令、片段读取、补丁写入与测试执行，覆盖规则代理在无 Docker 环境下的端到端决策流程，并记录读取/编辑/命令轨迹。【F:tests/test_rule_agent_pipeline.py†L13-L145】
