@@ -16,6 +16,12 @@ CLI / Tests
 ```
 - 启动脚本 `run_rule_agent.py` 负责解析配置、创建 `PlannerEnv` 并循环调用代理生成动作，是规则/本地 LLM 共用的端到端入口。【F:scripts/run_rule_agent.py†L1-L136】
 - `PlannerEnv` 将 Explore/Memory/Repair/Submit 动作转换为容器调用，维护奖励、步数与最新观测，供两类代理复用。【F:graph_planner/env/planner_env.py†L32-L173】
+- `core/actions.py` 定义的四类动作模型是所有代理与训练封装共享的协议层：
+  - `ExploreAction` 描述锚点检索、节点阅读与子图扩展，支持 `find/read/expand` 三种操作，细化 `anchors`、`nodes`、`hop` 等参数以驱动 RepoEnv 图检索。【F:graph_planner/core/actions.py†L6-L20】
+  - `MemoryAction` 封装子图维护所需的操作序列与预算约束，使代理可以在同一数据结构上统一执行增删改操作。【F:graph_planner/core/actions.py†L22-L29】
+  - `RepairAction` 统一了“是否执行补丁”“选用的计划文本”以及 CGM 输入所需的 target 元信息，是规则策略、本地 LLM 和 rLLM 训练在打补丁阶段共享的契约。【F:graph_planner/core/actions.py†L31-L38】
+  - `SubmitAction` 标记终局提交，触发环境的评测/收尾逻辑，确保动作流与奖励计算闭合。【F:graph_planner/core/actions.py†L40-L42】
+  这些数据模型在规则代理、本地 LLM 代理与 `GraphPlannerRLLMAgent` 之间复用，因此虽然 `agent/planner_agent.py` 已淘汰，但 `core/actions.py` 仍是现有链路的通用消息格式。
 - `SandboxRuntime` 在 RepoEnv、原生 R2E runtime 与 docker-py 之间切换，统一暴露 `run/apply_patch/test` 等接口以屏蔽后端差异。【F:graph_planner/runtime/sandbox.py†L30-L220】
 
 ## 2. 代理实现与补丁管线
