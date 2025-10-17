@@ -4,9 +4,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
-from core.actions import ExploreAction, MemoryAction, RepairAction, SubmitAction
-from infra.config import Config, load as load_config
-from memory import anchor_planner, subgraph_store
+from ...core.actions import ExploreAction, MemoryAction, RepairAction, SubmitAction
+from ...infra.config import Config, load as load_config
+from ...memory import anchor_planner, subgraph_store
 from aci.schema import Plan, PlanTarget
 from . import cgm_adapter
 

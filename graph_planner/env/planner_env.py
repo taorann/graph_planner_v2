@@ -5,21 +5,21 @@ import base64
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
-from core.actions import (
+from ..core.actions import (
     ActionUnion,
     ExploreAction,
     MemoryAction,
     RepairAction,
     SubmitAction,
 )
-from infra.config import Config, load as load_config
-from memory.memory_bank import ApplyPolicy, MemoryBank, apply_ops as apply_memory_ops
-from memory import graph_adapter, mem_candidates, mem_ops_head, subgraph_store
-from memory.subgraph_store import WorkingSubgraph
-from runtime.sandbox import SandboxConfig, SandboxRuntime
+from ..infra.config import Config, load as load_config
+from ..memory.memory_bank import ApplyPolicy, MemoryBank, apply_ops as apply_memory_ops
+from ..memory import graph_adapter, mem_candidates, mem_ops_head, subgraph_store
+from ..memory.subgraph_store import WorkingSubgraph
+from ..runtime.sandbox import SandboxConfig, SandboxRuntime
 from aci.schema import Plan, PlanTarget
-from orchestrator.guard import GuardError, enforce_patch_guard
-from agents.rule_based.test_prioritizer import prioritize_tests
+from ..orchestrator.guard import GuardError, enforce_patch_guard
+from ..agents.rule_based.test_prioritizer import prioritize_tests
 
 
 def _safe_int(value: Any, default: int = 0) -> int:

@@ -10,15 +10,15 @@
 2. 确保已经安装项目所需依赖：
    - Python 3.10+ 与 `pip`；
    - 可选的 Docker 守护进程（运行真实容器时使用）；
-   - 若需调用本地 LLM 或 CGM，请在 `.aci/config.json` 或环境变量中配置 `planner_model`、`cgm` 段的 endpoint、model、API Key 等信息。【F:infra/config.py†L49-L176】
+- 若需调用本地 LLM 或 CGM，请在 `.aci/config.json` 或环境变量中配置 `planner_model`、`cgm` 段的 endpoint、model、API Key 等信息。【F:graph_planner/infra/config.py†L24-L176】
 
 ## 2. 快速自检
 在提交之前推荐执行以下最小检查：
 
 ```bash
-python -m compileall agents integrations env infra scripts
+python -m compileall graph_planner scripts
 ```
-- 该命令覆盖代理、运行时、配置与脚本目录，可在缺少可选依赖（如 rLLM、pydantic）时继续工作。【F:scripts/run_rule_agent.py†L1-L136】【F:integrations/rllm/agent.py†L1-L159】
+- 该命令覆盖代理、运行时、配置与脚本目录，可在缺少可选依赖（如 rLLM、pydantic）时继续工作。【F:scripts/run_rule_agent.py†L1-L136】【F:graph_planner/integrations/rllm/agent.py†L1-L158】
 
 如需验证规则流程，可以运行 FakeSandbox 驱动的端到端测试：
 
@@ -36,7 +36,7 @@ python scripts/run_rule_agent.py --backend repoenv --ds-json <path/to/ds.json> -
 - `--agent llm` 可以切换到本地模型决策；脚本会打印奖励、测试结果以及最终补丁 diff。【F:scripts/run_rule_agent.py†L54-L133】
 
 ## 3. 生成遥测报告（可选）
-- 任何一次成功的 `SandboxRuntime.test` / FakeSandbox `test()` 调用都会通过 `telemetry.log_test_result` 记录 JSONL，默认写入 `logs/test_runs.jsonl`；必要时请将该文件附在变更说明中，帮助审阅者复现补丁细节。【F:runtime/sandbox.py†L191-L260】【F:infra/telemetry.py†L31-L39】
+- 任何一次成功的 `SandboxRuntime.test` / FakeSandbox `test()` 调用都会通过 `telemetry.log_test_result` 记录 JSONL，默认写入 `logs/test_runs.jsonl`；必要时请将该文件附在变更说明中，帮助审阅者复现补丁细节。【F:graph_planner/runtime/sandbox.py†L191-L264】【F:graph_planner/infra/telemetry.py†L20-L39】
 
 ## 4. Git 提交流程
 1. 查看工作区状态：

@@ -3,11 +3,11 @@ import json
 import os
 from pathlib import Path
 
-from core.actions import ExploreAction, MemoryAction, RepairAction, SubmitAction
-from env.planner_env import PlannerEnv
-from infra import telemetry
-from infra.config import load as load_config
-from runtime.sandbox import SandboxConfig
+from graph_planner.core.actions import ExploreAction, MemoryAction, RepairAction, SubmitAction
+from graph_planner.env.planner_env import PlannerEnv
+from graph_planner.infra import telemetry
+from graph_planner.infra.config import load as load_config
+from graph_planner.runtime.sandbox import SandboxConfig
 
 
 class FakeSandbox:
@@ -162,14 +162,14 @@ def test_rule_agent_pipeline_happy_path(monkeypatch):
         test_log.unlink()
 
     # Patch sandbox runtime and graph/memory helpers to deterministic stubs
-    monkeypatch.setattr("env.planner_env.SandboxRuntime", FakeSandbox)
-    monkeypatch.setattr("env.planner_env.graph_adapter.connect", lambda: None)
-    monkeypatch.setattr("env.planner_env.subgraph_store.save", lambda *args, **kwargs: None)
+    monkeypatch.setattr("graph_planner.env.planner_env.SandboxRuntime", FakeSandbox)
+    monkeypatch.setattr("graph_planner.env.planner_env.graph_adapter.connect", lambda: None)
+    monkeypatch.setattr("graph_planner.env.planner_env.subgraph_store.save", lambda *args, **kwargs: None)
 
     def fake_load(issue_id):
         raise FileNotFoundError(issue_id)
 
-    monkeypatch.setattr("env.planner_env.subgraph_store.load", fake_load)
+    monkeypatch.setattr("graph_planner.env.planner_env.subgraph_store.load", fake_load)
 
     candidate = {
         "id": "node-1",
@@ -179,7 +179,7 @@ def test_rule_agent_pipeline_happy_path(monkeypatch):
         "kind": "function",
     }
     monkeypatch.setattr(
-        "env.planner_env.mem_candidates.build_mem_candidates",
+        "graph_planner.env.planner_env.mem_candidates.build_mem_candidates",
         lambda *args, **kwargs: [candidate],
     )
 
@@ -195,7 +195,7 @@ def test_rule_agent_pipeline_happy_path(monkeypatch):
                 subgraph.add_nodes([node])
         return {"applied": True, "ops": ops}
 
-    monkeypatch.setattr("env.planner_env.apply_memory_ops", fake_apply_ops)
+    monkeypatch.setattr("graph_planner.env.planner_env.apply_memory_ops", fake_apply_ops)
 
     cfg = SandboxConfig(
         docker_image="local/test", workdir="/repo", mounts={}, env={}, backend="docker"

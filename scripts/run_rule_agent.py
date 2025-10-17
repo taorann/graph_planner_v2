@@ -6,9 +6,9 @@ import json
 import os
 from typing import Dict, Tuple
 
-from agents import LocalLLMPlannerAgent, PlannerAgent
-from core.actions import ActionUnion
-from env.planner_env import PlannerEnv
+from graph_planner.agents import LocalLLMPlannerAgent, PlannerAgent
+from graph_planner.core.actions import ActionUnion
+from graph_planner.env.planner_env import PlannerEnv
 
 ACTION_TYPES = tuple(ActionUnion.__args__)  # type: ignore[attr-defined]
 

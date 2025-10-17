@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional
 
 from aci.schema import Plan, PlanTarget
-from agents.common.chat import (
+from ..common.chat import (
     FALLBACK_REASON_KEY,
     SYSTEM_PROMPT,
     action_from_payload,
@@ -15,12 +15,12 @@ from agents.common.chat import (
     extract_json_payload,
     summarise_observation,
 )
-from agents.rule_based import cgm_adapter
-from agents.rule_based.planner import PlannerAgent as RulePlannerAgent
-from core.actions import RepairAction, SubmitAction
-from infra.config import Config, load as load_config
-from integrations.local_llm import LocalLLMClient, LocalLLMError
-from memory import subgraph_store
+from ..rule_based import cgm_adapter
+from ..rule_based.planner import PlannerAgent as RulePlannerAgent
+from ...core.actions import RepairAction, SubmitAction
+from ...infra.config import Config, load as load_config
+from ...integrations.local_llm import LocalLLMClient, LocalLLMError
+from ...memory import subgraph_store
 
 
 @dataclass

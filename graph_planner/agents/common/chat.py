@@ -6,7 +6,7 @@ import json
 import re
 from typing import Any, Dict, List, Tuple
 
-from core.actions import (
+from ...core.actions import (
     ActionUnion,
     ExploreAction,
     MemoryAction,
