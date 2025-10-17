@@ -6,7 +6,7 @@ from typing import Optional, Dict, List, Tuple, Any
 import docker
 
 # 遥测
-from infra import telemetry as telemetry_mod
+from ..infra import telemetry as telemetry_mod
 
 # R2E 组件（可选）
 try:

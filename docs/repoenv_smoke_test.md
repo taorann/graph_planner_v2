@@ -11,7 +11,7 @@
   ```
   R2E-Gym 会携带 `pydantic` 等 PlannerEnv 所需依赖，避免运行期缺包报错。
 - 确保主机可以访问 Docker 守护进程，例如通过 `sudo systemctl start docker` 启动本地 daemon，或配置远程 socket。
-- 如需接入本地部署的 Planner LLM 或 CGM，可在 `.aci/config.json` 或环境变量中设置 `planner_model`、`cgm` 段的 endpoint、model、API key 等参数，对应字段在 `infra/config.py` 中有默认值说明。
+- 如需接入本地部署的 Planner LLM 或 CGM，可在 `.aci/config.json` 或环境变量中设置 `planner_model`、`cgm` 段的 endpoint、model、API key 等参数，对应字段在 `graph_planner/infra/config.py` 中有默认值说明。【F:graph_planner/infra/config.py†L24-L176】
 
 ## 数据集与容器镜像
 - 数据条目：`datasets/graphplanner_repoenv_sample.jsonl`
