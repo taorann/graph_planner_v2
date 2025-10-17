@@ -58,6 +58,20 @@ class CGMCfg:
 
 
 @dataclass
+class PlannerModelCfg:
+    enabled: bool = False
+    endpoint: Optional[str] = None          # OpenAI-compatible chat endpoint
+    api_key_env: str = "PLANNER_MODEL_API_KEY"
+    model: str = "qwen2.5-coder-7b-instruct"
+    temperature: float = 0.2
+    max_tokens: int = 1024
+    top_p: float = 0.95
+    timeout_s: int = 60
+    system_prompt: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class Config:
     # ---- 核心运行模式 ----
     mode: str = "wsd"               # "wsd" | "full"
@@ -79,6 +93,7 @@ class Config:
     telemetry: TelemetryCfg = field(default_factory=TelemetryCfg)
     collate: CollateCfg = field(default_factory=CollateCfg)
     cgm: CGMCfg = field(default_factory=CGMCfg)
+    planner_model: PlannerModelCfg = field(default_factory=PlannerModelCfg)
 
     # ---- 其他开关 ----
     memlog: Dict[str, Any] = field(default_factory=lambda: {"enabled": True})
@@ -138,6 +153,26 @@ def _apply_env_overrides(raw: Dict[str, Any]) -> Dict[str, Any]:
         raw.setdefault("cgm", {})["timeout_s"] = int(os.environ["CGM_TIMEOUT_S"])
     if "CGM_API_KEY_ENV" in os.environ:
         raw.setdefault("cgm", {})["api_key_env"] = os.environ["CGM_API_KEY_ENV"]
+
+    # PLANNER MODEL
+    if "PLANNER_MODEL_ENABLED" in os.environ:
+        raw.setdefault("planner_model", {})["enabled"] = os.environ["PLANNER_MODEL_ENABLED"].lower() in ("1", "true", "yes")
+    if "PLANNER_MODEL_ENDPOINT" in os.environ:
+        raw.setdefault("planner_model", {})["endpoint"] = os.environ["PLANNER_MODEL_ENDPOINT"]
+    if "PLANNER_MODEL_MODEL" in os.environ:
+        raw.setdefault("planner_model", {})["model"] = os.environ["PLANNER_MODEL_MODEL"]
+    if "PLANNER_MODEL_API_KEY_ENV" in os.environ:
+        raw.setdefault("planner_model", {})["api_key_env"] = os.environ["PLANNER_MODEL_API_KEY_ENV"]
+    if "PLANNER_MODEL_TEMPERATURE" in os.environ:
+        raw.setdefault("planner_model", {})["temperature"] = float(os.environ["PLANNER_MODEL_TEMPERATURE"])
+    if "PLANNER_MODEL_TOP_P" in os.environ:
+        raw.setdefault("planner_model", {})["top_p"] = float(os.environ["PLANNER_MODEL_TOP_P"])
+    if "PLANNER_MODEL_MAX_TOKENS" in os.environ:
+        raw.setdefault("planner_model", {})["max_tokens"] = int(os.environ["PLANNER_MODEL_MAX_TOKENS"])
+    if "PLANNER_MODEL_TIMEOUT_S" in os.environ:
+        raw.setdefault("planner_model", {})["timeout_s"] = int(os.environ["PLANNER_MODEL_TIMEOUT_S"])
+    if "PLANNER_MODEL_SYSTEM_PROMPT" in os.environ:
+        raw.setdefault("planner_model", {})["system_prompt"] = os.environ["PLANNER_MODEL_SYSTEM_PROMPT"]
 
     # GLOBAL
     if "MODE" in os.environ:
