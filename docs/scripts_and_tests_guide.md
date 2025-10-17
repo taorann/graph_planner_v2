@@ -34,6 +34,7 @@
 - **与 R2E 的关系**：
   - RepoEnv / Docker 运行时通过 `runtime/sandbox.repoenv`、`runtime/sandbox.docker_runtime` 对接 R2E-Gym，利用其任务定义和容器封装。
   - 除沙箱后端外，ACI、Git、Lint、Test 逻辑均是仓库自研模块，不依赖 R2E 提供的实现。
+  - R2E-Gym 专注于“任务数据集 + 环境调度”两类能力，本身并不提供通用的代码编辑 CLI、Git 自动化或 lint/test 驱动器；这些基础设施在本仓库已有成熟实现，也方便离线或无容器环境下工作，因此继续保留自研方案，减少对额外依赖的耦合。
 
 ## 推荐使用流程
 
