@@ -38,6 +38,7 @@
 - **ACI 工具链（`aci/`）**：
   - `aci/tools.py` 提供查看、搜索、编辑、lint、测试等 CLI 操作的统一封装。优先调用项目内实现，缺省回退到宿主机已有的工具。
   - `aci/git_tools.py` 封装分支、提交、回滚、diff 等 Git 操作，统一返回 `AciResp` 结构，方便在 CLI 与 API 中复用。
+  - `aci/guard.py` 则负责补丁护栏与决策清洗逻辑，被 `PlannerEnv` 与外部代理共同调用，以保持编辑窗口、预算等策略约束一致。
 
 - **Git 操作**：仓库未依赖 R2E 提供的 Git 管理，所有交互均通过 `aci/git_tools.py` 调用系统 `git`。
 

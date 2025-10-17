@@ -18,7 +18,7 @@ from ..memory import graph_adapter, mem_candidates, mem_ops_head, subgraph_store
 from ..memory.subgraph_store import WorkingSubgraph
 from ..runtime.sandbox import SandboxConfig, SandboxRuntime
 from aci.schema import Plan, PlanTarget
-from ..orchestrator.guard import GuardError, enforce_patch_guard
+from aci.guard import GuardError, enforce_patch_guard
 from ..agents.rule_based.test_prioritizer import prioritize_tests
 
 
