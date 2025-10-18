@@ -81,6 +81,20 @@ CLI / Scripts / Tests
 3. **Planner 聊天链路**：同一测试文件在 `test_toy_checkpoint_integrates_with_planner_chat` 中使用 `HuggingFaceChatClient` 加载 toy checkpoint，通过 tokenizer 的 `chat_template` 将 system/user 消息格式化，并经 MLP 生成响应，证明 Planner LLM 代理的本地推理路径可用。【F:graph_planner/integrations/local_llm/hf.py†L32-L118】【F:graph_planner/models/toy_lm.py†L160-L218】【F:tests/test_toy_mlp.py†L35-L48】
 4. **梯度反向传播**：`test_toy_model_supports_backward_updates` 直接实例化 `ToyLMForCausalLM`，构造随机张量进行前向、计算交叉熵损失并触发 `SGD.step()`，确认模型权重随梯度更新，从而支撑 rLLM 训练链路的单步前/反向流程。【F:graph_planner/models/toy_lm.py†L108-L158】【F:tests/test_toy_mlp.py†L50-L66】
 
+### 3.2 GRPO 测试调用流程（文件 | 函数 | 作用）
+
+| 文件 | 函数 | 作用 |
+| --- | --- | --- |
+| `tests/test_rllm_integration.py` | `pytest → test_grpo_step_updates_toy_model` | 运行 `pytest tests/test_rllm_integration.py -k grpo` 时收集并执行该测试函数，串联整个 GRPO 调用链。 【F:tests/test_rllm_integration.py†L182-L278】 |
+| `graph_planner/models/toy_lm.py` | `create_toy_checkpoint → ToyTokenizer.save_pretrained → ToyLMConfig.save_pretrained → ToyLMForCausalLM.save_pretrained` | 构建字符级分词器、ToyLM 配置与权重并写入磁盘，为后续 `AutoTokenizer`/`AutoModelForCausalLM` 加载做准备。 【F:graph_planner/models/toy_lm.py†L190-L219】 |
+| `tests/test_rllm_integration.py` | `AutoTokenizer.from_pretrained → AutoModelForCausalLM.from_pretrained` | 通过 `auto_map` 加载本地 ToyTokenizer/ToyLM，实现与 Hugging Face API 兼容的模型初始化。 【F:tests/test_rllm_integration.py†L183-L186】 |
+| `tests/test_rllm_integration.py` | `_ToyRewardEnv.score` | 依据响应文本是否包含成功标记生成离散奖励，用于后续的 token-level 奖励张量。 【F:tests/test_rllm_integration.py†L172-L179】【F:tests/test_rllm_integration.py†L191-L202】 |
+| `tests/test_rllm_integration.py` | `ToyTokenizer.__call__ → torch.tensor` 构造 | 将提示与响应编码为 token 序列、拼接成完整输入，并生成 attention mask、旧/新 log-prob。 【F:tests/test_rllm_integration.py†L191-L237】 |
+| `graph_planner/models/toy_lm.py` | `ToyLMForCausalLM.forward` | 对编码后的序列执行前向传播，输出 logits 以便计算策略对数概率。 【F:graph_planner/models/toy_lm.py†L108-L150】【F:tests/test_rllm_integration.py†L222-L224】 |
+| `verl/trainer/ppo/core_algos.py` (vendored) | `compute_grpo_outcome_advantage` | 根据 token-level 奖励、响应掩码与样本索引计算优势张量。 【F:tests/test_rllm_integration.py†L252-L260】 |
+| `verl/trainer/ppo/core_algos.py` (vendored) | `compute_policy_loss` | 使用旧/新 log-prob 与优势估计求出策略损失，为梯度回传做准备。 【F:tests/test_rllm_integration.py†L265-L271】 |
+| `tests/test_rllm_integration.py` | `torch.optim.AdamW.zero_grad → policy_loss.backward → optimizer.step` | 对 ToyLM 计算梯度并执行一次参数更新，验证 GRPO 训练链路能实际改变模型权重。 【F:tests/test_rllm_integration.py†L262-L276】 |
+
 ## 4. 训练与运行 Pipeline
 
 ### 4.1 规则 / 本地推理（离线调试）
