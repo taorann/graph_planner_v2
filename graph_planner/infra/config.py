@@ -53,8 +53,13 @@ class CGMCfg:
     api_key_env: str = "CGM_API_KEY"     # 从这个环境变量里取 key
     model: str = "cgm-default"
     temperature: float = 0.2
+    top_p: float = 0.9
     max_tokens: int = 2048
     timeout_s: int = 60
+    model_path: Optional[str] = None      # 本地模型权重路径（Hugging Face 兼容）
+    tokenizer_path: Optional[str] = None  # 如未指定则复用 model_path
+    max_input_tokens: int = 8192
+    device: Optional[str] = None
 
 
 @dataclass
@@ -69,6 +74,10 @@ class PlannerModelCfg:
     timeout_s: int = 60
     system_prompt: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    model_path: Optional[str] = None          # 本地推理：HF checkpoint
+    tokenizer_path: Optional[str] = None
+    max_input_tokens: int = 4096
+    device: Optional[str] = None
 
 
 @dataclass
@@ -147,12 +156,22 @@ def _apply_env_overrides(raw: Dict[str, Any]) -> Dict[str, Any]:
         raw.setdefault("cgm", {})["model"] = os.environ["CGM_MODEL"]
     if "CGM_TEMPERATURE" in os.environ:
         raw.setdefault("cgm", {})["temperature"] = float(os.environ["CGM_TEMPERATURE"])
+    if "CGM_TOP_P" in os.environ:
+        raw.setdefault("cgm", {})["top_p"] = float(os.environ["CGM_TOP_P"])
     if "CGM_MAX_TOKENS" in os.environ:
         raw.setdefault("cgm", {})["max_tokens"] = int(os.environ["CGM_MAX_TOKENS"])
     if "CGM_TIMEOUT_S" in os.environ:
         raw.setdefault("cgm", {})["timeout_s"] = int(os.environ["CGM_TIMEOUT_S"])
     if "CGM_API_KEY_ENV" in os.environ:
         raw.setdefault("cgm", {})["api_key_env"] = os.environ["CGM_API_KEY_ENV"]
+    if "CGM_MODEL_PATH" in os.environ:
+        raw.setdefault("cgm", {})["model_path"] = os.environ["CGM_MODEL_PATH"]
+    if "CGM_TOKENIZER_PATH" in os.environ:
+        raw.setdefault("cgm", {})["tokenizer_path"] = os.environ["CGM_TOKENIZER_PATH"]
+    if "CGM_MAX_INPUT_TOKENS" in os.environ:
+        raw.setdefault("cgm", {})["max_input_tokens"] = int(os.environ["CGM_MAX_INPUT_TOKENS"])
+    if "CGM_DEVICE" in os.environ:
+        raw.setdefault("cgm", {})["device"] = os.environ["CGM_DEVICE"]
 
     # PLANNER MODEL
     if "PLANNER_MODEL_ENABLED" in os.environ:
@@ -173,6 +192,14 @@ def _apply_env_overrides(raw: Dict[str, Any]) -> Dict[str, Any]:
         raw.setdefault("planner_model", {})["timeout_s"] = int(os.environ["PLANNER_MODEL_TIMEOUT_S"])
     if "PLANNER_MODEL_SYSTEM_PROMPT" in os.environ:
         raw.setdefault("planner_model", {})["system_prompt"] = os.environ["PLANNER_MODEL_SYSTEM_PROMPT"]
+    if "PLANNER_MODEL_PATH" in os.environ:
+        raw.setdefault("planner_model", {})["model_path"] = os.environ["PLANNER_MODEL_PATH"]
+    if "PLANNER_MODEL_TOKENIZER_PATH" in os.environ:
+        raw.setdefault("planner_model", {})["tokenizer_path"] = os.environ["PLANNER_MODEL_TOKENIZER_PATH"]
+    if "PLANNER_MODEL_MAX_INPUT_TOKENS" in os.environ:
+        raw.setdefault("planner_model", {})["max_input_tokens"] = int(os.environ["PLANNER_MODEL_MAX_INPUT_TOKENS"])
+    if "PLANNER_MODEL_DEVICE" in os.environ:
+        raw.setdefault("planner_model", {})["device"] = os.environ["PLANNER_MODEL_DEVICE"]
 
     # GLOBAL
     if "MODE" in os.environ:
@@ -242,6 +269,7 @@ def _dict_to_config(d: Dict[str, Any]) -> Config:
     telemetry = TelemetryCfg(**(d.get("telemetry") or {}))
     collate = CollateCfg(**(d.get("collate") or {}))
     cgm = CGMCfg(**(d.get("cgm") or {}))
+    planner_model = PlannerModelCfg(**(d.get("planner_model") or {}))
 
     return Config(
         mode=d.get("mode", "wsd"),
@@ -260,6 +288,7 @@ def _dict_to_config(d: Dict[str, Any]) -> Config:
         telemetry=telemetry,
         collate=collate,
         cgm=cgm,
+        planner_model=planner_model,
 
         memlog=d.get("memlog") or {"enabled": True},
     )

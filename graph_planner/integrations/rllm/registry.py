@@ -8,7 +8,7 @@ from typing import Type
 from ...infra.vendor import ensure_rllm_importable
 
 
-@lru_cache(maxsize=1)
+@lru_cache(maxsize=None)
 def register_rllm_components(
     agent_cls: Type[object],
     env_cls: Type[object],

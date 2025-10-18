@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import os
 import sys
@@ -89,11 +90,25 @@ def _normalise_path(path: Path) -> Path | None:
     return None
 
 
+def _has_rllm_modules() -> bool:
+    """Return True if both ``rllm`` and its agent submodules are resolvable."""
+
+    try:
+        base_spec = importlib.util.find_spec("rllm")
+        if base_spec is None:
+            return False
+        agent_spec = importlib.util.find_spec("rllm.agents.agent")
+        env_spec = importlib.util.find_spec("rllm.environments.base.base_env")
+    except ModuleNotFoundError:  # pragma: no cover - defensive guard
+        return False
+    return agent_spec is not None and env_spec is not None
+
+
 @lru_cache(maxsize=1)
 def ensure_rllm_importable() -> bool:
     """Ensure the bundled rLLM repository is importable."""
 
-    if importlib.util.find_spec("rllm") is not None:
+    if _has_rllm_modules():
         return True
 
     visited: Set[Path] = set()
@@ -104,7 +119,11 @@ def ensure_rllm_importable() -> bool:
                 continue
             visited.add(normalized)
             sys.path.insert(0, str(normalized))
-            if importlib.util.find_spec("rllm") is not None:
+            for key in list(sys.modules):
+                if key == "rllm" or key.startswith("rllm."):
+                    sys.modules.pop(key, None)
+            importlib.invalidate_caches()
+            if _has_rllm_modules():
                 return True
     return False
 
