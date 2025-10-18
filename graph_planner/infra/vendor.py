@@ -7,6 +7,7 @@ import importlib.util
 import os
 import sys
 from functools import lru_cache
+from types import ModuleType
 from pathlib import Path
 from typing import Iterator, Set
 
@@ -57,12 +58,13 @@ def _iter_possible_sys_paths(base: Path) -> Iterator[Path]:
     try:
         for child in base.iterdir():
             name = child.name.lower()
-            if "rllm" in name:
+            if "rllm" in name or "verl" in name:
                 yield child
             elif name in {"src", "source"}:
                 try:
                     for inner in child.iterdir():
-                        if "rllm" in inner.name.lower():
+                        lower = inner.name.lower()
+                        if "rllm" in lower or "verl" in lower:
                             yield inner
                 except Exception:  # pragma: no cover - filesystem race
                     continue
@@ -82,6 +84,12 @@ def _normalise_path(path: Path) -> Path | None:
     src = resolved / "src"
     if (src / "rllm" / "__init__.py").is_file():
         return src
+    verl_pkg = resolved / "verl"
+    if (verl_pkg / "__init__.py").is_file():
+        return verl_pkg
+    src_verl = src / "verl"
+    if (src_verl / "__init__.py").is_file():
+        return src_verl
     return None
 
 
@@ -96,7 +104,49 @@ def _has_rllm_modules() -> bool:
         env_spec = importlib.util.find_spec("rllm.environments.base.base_env")
     except ModuleNotFoundError:  # pragma: no cover - defensive guard
         return False
-    return agent_spec is not None and env_spec is not None
+    verl_core = _repo_root() / "rllm" / "verl" / "verl" / "trainer" / "ppo" / "core_algos.py"
+    return agent_spec is not None and env_spec is not None and verl_core.exists()
+
+
+def _ensure_verl_stub() -> None:
+    """Register a lightweight ``verl`` namespace if the package is absent."""
+
+    try:
+        spec = importlib.util.find_spec("verl.trainer.ppo.core_algos")
+    except ModuleNotFoundError:
+        spec = None
+    if spec is not None:
+        return
+
+    root = _repo_root()
+    candidate = root / "rllm" / "verl" / "verl"
+    if not (candidate / "trainer").exists():
+        return
+
+    stub = ModuleType("verl")
+    stub.__path__ = [str(candidate)]  # type: ignore[attr-defined]
+    sys.modules["verl"] = stub
+
+
+def _ensure_tensordict_stub() -> None:
+    """Provide a minimal ``tensordict`` placeholder required by Verl."""
+
+    if "tensordict" in sys.modules:
+        return
+    try:
+        if importlib.util.find_spec("tensordict") is not None:
+            return
+    except ModuleNotFoundError:
+        pass
+
+    class _TensorDict(dict):
+        def __init__(self, source=None, batch_size=None, **kwargs):
+            super().__init__(source or {})
+            self.batch_size = batch_size or (1,)
+
+    stub = ModuleType("tensordict")
+    stub.TensorDict = _TensorDict  # type: ignore[attr-defined]
+    sys.modules["tensordict"] = stub
 
 
 @lru_cache(maxsize=1)
@@ -104,6 +154,8 @@ def ensure_rllm_importable() -> bool:
     """Ensure the bundled rLLM repository is importable."""
 
     if _has_rllm_modules():
+        _ensure_verl_stub()
+        _ensure_tensordict_stub()
         return True
 
     visited: Set[Path] = set()
@@ -119,6 +171,8 @@ def ensure_rllm_importable() -> bool:
                     sys.modules.pop(key, None)
             importlib.invalidate_caches()
             if _has_rllm_modules():
+                _ensure_verl_stub()
+                _ensure_tensordict_stub()
                 return True
     return False
 

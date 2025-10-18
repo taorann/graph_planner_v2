@@ -18,8 +18,12 @@ except ImportError:  # pragma: no cover - optional dependency
     _GraphPlannerRLLMEnv = None
     GraphPlannerRLLMEnv = None  # type: ignore[assignment]
 else:
-    register_rllm_components(GraphPlannerRLLMAgent, _GraphPlannerRLLMEnv, name="graph_planner_repoenv")
-    GraphPlannerRLLMEnv = _GraphPlannerRLLMEnv
+    try:
+        register_rllm_components(GraphPlannerRLLMAgent, _GraphPlannerRLLMEnv, name="graph_planner_repoenv")
+    except ImportError:  # pragma: no cover - optional dependency
+        GraphPlannerRLLMEnv = None  # type: ignore[assignment]
+    else:
+        GraphPlannerRLLMEnv = _GraphPlannerRLLMEnv
 
 try:
     from .cgm_env import CGMRLLMEnv as _CGMRLLMEnv  # noqa: F401
@@ -27,8 +31,12 @@ except ImportError:  # pragma: no cover - optional dependency
     _CGMRLLMEnv = None
     CGMRLLMEnv = None  # type: ignore[assignment]
 else:
-    register_rllm_components(CGMRLLMAgent, _CGMRLLMEnv, name="graph_planner_cgm")
-    CGMRLLMEnv = _CGMRLLMEnv
+    try:
+        register_rllm_components(CGMRLLMAgent, _CGMRLLMEnv, name="graph_planner_cgm")
+    except ImportError:  # pragma: no cover - optional dependency
+        CGMRLLMEnv = None  # type: ignore[assignment]
+    else:
+        CGMRLLMEnv = _CGMRLLMEnv
 
 __all__ = [
     "GraphPlannerRLLMAgent",
