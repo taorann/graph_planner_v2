@@ -11,7 +11,7 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from graph_planner.infra.vendor import ensure_rllm_importable
+from graph_planner.infra.vendor import ensure_rllm_importable, find_in_rllm
 import graph_planner.memory as gp_memory
 
 if not ensure_rllm_importable():  # pragma: no cover - optional dependency
@@ -26,6 +26,13 @@ from graph_planner.integrations.rllm.agent import GraphPlannerRLLMAgent
 from graph_planner.integrations.rllm.cgm_env import CGMRLLMEnv
 from graph_planner.integrations.rllm import dataset as dataset_mod
 from graph_planner.models.toy_lm import create_toy_checkpoint
+
+
+def test_find_in_rllm_handles_namespace_packages():
+    cfg_path = find_in_rllm("trainer", "config", "agent_ppo_trainer.yaml")
+
+    assert cfg_path.name == "agent_ppo_trainer.yaml"
+    assert cfg_path.is_file()
 
 
 def test_planner_agent_generates_patch(monkeypatch):
@@ -110,6 +117,10 @@ def test_cgm_env_uses_provided_plan(monkeypatch):
 
     assert obs["plan_text"] == "Fix foo"
     assert info["task_id"] == "demo"
+    assert info["issue_uid"]
+    assert info["source_issue_id"] == "demo"
+    assert obs["issue"]["metadata"]["source_issue_id"] == "demo"
+    assert obs["issue"]["id"] != "demo"
 
     patch = {"edits": [{"path": "foo.py", "start": 1, "end": 1, "new_text": "print()\n"}], "summary": "Fix foo"}
     nxt_obs, reward, done, step_info = env.step(SimpleNamespace(action=patch))
@@ -311,4 +322,71 @@ def test_train_cli_print_config_planner(tmp_path, monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "data:" in output
     assert str(verl_path) in output
+
+
+def test_train_cli_parallel_overrides(tmp_path, monkeypatch, capsys):
+    dataset_file = Path("datasets/graphplanner_repoenv_sample.jsonl")
+    assert dataset_file.exists(), "sample dataset missing"
+
+    verl_path = tmp_path / "train_verl.parquet"
+    dataset_stub = SimpleNamespace(
+        get_verl_data_path=lambda: str(verl_path),
+        get_data_path=lambda: str(tmp_path / "train.parquet"),
+    )
+
+    def fake_register(*, name, split, path):
+        assert Path(path) == dataset_file
+        return dataset_stub
+
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.ensure_dataset_registered", fake_register)
+
+    argv = [
+        "train_graphplanner_rllm.py",
+        "--model-path",
+        str(tmp_path / "policy"),
+        "--print-config",
+        "--num-gpus",
+        "16",
+        "--num-nodes",
+        "2",
+        "--tensor-parallel",
+        "8",
+        "--parallel-agents",
+        "32",
+        "--engine-max-workers",
+        "96",
+        "--rollout-workers",
+        "40",
+        "--workflow-parallel",
+        "64",
+        "--rollout-replicas",
+        "3",
+        "--ray-num-cpus",
+        "256",
+        "--ray-num-gpus",
+        "16",
+        "--ray-memory",
+        "107374182400",
+        "--ray-object-store-memory",
+        "21474836480",
+    ]
+    monkeypatch.setattr(sys, "argv", argv, raising=False)
+
+    from scripts import train_graphplanner_rllm as train_mod
+
+    train_mod.main()
+
+    output = capsys.readouterr().out
+    assert "n_gpus_per_node: 16" in output
+    assert "nnodes: 2" in output
+    assert "tensor_model_parallel_size: 8" in output
+    assert "'n': 3" in output
+    assert "n_parallel_agents: 32" in output
+    assert "max_workers: 96" in output
+    assert "num_workers: 40" in output
+    assert "n_parallel_tasks: 64" in output
+    assert "num_cpus: 256" in output
+    assert "num_gpus: 16" in output
+    assert "memory: 107374182400" in output
+    assert "object_store_memory: 21474836480" in output
 

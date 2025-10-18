@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Tuple
+from uuid import uuid4
 
 from ...infra.vendor import ensure_rllm_importable
 
@@ -46,6 +48,9 @@ else:
             self.max_steps = int(entry.get("max_steps", max_steps))
             self._planner: PlannerEnv | None = None
             self._last_observation: Dict[str, Any] | None = None
+            self._issue_uid = uuid4().hex
+            issue = self.entry.get("issue") or {}
+            self._source_issue_id = str(issue.get("id") or "")
 
         # ------------------------------------------------------------------
         # BaseEnv interface
@@ -59,6 +64,8 @@ else:
                 "task_id": self.entry.get("task_id"),
                 "issue": self.entry.get("issue", {}),
                 "max_steps": self.max_steps,
+                "issue_uid": self._issue_uid,
+                "source_issue_id": self._source_issue_id,
             }
             return observation, info
 
@@ -108,8 +115,23 @@ else:
             if ds_path:
                 sandbox_dict["r2e_ds_json"] = str(Path(ds_path).expanduser().resolve())
             sandbox_cfg = SandboxConfig(**sandbox_dict)
-            issue = deepcopy(self.entry.get("issue") or {})
+            issue = self._build_issue_payload()
             return PlannerEnv(issue=issue, sandbox_cfg=sandbox_cfg)
+
+        def _build_issue_payload(self) -> Dict[str, Any]:
+            issue = deepcopy(self.entry.get("issue") or {})
+            original_id = str(issue.get("id") or "")
+            issue.setdefault("metadata", {})
+            issue["metadata"]["source_issue_id"] = original_id or issue.get("metadata", {}).get("source_issue_id") or ""
+
+            parts = [
+                original_id or None,
+                str(self.entry.get("task_id") or ""),
+                f"pid{os.getpid()}",
+                self._issue_uid,
+            ]
+            issue["id"] = "__".join([p for p in parts if p]) or self._issue_uid
+            return issue
 
         @property
         def planner(self) -> PlannerEnv | None:

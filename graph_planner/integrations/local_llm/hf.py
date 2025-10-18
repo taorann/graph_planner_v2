@@ -7,13 +7,44 @@ English summary
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, Iterable, Mapping, Optional
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ...models import toy_lm as _toy_lm  # noqa: F401 - ensure toy model registration
+
+
+def _resolve_dtype(name: Optional[str]) -> Optional[torch.dtype]:
+    """Translate a user supplied dtype string into a ``torch.dtype``."""
+
+    if not name:
+        return None
+    lowered = name.strip().lower()
+    try:
+        return getattr(torch, lowered)
+    except AttributeError as exc:  # pragma: no cover - defensive guard
+        raise ValueError(f"Unsupported torch dtype: {name}") from exc
+
+
+def _primary_device(model: AutoModelForCausalLM, fallback: str) -> torch.device:
+    """Infer the device that should host tokenizer inputs for generation."""
+
+    if hasattr(model, "device") and model.device is not None:
+        return torch.device(model.device)
+    if hasattr(model, "hf_device_map"):
+        device_map = getattr(model, "hf_device_map") or {}
+        if isinstance(device_map, Mapping) and device_map:
+            first = next(iter(device_map.values()))
+            if isinstance(first, (list, tuple)) and first:
+                first = first[0]
+            return torch.device(first)
+    try:
+        param = next(model.parameters())
+    except StopIteration:  # pragma: no cover - model without parameters
+        return torch.device(fallback)
+    return torch.device(param.device)
 
 
 @dataclass
@@ -28,6 +59,13 @@ class HuggingFaceChatConfig:
     temperature: float = 0.2
     top_p: float = 0.95
     do_sample: bool = True
+    device_map: Optional[Any] = None
+    torch_dtype: Optional[str] = None
+    load_in_8bit: bool = False
+    load_in_4bit: bool = False
+    trust_remote_code: bool = False
+    attn_implementation: Optional[str] = None
+    model_kwargs: Mapping[str, Any] = field(default_factory=dict)
 
 
 class HuggingFaceChatClient:
@@ -37,16 +75,36 @@ class HuggingFaceChatClient:
         """加载 tokenizer/模型并放置到配置指定的设备上。"""
 
         self.config = config
-        device = config.device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.device = torch.device(device)
+        explicit_device = config.device or ("cuda" if torch.cuda.is_available() else "cpu")
+        dtype = _resolve_dtype(config.torch_dtype)
 
         tok_path = config.tokenizer_name_or_path or config.model_name_or_path
         self.tokenizer = AutoTokenizer.from_pretrained(tok_path, use_fast=False)
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        self.model = AutoModelForCausalLM.from_pretrained(config.model_name_or_path)
-        self.model.to(self.device)
+        model_kwargs: Dict[str, Any] = {
+            "trust_remote_code": bool(config.trust_remote_code),
+        }
+        if dtype is not None:
+            model_kwargs["torch_dtype"] = dtype
+        if config.device_map is not None:
+            model_kwargs["device_map"] = config.device_map
+        if config.load_in_8bit:
+            model_kwargs["load_in_8bit"] = True
+        if config.load_in_4bit:
+            model_kwargs["load_in_4bit"] = True
+        if config.attn_implementation:
+            model_kwargs["attn_implementation"] = config.attn_implementation
+        if config.model_kwargs:
+            model_kwargs.update(dict(config.model_kwargs))
+
+        self.model = AutoModelForCausalLM.from_pretrained(config.model_name_or_path, **model_kwargs)
+        if config.device_map is None:
+            self.device = torch.device(explicit_device)
+            self.model.to(self.device)
+        else:
+            self.device = _primary_device(self.model, explicit_device)
         self.model.eval()
 
     # ------------------------------------------------------------------
@@ -64,6 +122,12 @@ class HuggingFaceChatClient:
                 temperature=float(getattr(cfg, "temperature", 0.0)),
                 top_p=float(getattr(cfg, "top_p", 0.95)),
                 do_sample=bool(getattr(cfg, "temperature", 0.0) and getattr(cfg, "temperature", 0.0) > 0),
+                device_map=getattr(cfg, "device_map", None),
+                torch_dtype=getattr(cfg, "torch_dtype", None),
+                load_in_8bit=bool(getattr(cfg, "load_in_8bit", False)),
+                load_in_4bit=bool(getattr(cfg, "load_in_4bit", False)),
+                trust_remote_code=bool(getattr(cfg, "trust_remote_code", False)),
+                attn_implementation=getattr(cfg, "attn_implementation", None),
             )
         )
 

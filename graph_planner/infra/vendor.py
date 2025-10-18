@@ -9,7 +9,13 @@ import sys
 from functools import lru_cache
 from types import ModuleType
 from pathlib import Path
-from typing import Iterator, Set
+from typing import Iterator, Set, Tuple
+
+# Namespace packages (PEP 420) do not expose ``__file__`` which means callers
+# cannot simply rely on ``Path(pkg.__file__)`` to locate resources such as YAML
+# configs.  We therefore keep track of the resolved search roots once the rLLM
+# package has been imported successfully.
+_RLLM_PACKAGE_ROOTS: Tuple[Path, ...] = ()
 
 
 def _repo_root() -> Path:
@@ -163,6 +169,43 @@ def _ensure_tensordict_stub() -> None:
     sys.modules["tensordict"] = stub
 
 
+def _capture_rllm_package_roots() -> None:
+    """Discover and cache the on-disk roots for the ``rllm`` package."""
+
+    global _RLLM_PACKAGE_ROOTS
+    if _RLLM_PACKAGE_ROOTS:
+        return
+
+    try:
+        import importlib
+
+        pkg = importlib.import_module("rllm")
+    except ModuleNotFoundError:  # pragma: no cover - defensive guard
+        return
+
+    roots: list[Path] = []
+    for entry in getattr(pkg, "__path__", []):
+        path = Path(entry).resolve()
+        if not path.exists():
+            continue
+        roots.append(path)
+
+        nested = path / "rllm"
+        if nested.exists():
+            roots.append(nested)
+
+    if roots:
+        # Preserve order while removing duplicates.
+        deduped = []
+        seen: Set[Path] = set()
+        for candidate in roots:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            deduped.append(candidate)
+        _RLLM_PACKAGE_ROOTS = tuple(deduped)
+
+
 @lru_cache(maxsize=1)
 def ensure_rllm_importable() -> bool:
     """Ensure the bundled rLLM repository is importable."""
@@ -170,6 +213,7 @@ def ensure_rllm_importable() -> bool:
     if _has_rllm_modules():
         _ensure_verl_stub()
         _ensure_tensordict_stub()
+        _capture_rllm_package_roots()
         return True
 
     visited: Set[Path] = set()
@@ -187,8 +231,31 @@ def ensure_rllm_importable() -> bool:
             if _has_rllm_modules():
                 _ensure_verl_stub()
                 _ensure_tensordict_stub()
+                _capture_rllm_package_roots()
                 return True
     return False
 
 
-__all__ = ["ensure_rllm_importable"]
+def iter_rllm_package_roots() -> Tuple[Path, ...]:
+    """Return cached package roots for the vendored ``rllm`` module."""
+
+    ensure_rllm_importable()
+    return _RLLM_PACKAGE_ROOTS
+
+
+def find_in_rllm(*segments: str) -> Path:
+    """Locate a path relative to any discovered rLLM package root."""
+
+    for root in iter_rllm_package_roots():
+        candidate = root.joinpath(*segments)
+        if candidate.exists():
+            try:
+                return candidate.resolve()
+            except OSError:  # pragma: no cover - filesystem permission issue
+                return candidate
+    raise FileNotFoundError(
+        "Unable to locate rLLM resource: " + "/".join(segments)
+    )
+
+
+__all__ = ["ensure_rllm_importable", "iter_rllm_package_roots", "find_in_rllm"]

@@ -14,7 +14,7 @@ from typing import Any, Dict, Tuple
 
 from omegaconf import OmegaConf
 
-from graph_planner.infra.vendor import ensure_rllm_importable
+from graph_planner.infra.vendor import ensure_rllm_importable, find_in_rllm
 
 ensure_rllm_importable()
 
@@ -32,9 +32,7 @@ from graph_planner.integrations.rllm import (  # noqa: E402
 def _default_config_path() -> Path:
     """返回 rLLM 默认 PPO 配置文件路径。"""
 
-    import rllm as rllm_pkg
-
-    return Path(rllm_pkg.__file__).resolve().parent / "trainer" / "config" / "agent_ppo_trainer.yaml"
+    return find_in_rllm("trainer", "config", "agent_ppo_trainer.yaml")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -79,11 +77,30 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--total-epochs", type=int, default=1)
     parser.add_argument("--total-steps", type=int, default=None)
     parser.add_argument("--num-gpus", type=int, default=1)
+    parser.add_argument("--num-nodes", type=int, default=1)
     parser.add_argument("--tensor-parallel", type=int, default=1)
     parser.add_argument("--rollout-replicas", type=int, default=1)
+    parser.add_argument("--parallel-agents", type=int, default=None, help="Number of parallel agent-environment pairs.")
+    parser.add_argument("--engine-max-workers", type=int, default=None, help="Thread pool size for async env operations.")
+    parser.add_argument(
+        "--workflow-parallel",
+        type=int,
+        default=None,
+        help="Override rLLM workflow parallel task count.",
+    )
+    parser.add_argument(
+        "--rollout-workers",
+        type=int,
+        default=None,
+        help="Number of Verl rollout workers (defaults to parallel agent count).",
+    )
     parser.add_argument("--temperature", type=float, default=None)
     parser.add_argument("--top-p", type=float, default=None)
     parser.add_argument("--ray-address", default=None)
+    parser.add_argument("--ray-num-cpus", type=int, default=None)
+    parser.add_argument("--ray-num-gpus", type=int, default=None)
+    parser.add_argument("--ray-memory", type=int, default=None)
+    parser.add_argument("--ray-object-store-memory", type=int, default=None)
     parser.add_argument("--config", type=Path, default=_default_config_path())
     parser.add_argument("--print-config", action="store_true")
     parser.add_argument("--use-fallback", action="store_true", help="Enable rule fallback when training planner agent.")
@@ -163,8 +180,41 @@ def _apply_model_overrides(cfg: OmegaConf, args: argparse.Namespace) -> None:
     if args.top_p is not None:
         _set_if_exists(cfg, "actor_rollout_ref.rollout.top_p", float(args.top_p))
 
-    _set_if_exists(cfg, "actor_rollout_ref.rollout.tensor_model_parallel_size", int(args.tensor_parallel))
-    _set_if_exists(cfg, "actor_rollout_ref.rollout.n", int(args.rollout_replicas))
+    _set(cfg, "actor_rollout_ref.rollout.tensor_model_parallel_size", int(args.tensor_parallel))
+    _set(cfg, "actor_rollout_ref.rollout.n", int(args.rollout_replicas))
+
+
+def _apply_parallel_overrides(cfg: OmegaConf, args: argparse.Namespace) -> None:
+    """写入并行度与 Ray 资源相关的配置。"""
+
+    _set(cfg, "trainer.nnodes", int(args.num_nodes))
+
+    rollout_workers = args.rollout_workers if args.rollout_workers is not None else args.parallel_agents
+    if rollout_workers:
+        _set(cfg, "actor_rollout_ref.rollout.agent.num_workers", int(rollout_workers))
+
+    if args.parallel_agents:
+        _set(cfg, "rllm.agent.engine_args.n_parallel_agents", int(args.parallel_agents))
+        if args.engine_max_workers is None:
+            # Provide a generous default when not explicitly set.
+            suggested_workers = max(64, int(args.parallel_agents) * 2)
+            _set(cfg, "rllm.agent.engine_args.max_workers", suggested_workers)
+    if args.engine_max_workers is not None:
+        _set(cfg, "rllm.agent.engine_args.max_workers", int(args.engine_max_workers))
+
+    if args.workflow_parallel is not None:
+        _set(cfg, "rllm.workflow.n_parallel_tasks", int(args.workflow_parallel))
+
+    if args.ray_num_cpus is not None:
+        _set(cfg, "ray_init.num_cpus", int(args.ray_num_cpus))
+    if args.ray_num_gpus is not None:
+        _set(cfg, "ray_init.num_gpus", int(args.ray_num_gpus))
+    else:
+        _set(cfg, "ray_init.num_gpus", int(args.num_gpus))
+    if args.ray_memory is not None:
+        _set(cfg, "ray_init.memory", int(args.ray_memory))
+    if args.ray_object_store_memory is not None:
+        _set(cfg, "ray_init.object_store_memory", int(args.ray_object_store_memory))
 
 
 def _configure_agent_env(cfg: OmegaConf, args: argparse.Namespace) -> Tuple[type, Dict[str, Any], type, Dict[str, Any]]:
@@ -241,6 +291,7 @@ def main() -> None:
     _set(cfg, "trainer.n_gpus_per_node", int(args.num_gpus))
 
     _apply_model_overrides(cfg, args)
+    _apply_parallel_overrides(cfg, args)
     agent_cls, agent_args, env_cls, env_args = _configure_agent_env(cfg, args)
 
     if args.print_config:

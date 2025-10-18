@@ -44,13 +44,13 @@ CLI / Scripts / Tests
 | `integrations/codefuse_cgm/data.py` | `CGMExample`、`CodeFuseCGMDataset` | 解析训练/推理 JSON，加载图、片段、计划并产出结构化样本。【F:graph_planner/integrations/codefuse_cgm/data.py†L1-L210】 |
 | `integrations/codefuse_cgm/formatting.py` | `GraphLinearizer`、`SnippetFormatter`、`ConversationEncoder` | 将 `serialize_subgraph` 结果与候选片段线性化，组合聊天模板用于训练/推理。【F:graph_planner/integrations/codefuse_cgm/formatting.py†L69-L199】 |
 | `integrations/codefuse_cgm/training.py` | `CGMBatchCollator`、`CodeFuseCGMTrainer` | 构建监督微调所需的 DataLoader、优化器、调度器与训练循环。【F:graph_planner/integrations/codefuse_cgm/training.py†L1-L250】 |
-| `integrations/codefuse_cgm/inference.py` | `CodeFuseCGMGenerator` | 加载 Hugging Face checkpoint，以本地方式生成补丁候选。【F:graph_planner/integrations/codefuse_cgm/inference.py†L1-L160】 |
-| `integrations/local_llm/hf.py` | `HuggingFaceChatClient` | 将任意 Causal LM 封装为聊天接口，服务 Planner 决策或调试。【F:graph_planner/integrations/local_llm/hf.py†L1-L120】 |
+| `integrations/codefuse_cgm/inference.py` | `CodeFuseCGMGenerator` | 加载 Hugging Face checkpoint，以本地方式生成补丁候选，并支持 device map / 量化推理。【F:graph_planner/integrations/codefuse_cgm/inference.py†L18-L152】 |
+| `integrations/local_llm/hf.py` | `HuggingFaceChatClient` | 将任意 Causal LM 封装为聊天接口，提供 device map、量化、`torch_dtype` 等多 GPU 选项。【F:graph_planner/integrations/local_llm/hf.py†L19-L186】 |
 | `integrations/rllm/agent.py` | `GraphPlannerRLLMAgent` | 继承 rLLM `BaseAgent`，复用聊天协议、CGM fallback，并维护训练轨迹。【F:graph_planner/integrations/rllm/agent.py†L56-L200】 |
-| `integrations/rllm/env.py` | `GraphPlannerRLLMEnv` | 将 `PlannerEnv` 暴露为 rLLM `BaseEnv`，规范 reset/step/奖励接口。【F:graph_planner/integrations/rllm/env.py†L36-L114】 |
-| `integrations/rllm/cgm_agent.py` & `cgm_env.py` | `CGMRLLMAgent`、`CGMRLLMEnv` | 面向 CGM 的 PPO 训练包装，直接监督补丁生成质量。【F:graph_planner/integrations/rllm/cgm_agent.py†L1-L220】【F:graph_planner/integrations/rllm/cgm_env.py†L1-L260】 |
+| `integrations/rllm/env.py` | `GraphPlannerRLLMEnv` | 将 `PlannerEnv` 暴露为 rLLM `BaseEnv`，并为每个任务生成唯一 `issue_uid` 以支撑并发容器训练。【F:graph_planner/integrations/rllm/env.py†L1-L134】 |
+| `integrations/rllm/cgm_agent.py` & `cgm_env.py` | `CGMRLLMAgent`、`CGMRLLMEnv` | 面向 CGM 的 PPO 训练包装，封装唯一 issue id 与上下文采集流程。【F:graph_planner/integrations/rllm/cgm_agent.py†L1-L220】【F:graph_planner/integrations/rllm/cgm_env.py†L11-L197】 |
 | `integrations/rllm/dataset.py` | `ensure_dataset_registered` | 将 JSON/JSONL 任务注册为 rLLM 可识别的数据集，解析路径与挂载信息。【F:graph_planner/integrations/rllm/dataset.py†L28-L109】 |
-| `scripts/train_graphplanner_rllm.py` | CLI helpers | 注入模型路径、注册数据集、绑定 Agent/Env，并委托 rLLM PPO 训练。【F:scripts/train_graphplanner_rllm.py†L32-L200】 |
+| `scripts/train_graphplanner_rllm.py` | CLI helpers | 注入模型路径、注册数据集、绑定 Agent/Env，并暴露并行训练开关（`--parallel-agents`、`--rollout-workers`、`--ray-*` 等）后委托 rLLM PPO。【F:scripts/train_graphplanner_rllm.py†L70-L220】 |
 
 ### 2.1 rLLM 模块导入路径 / rLLM import resolution
 
@@ -65,20 +65,20 @@ CLI / Scripts / Tests
 ## 3. 数据与上下文流 / Data flow
 
 1. **任务描述**：来自 `datasets/*.jsonl` 或自定义 JSON，包含 Issue 文本、最大步数、容器配置等。`rllm.dataset.load_task_entries` 会解析路径字段并标准化 sandbox 配置。【F:graph_planner/integrations/rllm/dataset.py†L59-L109】
-2. **环境初始化**：`GraphPlannerRLLMEnv._spawn_planner` 把归一化后的 sandbox 信息转换为 `SandboxConfig`，再构造 `PlannerEnv` 并在 `reset()` 中生成初始观测。【F:graph_planner/integrations/rllm/env.py†L48-L108】
+2. **环境初始化**：`GraphPlannerRLLMEnv._spawn_planner` 把归一化后的 sandbox 信息转换为 `SandboxConfig`，并将任务 issue 注入唯一 `issue_uid`，再构造 `PlannerEnv` 并在 `reset()` 中生成初始观测。【F:graph_planner/integrations/rllm/env.py†L46-L134】
 3. **记忆与子图管理**：`PlannerEnv` 调用 `memory` 模块维护子图；当需要向 CGM 求补丁时，通过 `subgraph_store` 读出线性化输入并交给 `cgm_adapter`。【F:graph_planner/env/planner_env.py†L94-L173】【F:graph_planner/agents/rule_based/cgm_adapter.py†L186-L200】
 4. **CGM 上下文编排**：
    - 子图 JSON 通过 `GraphLinearizer.linearize` 转换为带节点摘要的文本块，保留名称、类型、注释、代码片段信息。【F:graph_planner/integrations/codefuse_cgm/formatting.py†L69-L128】
    - 片段候选由 `SnippetFormatter.format` 统一为 `path:start-end` + 正文的块状字符串。【F:graph_planner/integrations/codefuse_cgm/formatting.py†L136-L168】
    - `ConversationEncoder.build_user_message` 合并 Issue、Plan、Graph、Snippets，最终构造聊天消息列表并在训练时输出标签掩码。【F:graph_planner/integrations/codefuse_cgm/formatting.py†L184-L266】
-5. **补丁生成**：`CodeFuseCGMGenerator.generate` 或远端 `CodeFuseCGMClient.complete` 获取补丁 JSON；若模型不可用则 `_LocalCGMRuntime` 在目标文件行尾添加 `CGM-LOCAL` 标记构造兜底补丁。【F:graph_planner/integrations/codefuse_cgm/inference.py†L62-L160】【F:graph_planner/agents/rule_based/cgm_adapter.py†L145-L207】
+5. **补丁生成**：`CodeFuseCGMGenerator.generate` 或远端 `CodeFuseCGMClient.complete` 获取补丁 JSON；本地路径支持多 GPU `device_map`、量化或自定义 dtype，若模型不可用则 `_LocalCGMRuntime` 在目标文件行尾添加 `CGM-LOCAL` 标记构造兜底补丁。【F:graph_planner/integrations/codefuse_cgm/inference.py†L18-L152】【F:graph_planner/agents/rule_based/cgm_adapter.py†L145-L207】
 6. **动作流**：Planner 代理（规则或 LLM）依据当前观测和计划决定 Explore/Memory/Repair/Submit 动作，通过 `core.actions` 传递给环境，再由 `SandboxRuntime` 实际执行命令或应用补丁。【F:graph_planner/core/actions.py†L6-L42】【F:graph_planner/runtime/sandbox.py†L60-L214】
 
 ### 3.1 测试数据流（Toy MLP）/ Test data flow with the toy MLP
 
 1. **Checkpoint 构建**：`tests/test_toy_mlp.py::test_toy_checkpoint_integrates_with_cgm_generator` 调用 `create_toy_checkpoint()`，在临时目录写入字符粒度 `ToyTokenizer`、`ToyLMConfig` 以及两层 MLP 权重，形成 Hugging Face 兼容的本地模型目录。【F:graph_planner/models/toy_lm.py†L27-L200】【F:tests/test_toy_mlp.py†L13-L31】
-2. **CGM 推理链路**：`CodeFuseCGMGenerator` 读取该 checkpoint，与 `_build_example()` 构造的 `CGMExample`（含 issue、plan、subgraph、snippets）结合，通过 `ConversationEncoder` 组装消息后执行 `generate()`，输出字符串补丁候选，验证 CGM 集成完整性。【F:graph_planner/integrations/codefuse_cgm/data.py†L80-L210】【F:graph_planner/integrations/codefuse_cgm/inference.py†L62-L160】【F:tests/test_toy_mlp.py†L23-L33】
-3. **Planner 聊天链路**：同一测试文件在 `test_toy_checkpoint_integrates_with_planner_chat` 中使用 `HuggingFaceChatClient` 加载 toy checkpoint，通过 tokenizer 的 `chat_template` 将 system/user 消息格式化，并经 MLP 生成响应，证明 Planner LLM 代理的本地推理路径可用。【F:graph_planner/integrations/local_llm/hf.py†L32-L118】【F:graph_planner/models/toy_lm.py†L160-L218】【F:tests/test_toy_mlp.py†L35-L48】
+2. **CGM 推理链路**：`CodeFuseCGMGenerator` 读取该 checkpoint，与 `_build_example()` 构造的 `CGMExample`（含 issue、plan、subgraph、snippets）结合，通过 `ConversationEncoder` 组装消息后执行 `generate()`，输出字符串补丁候选，验证 CGM 集成完整性。【F:graph_planner/integrations/codefuse_cgm/data.py†L80-L210】【F:graph_planner/integrations/codefuse_cgm/inference.py†L18-L152】【F:tests/test_toy_mlp.py†L23-L33】
+3. **Planner 聊天链路**：同一测试文件在 `test_toy_checkpoint_integrates_with_planner_chat` 中使用 `HuggingFaceChatClient` 加载 toy checkpoint，通过 tokenizer 的 `chat_template` 将 system/user 消息格式化，并经 MLP 生成响应，证明 Planner LLM 代理的本地推理路径可用。【F:graph_planner/integrations/local_llm/hf.py†L19-L186】【F:graph_planner/models/toy_lm.py†L160-L218】【F:tests/test_toy_mlp.py†L35-L48】
 4. **梯度反向传播**：`test_toy_model_supports_backward_updates` 直接实例化 `ToyLMForCausalLM`，构造随机张量进行前向、计算交叉熵损失并触发 `SGD.step()`，确认模型权重随梯度更新，从而支撑 rLLM 训练链路的单步前/反向流程。【F:graph_planner/models/toy_lm.py†L108-L158】【F:tests/test_toy_mlp.py†L50-L66】
 
 ### 3.2 GRPO 测试调用流程（文件 | 函数 | 作用）
@@ -105,19 +105,71 @@ CLI / Scripts / Tests
 ### 4.2 CGM 监督微调
 1. 准备包含 `prompt`、`answer`、`plan`、`graph_path`、`snippets` 等字段的 JSON/JSONL 数据集，使用 `CodeFuseCGMDataset` 加载。【F:graph_planner/integrations/codefuse_cgm/data.py†L80-L210】
 2. 配置 `CGMTrainingConfig`（模型路径、学习率、batch size、梯度累积等），实例化 `CodeFuseCGMTrainer` 并调用 `train()`。训练过程中 `CGMBatchCollator` 会调用 `ConversationEncoder` 生成输入张量并执行动态 padding。【F:graph_planner/integrations/codefuse_cgm/training.py†L60-L250】
-3. 训练结束后，`CodeFuseCGMTrainer` 可保存 checkpoint 并返回评估指标；生成好的模型可交给 `CodeFuseCGMGenerator` 进行本地推理。【F:graph_planner/integrations/codefuse_cgm/inference.py†L62-L160】
+3. 训练结束后，`CodeFuseCGMTrainer` 可保存 checkpoint 并返回评估指标；生成好的模型可交给 `CodeFuseCGMGenerator` 进行本地推理。【F:graph_planner/integrations/codefuse_cgm/inference.py†L18-L152】
 
 ### 4.3 Planner / CGM 强化学习（rLLM PPO）
 1. 使用 `register_graphplanner_dataset.py` 或直接在训练脚本中调用 `ensure_dataset_registered` 将 RepoEnv 任务 JSONL 注册到 rLLM 的数据集注册表，获得 Verl parquet 路径。【F:graph_planner/integrations/rllm/dataset.py†L85-L109】【F:scripts/train_graphplanner_rllm.py†L123-L145】
 2. 运行 `python scripts/train_graphplanner_rllm.py --agent planner --dataset <jsonl> --model-path <checkpoint>`：
-   - CLI 解析命令行，注册训练/验证集，按需写入模型路径、温度、TP 等配置。【F:scripts/train_graphplanner_rllm.py†L32-L200】
-   - 根据 `--agent` 选择 `GraphPlannerRLLMAgent` + `GraphPlannerRLLMEnv` 或 `CGMRLLMAgent` + `CGMRLLMEnv`，并在 Planner 模式下根据 `--cgm-model-path` 设置 CGM 本地推理参数。【F:scripts/train_graphplanner_rllm.py†L170-L200】
+   - CLI 解析命令行，注册训练/验证集，按需写入模型路径、温度、TP 及并行配置。【F:scripts/train_graphplanner_rllm.py†L70-L220】
+   - 根据 `--agent` 选择 `GraphPlannerRLLMAgent` + `GraphPlannerRLLMEnv` 或 `CGMRLLMAgent` + `CGMRLLMEnv`，并在 Planner 模式下根据 `--cgm-model-path` 设置 CGM 本地推理参数。【F:scripts/train_graphplanner_rllm.py†L167-L220】
    - 脚本将覆盖写入的 OmegaConf 配置交给 rLLM 的 `AgentPPOTrainer` 执行分布式训练。
 3. 训练过程中：
    - `GraphPlannerRLLMAgent.update_from_env` 把环境观测转成聊天消息并维护 PPO 轨迹；`update_from_model` 解析模型输出并在失败时触发规则 fallback。【F:graph_planner/integrations/rllm/agent.py†L101-L200】
-   - `GraphPlannerRLLMEnv.step` 代理调用 `PlannerEnv.step` 执行动作，记录奖励与终止信号；`compute_final_reward` 在 episode 结束时检查测试通过情况。【F:graph_planner/integrations/rllm/env.py†L48-L114】
-   - 若使用 CGM agent，则 `CGMRLLMEnv` 会直接调用 `_LocalCGMRuntime.generate_patch` 评估补丁质量并反馈奖励。【F:graph_planner/integrations/rllm/cgm_env.py†L140-L220】
+   - `GraphPlannerRLLMEnv.step` 代理调用 `PlannerEnv.step` 执行动作，记录奖励与终止信号，并在重置时写入唯一 `issue_uid`；`compute_final_reward` 在 episode 结束时检查测试通过情况。【F:graph_planner/integrations/rllm/env.py†L46-L134】
+   - 若使用 CGM agent，则 `CGMRLLMEnv` 会直接调用 `_LocalCGMRuntime.generate_patch` 评估补丁质量并反馈奖励，同时生成独立的 issue id。【F:graph_planner/integrations/rllm/cgm_env.py†L70-L197】
 4. 训练日志与模型 checkpoint 由 rLLM / Ray 负责存储，可结合 `--print-config` 输出最终 Hydra 配置进行审计。
+
+#### 4.3.1 容器内 Planner+CGM+GRPO 启动流程
+
+> **结论**：当前仓库已串联 planner 与 CGM 的本地/远端模型加载逻辑，并在 `train_graphplanner_rllm.py` 中将回合轨迹直接送入 Verl GRPO 算法，因此只需提供模型路径即可在容器内完成“代码修复 → 经验采样 → GRPO 更新”的闭环训练。
+
+1. **准备模型 checkpoint**
+   - Planner：支持 Hugging Face 目录或玩具 `ToyLM`。将目录路径记为 `PLANNER_MODEL`。若 tokenizer 不在同一路径，可通过 `--tokenizer-path` 指定。【F:scripts/train_graphplanner_rllm.py†L40-L70】
+   - CGM：若训练 planner 代理且希望调用本地 CGM，请准备可被 `AutoModelForCausalLM` 加载的目录，路径记为 `CGM_MODEL`。【F:scripts/train_graphplanner_rllm.py†L70-L91】
+2. **准备任务数据集**
+   - 以 JSON/JSONL 形式提供 Issue、容器配置、最大步数等字段（示例：`datasets/graphplanner_repoenv_sample.jsonl`）。脚本会通过 `ensure_dataset_registered` 将其转换为 Verl 读取的 parquet。【F:graph_planner/integrations/rllm/dataset.py†L85-L109】
+3. **执行训练命令**
+   ```bash
+   PYTHONPATH=. python scripts/train_graphplanner_rllm.py \
+     --agent planner \
+     --dataset datasets/graphplanner_repoenv_sample.jsonl \
+     --model-path "$PLANNER_MODEL" \
+     --cgm-model-path "$CGM_MODEL" \
+     --max-steps 6 \
+     --train-batch-size 4 \
+     --total-epochs 1
+   ```
+   - `ensure_rllm_importable()` 会在脚本开头注入子模块路径，保证 `rllm.rllm.*` 与 `rllm.*` 两层包结构均可被导入。【F:graph_planner/infra/vendor.py†L1-L112】
+   - 如果 CGM tokenizer 不在模型目录，附加 `--cgm-tokenizer-path`；若需单独指定 critic 模型，可使用 `--critic-model-path` 与 `--critic-tokenizer-path`。
+4. **训练期工作流**
+   - `GraphPlannerRLLMEnv` 调用 `PlannerEnv` 在容器内执行真实代码修复流程，并利用 `issue_uid` 保证并发采样互不覆盖，所有 observation/reward 会写入 agent 轨迹。【F:graph_planner/integrations/rllm/env.py†L46-L134】
+   - `GraphPlannerRLLMAgent` 根据轨迹构造聊天消息并请求 planner 模型生成 JSON 动作；遇到 Repair 动作时通过 `cgm_adapter` 使用 CGM 模型生成补丁。【F:graph_planner/integrations/rllm/agent.py†L101-L200】【F:graph_planner/agents/rule_based/cgm_adapter.py†L145-L207】
+   - `tests/test_rllm_integration.py::test_grpo_step_updates_toy_model` 验证了采集到的 token-level 奖励会经过 Verl 的 `compute_grpo_outcome_advantage` 与 `compute_policy_loss`，执行一次 `optimizer.step()` 后权重发生变化，说明经验确实被用于 GRPO 更新。【F:tests/test_rllm_integration.py†L182-L276】
+5. **结果产出与复现**
+   - 训练中的行动日志、fallback 信息保存在 rLLM 日志目录；若带 `--print-config` 可查看最终 Hydra 配置。使用相同命令与模型路径即可在同一容器中复现完整训练流程。
+
+#### 4.3.2 16 GPU 并行配置
+
+针对 16 张 A800 的集群，可以通过新增的 CLI 参数在同一容器内同时扩展模型推理、容器交互和 GRPO 训练：
+
+1. **并行 agent / rollout 数量**：
+   ```bash
+   --parallel-agents 32 --rollout-workers 32 --workflow-parallel 64
+   ```
+   其中 `--parallel-agents` 会同步写入 `rllm.agent.engine_args.n_parallel_agents` 与默认线程池，`--rollout-workers` 控制 Verl rollout worker 数量，`--workflow-parallel` 限制 rLLM 工作流并发度。【F:scripts/train_graphplanner_rllm.py†L81-L220】
+
+2. **Ray 与集群资源**：
+   ```bash
+   --num-gpus 16 --num-nodes 1 --ray-num-cpus 256 --ray-num-gpus 16 \
+   --ray-memory 107374182400 --ray-object-store-memory 21474836480
+   ```
+   以上参数将 `trainer.n_gpus_per_node`、`trainer.nnodes` 及 `ray_init.*` 覆盖为 16 GPU / 256 CPU 的节点配置，确保 Ray 初始化时正确声明资源池供 Verl 调度。【F:scripts/train_graphplanner_rllm.py†L81-L220】
+
+3. **模型并行 / Tensor Parallel**：若需要将语言模型切分到多块 GPU，可结合 `--tensor-parallel 8`、`--rollout-replicas 3` 等参数设置 Verl rollout 的张量并行度和复制数量，同时 `HuggingFaceChatClient` / `CodeFuseCGMGenerator` 也支持 `device_map='auto'` 或自定义 dtype，以在推理时覆盖 16 卡。【F:graph_planner/integrations/local_llm/hf.py†L19-L186】【F:graph_planner/integrations/codefuse_cgm/inference.py†L18-L152】
+
+4. **容器隔离**：新的 `issue_uid` 机制为每个并发任务生成独立的子图缓存键，防止 16 个容器同时写 `.aci/subgraphs` 时互相覆盖。【F:graph_planner/integrations/rllm/env.py†L46-L134】【F:graph_planner/integrations/rllm/cgm_env.py†L70-L197】
+
+5. **配置验证**：执行 `--print-config` 可打印最终 Hydra 配置，确认 `num_workers`、`n_parallel_agents`、`ray_init` 等字段已经按照 16 卡并发需求调整。【F:tests/test_rllm_integration.py†L197-L244】
 
 ### 4.4 远端 CGM / 本地 fallback
 - 若 `.aci/config.json` 或环境变量启用了 `cgm.endpoint`，`cgm_adapter` 会优先使用 `CodeFuseCGMClient` 向官方服务发起请求；否则回退到本地 `CodeFuseCGMGenerator` 或规则标记补丁，确保补丁流程不会因模型缺失而中断。【F:graph_planner/agents/rule_based/cgm_adapter.py†L145-L207】

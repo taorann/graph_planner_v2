@@ -9,8 +9,11 @@ English summary
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
+from uuid import uuid4
 
 from ...infra.vendor import ensure_rllm_importable
 
@@ -78,6 +81,9 @@ else:
             self.instruction = instruction or entry.get("instruction") or DEFAULT_INSTRUCTION
             self._planner: PlannerEnv | None = None
             self._context: _Context | None = None
+            self._issue_uid = uuid4().hex
+            issue = self.entry.get("issue") or {}
+            self._source_issue_id = str(issue.get("id") or "")
 
         # ------------------------------------------------------------------
         # BaseEnv interface
@@ -102,6 +108,8 @@ else:
             info = {
                 "task_id": self.entry.get("task_id"),
                 "max_steps": self.max_steps,
+                "issue_uid": self._issue_uid,
+                "source_issue_id": self._source_issue_id,
             }
             return obs, info
 
@@ -168,10 +176,25 @@ else:
             sandbox.setdefault("env", {})
             ds_path = sandbox.get("r2e_ds_json")
             if ds_path:
-                sandbox["r2e_ds_json"] = str(ds_path)
+                sandbox["r2e_ds_json"] = str(Path(ds_path).expanduser().resolve())
             cfg = SandboxConfig(**sandbox)
-            issue = dict(self.entry.get("issue") or {})
+            issue = self._build_issue_payload()
             return PlannerEnv(issue=issue, sandbox_cfg=cfg)
+
+        def _build_issue_payload(self) -> Dict[str, Any]:
+            issue = dict(self.entry.get("issue") or {})
+            original_id = str(issue.get("id") or "")
+            issue.setdefault("metadata", {})
+            issue["metadata"]["source_issue_id"] = original_id or issue.get("metadata", {}).get("source_issue_id") or ""
+
+            parts = [
+                original_id or None,
+                str(self.entry.get("task_id") or ""),
+                f"pid{os.getpid()}",
+                self._issue_uid,
+            ]
+            issue["id"] = "__".join([p for p in parts if p]) or self._issue_uid
+            return issue
 
         def _prepare_context(self, initial_obs: Dict[str, Any]) -> _Context:
             """整理计划、片段、图结构文本供代理提示使用。"""
