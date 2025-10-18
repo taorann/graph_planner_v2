@@ -100,8 +100,22 @@ def _has_rllm_modules() -> bool:
         base_spec = importlib.util.find_spec("rllm")
         if base_spec is None:
             return False
-        agent_spec = importlib.util.find_spec("rllm.agents.agent")
-        env_spec = importlib.util.find_spec("rllm.environments.base.base_env")
+        agent_spec = None
+        env_spec = None
+        for candidate in ("rllm.rllm.agents.agent", "rllm.agents.agent"):
+            try:
+                agent_spec = importlib.util.find_spec(candidate)
+            except ModuleNotFoundError:
+                continue
+            if agent_spec is not None:
+                break
+        for candidate in ("rllm.rllm.environments.base.base_env", "rllm.environments.base.base_env"):
+            try:
+                env_spec = importlib.util.find_spec(candidate)
+            except ModuleNotFoundError:
+                continue
+            if env_spec is not None:
+                break
     except ModuleNotFoundError:  # pragma: no cover - defensive guard
         return False
     verl_core = _repo_root() / "rllm" / "verl" / "verl" / "trainer" / "ppo" / "core_algos.py"

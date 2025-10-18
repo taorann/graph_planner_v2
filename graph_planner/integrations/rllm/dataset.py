@@ -17,11 +17,16 @@ from ...infra.vendor import ensure_rllm_importable
 ensure_rllm_importable()
 
 try:
-    from rllm.data.dataset import Dataset, DatasetRegistry  # type: ignore[attr-defined]
-except ModuleNotFoundError as _exc:  # pragma: no cover - optional dependency
-    Dataset = None  # type: ignore[assignment]
-    DatasetRegistry = None  # type: ignore[assignment]
-    _IMPORT_ERROR = _exc
+    from rllm.rllm.data.dataset import Dataset, DatasetRegistry  # type: ignore[attr-defined]
+except ModuleNotFoundError:
+    try:
+        from rllm.data.dataset import Dataset, DatasetRegistry  # type: ignore[attr-defined]
+    except ModuleNotFoundError as _exc:  # pragma: no cover - optional dependency
+        Dataset = None  # type: ignore[assignment]
+        DatasetRegistry = None  # type: ignore[assignment]
+        _IMPORT_ERROR = _exc
+    else:
+        _IMPORT_ERROR = None
 else:
     _IMPORT_ERROR = None
 

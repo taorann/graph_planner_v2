@@ -17,10 +17,15 @@ from ...infra.vendor import ensure_rllm_importable
 ensure_rllm_importable()
 
 try:
-    from rllm.environments.base.base_env import BaseEnv  # type: ignore[attr-defined]
-except ModuleNotFoundError as _exc:  # pragma: no cover - optional dependency
-    BaseEnv = None  # type: ignore[assignment]
-    _IMPORT_ERROR = _exc
+    from rllm.rllm.environments.base.base_env import BaseEnv  # type: ignore[attr-defined]
+except ModuleNotFoundError:
+    try:
+        from rllm.environments.base.base_env import BaseEnv  # type: ignore[attr-defined]
+    except ModuleNotFoundError as _exc:  # pragma: no cover - optional dependency
+        BaseEnv = None  # type: ignore[assignment]
+        _IMPORT_ERROR = _exc
+    else:
+        _IMPORT_ERROR = None
 else:
     _IMPORT_ERROR = None
 

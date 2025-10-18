@@ -59,8 +59,8 @@ CLI / Scripts / Tests
   2. 若环境未指定，先尝试当前仓库根目录内的 `./rllm` 子模块；
   3. 如果有人将 rLLM 独立检出到仓库同级目录，也会检测 `../rllm`；
   4. 最后回退到仓库根本身，以兼容 `pip install -e .` 等开发方式；
-  5. 每次插入候选路径后刷新 `importlib` 缓存，并验证 `rllm` 与 `rllm.agents.agent`、`rllm.environments.base.base_env` 是否可解析，只有在确认结构完整后才返回成功。【F:graph_planner/infra/vendor.py†L1-L99】
-- 因为路径是明确定义的，所以 `integrations/rllm` 内部直接执行 `from rllm.agents.agent import BaseAgent`、`from rllm.data.dataset import DatasetRegistry` 等标准导入，不再尝试猜测别名或动态包装。IDE 若提示波浪线，通常是尚未执行 `ensure_rllm_importable()`（即缺少 sys.path 注入）导致，此函数在包的 `__init__` 与各子模块文件顶层都会最先运行一次，确保解释器和静态分析都能定位到 vendored rLLM。【F:graph_planner/integrations/rllm/__init__.py†L1-L61】【F:graph_planner/integrations/rllm/dataset.py†L12-L43】
+  5. 每次插入候选路径后刷新 `importlib` 缓存，并验证 `rllm` 与 `rllm.rllm.agents.agent`/`rllm.agents.agent`、`rllm.rllm.environments.base.base_env`/`rllm.environments.base.base_env` 是否可解析，只有在确认结构完整后才返回成功。【F:graph_planner/infra/vendor.py†L1-L112】
+- 因为路径是明确定义的，所以 `integrations/rllm` 内部在导入时会优先尝试 `from rllm.rllm.agents.agent import BaseAgent`、`from rllm.rllm.data.dataset import DatasetRegistry`，若该层级不存在则退回到 `from rllm.agents.agent import ...`。IDE 若提示波浪线，通常是尚未执行 `ensure_rllm_importable()`（即缺少 sys.path 注入）导致，此函数在包的 `__init__` 与各子模块文件顶层都会最先运行一次，确保解释器和静态分析都能定位到 vendored rLLM。【F:graph_planner/integrations/rllm/__init__.py†L1-L61】【F:graph_planner/integrations/rllm/dataset.py†L12-L43】
 
 ## 3. 数据与上下文流 / Data flow
 
