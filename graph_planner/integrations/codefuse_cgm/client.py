@@ -1,6 +1,14 @@
 """HTTP client wrapper for the CodeFuse CGM patch generator."""
 from __future__ import annotations
 
+"""CodeFuse CGM HTTP 客户端封装。
+
+English summary
+    Implements a small HTTP client compatible with the upstream CodeFuse CGM
+    service so planner agents can request patches without importing the full
+    repository.
+"""
+
 import json
 from typing import Any, Dict, Iterable, Optional
 from urllib import request, error
@@ -87,6 +95,8 @@ class CodeFuseCGMClient:
         snippets: Optional[Iterable[Dict[str, Any]]],
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Patch:
+        """调用远程 CGM 服务并返回结构化 Patch。"""
+
         payload = build_cgm_payload(
             issue=issue,
             plan=plan,
@@ -108,6 +118,8 @@ class CodeFuseCGMClient:
     # Internal helpers
     # ------------------------------------------------------------------
     def _build_model_config(self) -> Dict[str, Any]:
+        """根据客户端配置生成 ``model_config`` 字段。"""
+
         config: Dict[str, Any] = {}
         if self.model:
             config.setdefault("model", self.model)
@@ -118,6 +130,8 @@ class CodeFuseCGMClient:
         return config
 
     def _post_json(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """发送 POST 请求并解析 JSON 响应。"""
+
         data = json.dumps(payload).encode("utf-8")
         req = request.Request(self.endpoint, data=data)
         req.add_header("Content-Type", "application/json")
@@ -138,6 +152,8 @@ class CodeFuseCGMClient:
             raise CodeFuseCGMError(f"CGM request failed: {exc}") from exc
 
     def _extract_patch(self, response: Dict[str, Any]) -> Patch:
+        """从响应体中提取标准化补丁结构。"""
+
         if not isinstance(response, dict):
             raise CodeFuseCGMError("invalid CGM response: expected dict")
         patch_obj = response.get("patch") or {}
@@ -169,4 +185,6 @@ class CodeFuseCGMClient:
 
     @staticmethod
     def _ensure_newline(text: str) -> str:
+        """确保补丁中的 ``new_text`` 以换行结尾。"""
+
         return text if text.endswith("\n") else text + "\n"

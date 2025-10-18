@@ -1,4 +1,9 @@
-"""Utilities for registering Graph Planner tasks with rLLM's dataset registry."""
+"""Graph Planner rLLM 数据集注册工具。
+
+English summary
+    Normalises dataset descriptors, resolves relative paths and plugs them into
+    rLLM's dataset registry so PPO training can reuse planner tasks.
+"""
 
 from __future__ import annotations
 
@@ -12,19 +17,25 @@ from ...infra.vendor import ensure_rllm_importable
 ensure_rllm_importable()
 
 try:
-    from rllm.data.dataset import Dataset, DatasetRegistry
-except ImportError as _exc:  # pragma: no cover - optional dependency
-    Dataset = None  # type: ignore[assignment]
-    DatasetRegistry = None  # type: ignore[assignment]
-    _IMPORT_ERROR = _exc
+    from rllm.rllm.data.dataset import Dataset, DatasetRegistry  # type: ignore[attr-defined]
+except ModuleNotFoundError:
+    try:
+        from rllm.data.dataset import Dataset, DatasetRegistry  # type: ignore[attr-defined]
+    except ModuleNotFoundError as _exc:  # pragma: no cover - optional dependency
+        Dataset = None  # type: ignore[assignment]
+        DatasetRegistry = None  # type: ignore[assignment]
+        _IMPORT_ERROR = _exc
+    else:
+        _IMPORT_ERROR = None
 else:
     _IMPORT_ERROR = None
 
 GRAPH_PLANNER_DATASET_NAME = "graph_planner_repoenv"
+GRAPH_PLANNER_CGM_DATASET_NAME = "graph_planner_cgm"
 
 
 def _coerce_path(value: str | os.PathLike[str], *, base_dir: Path | None = None) -> str:
-    """Normalise a filesystem path for rLLM consumption."""
+    """将相对路径解析为绝对路径字符串，方便 rLLM 访问。"""
     raw = Path(value)
     if not raw.is_absolute():
         if base_dir is None:
@@ -34,6 +45,7 @@ def _coerce_path(value: str | os.PathLike[str], *, base_dir: Path | None = None)
 
 
 def _normalise_entry(entry: Dict[str, Any], *, base_dir: Path | None = None) -> Dict[str, Any]:
+    """深拷贝任务条目并解析 sandbox/mounts 等路径。"""
     payload = json.loads(json.dumps(entry))  # deep copy without NumPy types
     sandbox = payload.get("sandbox") or {}
     ds_path = sandbox.get("r2e_ds_json")
@@ -50,7 +62,7 @@ def _normalise_entry(entry: Dict[str, Any], *, base_dir: Path | None = None) -> 
 
 
 def load_task_entries(path: str | os.PathLike[str]) -> List[Dict[str, Any]]:
-    """Load Graph Planner RL tasks from a JSON/JSONL file."""
+    """从 JSON/JSONL 文件中加载 Graph Planner 任务条目。"""
     path_obj = Path(path)
     if not path_obj.exists():
         raise FileNotFoundError(f"Task descriptor not found: {path_obj}")
@@ -81,7 +93,7 @@ def register_dataset_from_file(
     split: str = "train",
     path: str | os.PathLike[str],
 ) -> Dataset:
-    """Register a dataset file with rLLM's registry and return the Dataset handle."""
+    """将任务文件注册到 rLLM，并返回对应 ``Dataset`` 句柄。"""
     if DatasetRegistry is None or Dataset is None:
         raise ImportError("rLLM is required for dataset registration") from _IMPORT_ERROR
     entries = load_task_entries(path)
@@ -94,8 +106,17 @@ def ensure_dataset_registered(
     split: str = "train",
     path: str | os.PathLike[str],
 ) -> Dataset:
-    """Idempotently register the dataset if the Verl artefacts are missing."""
+    """确保数据集已注册（若缺失则重新注册）。"""
     if DatasetRegistry is None or Dataset is None:
         raise ImportError("rLLM is required for dataset registration") from _IMPORT_ERROR
     dataset = register_dataset_from_file(name=name, split=split, path=path)
     return dataset
+
+
+__all__ = [
+    "GRAPH_PLANNER_DATASET_NAME",
+    "GRAPH_PLANNER_CGM_DATASET_NAME",
+    "load_task_entries",
+    "register_dataset_from_file",
+    "ensure_dataset_registered",
+]
