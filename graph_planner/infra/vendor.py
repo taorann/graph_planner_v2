@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import os
 import sys
@@ -22,6 +23,8 @@ def _expand(path: Path) -> Path:
 
 
 def _iter_candidate_roots() -> Iterator[Path]:
+    """Return deterministic locations that may contain the vendored ``rllm``."""
+
     env_hint = os.environ.get("GRAPH_PLANNER_RLLM_PATH")
     if env_hint:
         for chunk in env_hint.split(os.pathsep):
@@ -30,25 +33,18 @@ def _iter_candidate_roots() -> Iterator[Path]:
                 yield _expand(Path(chunk))
 
     root = _repo_root()
-    for suffix in (
-        "rllm",
-        "RLLM",
-        Path("submodules") / "rllm",
-        Path("submodules") / "RLLM",
-        Path("external") / "rllm",
-        Path("external") / "RLLM",
-        Path("third_party") / "rllm",
-        Path("third_party") / "RLLM",
-        Path("vendor") / "rllm",
-        Path("vendor") / "RLLM",
-        Path("deps") / "rllm",
-        Path("deps") / "RLLM",
-        Path("libraries") / "rllm",
-        Path("libraries") / "RLLM",
-    ):
-        candidate = root / suffix
-        if candidate.exists():
-            yield _expand(candidate)
+
+    # The repository vendors rLLM as a git submodule under ``rllm/`` by default.
+    default_submodule = root / "rllm"
+    if default_submodule.exists():
+        yield _expand(default_submodule)
+
+    # Fallback: allow placing the package next to the repository root for
+    # development workflows where rLLM is checked out separately.
+    parent_rllm = root.parent / "rllm"
+    if parent_rllm.exists():
+        yield _expand(parent_rllm)
+
     yield root
 
 
@@ -89,11 +85,25 @@ def _normalise_path(path: Path) -> Path | None:
     return None
 
 
+def _has_rllm_modules() -> bool:
+    """Return True if both ``rllm`` and its agent submodules are resolvable."""
+
+    try:
+        base_spec = importlib.util.find_spec("rllm")
+        if base_spec is None:
+            return False
+        agent_spec = importlib.util.find_spec("rllm.agents.agent")
+        env_spec = importlib.util.find_spec("rllm.environments.base.base_env")
+    except ModuleNotFoundError:  # pragma: no cover - defensive guard
+        return False
+    return agent_spec is not None and env_spec is not None
+
+
 @lru_cache(maxsize=1)
 def ensure_rllm_importable() -> bool:
     """Ensure the bundled rLLM repository is importable."""
 
-    if importlib.util.find_spec("rllm") is not None:
+    if _has_rllm_modules():
         return True
 
     visited: Set[Path] = set()
@@ -104,7 +114,11 @@ def ensure_rllm_importable() -> bool:
                 continue
             visited.add(normalized)
             sys.path.insert(0, str(normalized))
-            if importlib.util.find_spec("rllm") is not None:
+            for key in list(sys.modules):
+                if key == "rllm" or key.startswith("rllm."):
+                    sys.modules.pop(key, None)
+            importlib.invalidate_caches()
+            if _has_rllm_modules():
                 return True
     return False
 

@@ -12,8 +12,8 @@ from ...infra.vendor import ensure_rllm_importable
 ensure_rllm_importable()
 
 try:
-    from rllm.environments.base.base_env import BaseEnv
-except ImportError as _exc:  # pragma: no cover - optional dependency
+    from rllm.environments.base.base_env import BaseEnv  # type: ignore[attr-defined]
+except ModuleNotFoundError as _exc:  # pragma: no cover - optional dependency
     BaseEnv = None  # type: ignore[assignment]
     _ENV_IMPORT_ERROR = _exc
 else:

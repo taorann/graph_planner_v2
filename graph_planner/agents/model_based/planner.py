@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Protocol
 
 from aci.schema import Plan, PlanTarget
 from ..common.chat import (
@@ -19,7 +19,7 @@ from ..rule_based import cgm_adapter
 from ..rule_based.planner import PlannerAgent as RulePlannerAgent
 from ...core.actions import RepairAction, SubmitAction
 from ...infra.config import Config, load as load_config
-from ...integrations.local_llm import LocalLLMClient, LocalLLMError
+from ...integrations.local_llm import LocalLLMError, build_planner_client
 from ...memory import subgraph_store
 
 
@@ -35,13 +35,26 @@ class _AgentState:
     plan_text: str = ""
 
 
+class _ChatClient(Protocol):
+    def chat(
+        self,
+        messages: Iterable[Dict[str, str]],
+        *,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        top_p: Optional[float] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        ...
+
+
 class LocalLLMPlannerAgent:
     """Agent that mirrors the rule-based flow but relies on a local chat model."""
 
     def __init__(
         self,
         *,
-        client: Optional[LocalLLMClient] = None,
+        client: Optional[_ChatClient] = None,
         system_prompt: Optional[str] = None,
         use_rule_fallback: bool = True,
     ) -> None:
@@ -51,7 +64,7 @@ class LocalLLMPlannerAgent:
             if pm_cfg is None:
                 raise RuntimeError("planner_model section missing in configuration")
             try:
-                client = LocalLLMClient.from_config(pm_cfg)
+                client = build_planner_client(pm_cfg)
             except Exception as exc:  # pragma: no cover - configuration error
                 raise RuntimeError(
                     "planner model client could not be initialised; ensure local endpoint is configured"
