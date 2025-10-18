@@ -1,0 +1,85 @@
+{
+  "graph_dir": [],
+  "train_files":[],
+  "valid_files":[],
+  "output_dir": "",
+  "tb_dir": "",
+
+  "embedding_dim": 256,
+  "load_pretrained_encoder": false,
+  "pretrained_encoder_path": null, 
+
+  "load_pretrained_adapter": false,
+  "pretrained_adapter_path": null,
+  "adapter_hidden_dim": 4096,
+  "adapter_num_layers": 1,
+  "adapter_num_heads": 8,
+
+  "load_pretrained_tokenizer": true,
+  "pretrained_tokenizer_path": "Qwen/Qwen2.5-Coder-7B-Instruct",
+
+  "pretrained_model_path": "Qwen/Qwen2.5-Coder-7B-Instruct",
+  "self_defined": false,
+  "framework_type": "T1",
+  "model_type": "Qwen",
+
+  "pretrained_lora_path": null,
+  "quantization": "4bit",
+
+  "mode": "eal",
+  "task": "unit_test",
+  "use_chat": false,
+  "use_adj": true,
+
+  "peft": "LoRA",
+  "lora_rank": 32,
+  "lora_alpha": 32,
+  "lora_dropout": 0.05,
+  "lora_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+
+  "enc_peft": "LoRA",
+  "enc_lora_rank": 32,
+  "enc_lora_alpha": 32,
+  "enc_lora_dropout": 0.05,
+  "enc_lora_modules": "all-linear",
+
+  "graph_pad_token": "<｜graph_pad｜>",
+  "graph_pad_id": 32022,
+  "graph_token_num": 512,
+
+  "learning_rate": 1e-4,
+  "min_lr": 1e-7,
+  "weight_decay": 0.1,
+  "lr_scheduler_type": "reduce_lr_on_plateau",
+
+  "gradient_accumulation_steps": 1,
+  "num_warmup_steps": 0,
+  "adapter_warmup": false,
+  "adapter_warmup_steps": 500,
+  "num_train_epochs": 20,
+
+  "data_split": "0.98,0.02",
+  "max_train_steps": null,
+  "max_train_samples": null,
+  "max_valid_samples": 2048,
+  "per_device_train_batch_size": 1,
+  "per_device_eval_batch_size": 1,
+
+  "seed": 42,
+  "seq_length": 8192,
+  "log_interval": 5,
+
+  
+
+  "step_checkpointing": false,
+  "checkpointing_steps": 500,
+  "step_evaluation": true,
+  "evaluation_steps": 5000,
+  "epoch_evaluation": false,
+  "epoch_checkpointing": false,
+
+  "early_stopping": true,
+  "early_stopping_stall_num": 6,
+
+  "attn_implementation": "sdpa"
+}
