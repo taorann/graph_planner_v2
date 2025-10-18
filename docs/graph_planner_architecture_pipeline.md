@@ -74,6 +74,13 @@ CLI / Scripts / Tests
 5. **补丁生成**：`CodeFuseCGMGenerator.generate` 或远端 `CodeFuseCGMClient.complete` 获取补丁 JSON；若模型不可用则 `_LocalCGMRuntime` 在目标文件行尾添加 `CGM-LOCAL` 标记构造兜底补丁。【F:graph_planner/integrations/codefuse_cgm/inference.py†L62-L160】【F:graph_planner/agents/rule_based/cgm_adapter.py†L145-L207】
 6. **动作流**：Planner 代理（规则或 LLM）依据当前观测和计划决定 Explore/Memory/Repair/Submit 动作，通过 `core.actions` 传递给环境，再由 `SandboxRuntime` 实际执行命令或应用补丁。【F:graph_planner/core/actions.py†L6-L42】【F:graph_planner/runtime/sandbox.py†L60-L214】
 
+### 3.1 测试数据流（Toy MLP）/ Test data flow with the toy MLP
+
+1. **Checkpoint 构建**：`tests/test_toy_mlp.py::test_toy_checkpoint_integrates_with_cgm_generator` 调用 `create_toy_checkpoint()`，在临时目录写入字符粒度 `ToyTokenizer`、`ToyLMConfig` 以及两层 MLP 权重，形成 Hugging Face 兼容的本地模型目录。【F:graph_planner/models/toy_lm.py†L27-L200】【F:tests/test_toy_mlp.py†L13-L31】
+2. **CGM 推理链路**：`CodeFuseCGMGenerator` 读取该 checkpoint，与 `_build_example()` 构造的 `CGMExample`（含 issue、plan、subgraph、snippets）结合，通过 `ConversationEncoder` 组装消息后执行 `generate()`，输出字符串补丁候选，验证 CGM 集成完整性。【F:graph_planner/integrations/codefuse_cgm/data.py†L80-L210】【F:graph_planner/integrations/codefuse_cgm/inference.py†L62-L160】【F:tests/test_toy_mlp.py†L23-L33】
+3. **Planner 聊天链路**：同一测试文件在 `test_toy_checkpoint_integrates_with_planner_chat` 中使用 `HuggingFaceChatClient` 加载 toy checkpoint，通过 tokenizer 的 `chat_template` 将 system/user 消息格式化，并经 MLP 生成响应，证明 Planner LLM 代理的本地推理路径可用。【F:graph_planner/integrations/local_llm/hf.py†L32-L118】【F:graph_planner/models/toy_lm.py†L160-L218】【F:tests/test_toy_mlp.py†L35-L48】
+4. **梯度反向传播**：`test_toy_model_supports_backward_updates` 直接实例化 `ToyLMForCausalLM`，构造随机张量进行前向、计算交叉熵损失并触发 `SGD.step()`，确认模型权重随梯度更新，从而支撑 rLLM 训练链路的单步前/反向流程。【F:graph_planner/models/toy_lm.py†L108-L158】【F:tests/test_toy_mlp.py†L50-L66】
+
 ## 4. 训练与运行 Pipeline
 
 ### 4.1 规则 / 本地推理（离线调试）
