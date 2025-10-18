@@ -6,10 +6,14 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from graph_planner.infra.vendor import ensure_rllm_importable
+
+ensure_rllm_importable()
+
 import ray
 from omegaconf import OmegaConf
 
-from integrations.rllm import (
+from graph_planner.integrations.rllm import (
     GRAPH_PLANNER_DATASET_NAME,
     GraphPlannerRLLMAgent,
     GraphPlannerRLLMEnv,

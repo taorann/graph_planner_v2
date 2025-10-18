@@ -6,9 +6,9 @@ import json
 import os
 from typing import Dict, Tuple
 
-from agent.planner_agent import PlannerAgent
-from core.actions import ActionUnion
-from env.planner_env import PlannerEnv
+from graph_planner.agents import LocalLLMPlannerAgent, PlannerAgent
+from graph_planner.core.actions import ActionUnion
+from graph_planner.env.planner_env import PlannerEnv
 
 ACTION_TYPES = tuple(ActionUnion.__args__)  # type: ignore[attr-defined]
 
@@ -51,8 +51,13 @@ def build_env(args: argparse.Namespace) -> PlannerEnv:
     return PlannerEnv.from_dict(payload)
 
 
-def run_episode(env: PlannerEnv, max_steps: int) -> Dict[str, object]:
-    agent = PlannerAgent()
+def run_episode(env: PlannerEnv, max_steps: int, *, agent_kind: str = "rule") -> Dict[str, object]:
+    if agent_kind == "rule":
+        agent = PlannerAgent()
+    elif agent_kind == "llm":
+        agent = LocalLLMPlannerAgent()
+    else:
+        raise ValueError(f"unknown agent kind: {agent_kind}")
     obs = env.reset()
     trajectory = []
     reward = 0.0
@@ -65,6 +70,11 @@ def run_episode(env: PlannerEnv, max_steps: int) -> Dict[str, object]:
         if not isinstance(action_obj, ACTION_TYPES):
             raise RuntimeError(f"Agent returned invalid action object: {type(action_obj)}")
         obs, reward, done, info = env.step(action_obj)
+        if hasattr(agent, "observe_outcome"):
+            try:
+                agent.observe_outcome(reward, done, info)
+            except Exception:
+                pass
         trajectory.append({
             "step": steps,
             "phase": agent.state.phase,
@@ -97,12 +107,13 @@ def main() -> None:
     parser.add_argument("--issue-title", default="rule-agent demo")
     parser.add_argument("--issue-body", default="")
     parser.add_argument("--max-steps", type=int, default=16)
+    parser.add_argument("--agent", choices=["rule", "llm"], default="rule", help="Agent implementation to run")
     parser.add_argument("--report", help="Optional path to dump the trajectory JSON")
 
     args = parser.parse_args()
     env = build_env(args)
     try:
-        result = run_episode(env, args.max_steps)
+        result = run_episode(env, args.max_steps, agent_kind=args.agent)
     finally:
         env.close()
 

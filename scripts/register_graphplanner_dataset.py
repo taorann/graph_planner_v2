@@ -6,7 +6,11 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from integrations.rllm.dataset import (
+from graph_planner.infra.vendor import ensure_rllm_importable
+
+ensure_rllm_importable()
+
+from graph_planner.integrations.rllm.dataset import (
     GRAPH_PLANNER_DATASET_NAME,
     ensure_dataset_registered,
 )
