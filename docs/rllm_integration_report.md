@@ -6,7 +6,8 @@
 - **代理封装**：`GraphPlannerRLLMAgent` 继承 rLLM `BaseAgent`，使用共享的 `graph_planner/agents/common/chat.py` 工具把环境观测压缩为模型提示，解析模型返回的 JSON 并在失败时回退到规则策略。【F:graph_planner/integrations/rllm/agent.py†L1-L158】【F:graph_planner/agents/common/chat.py†L1-L196】
 - **环境包装**：`GraphPlannerRLLMEnv` 将 `PlannerEnv` 暴露为 rLLM `BaseEnv` 接口，负责加载任务条目、拼装 `SandboxConfig` 并在每步代理调用后返回奖励与终止信号。【F:graph_planner/integrations/rllm/env.py†L1-L110】【F:graph_planner/env/planner_env.py†L32-L173】
 - **数据集注册**：`graph_planner.integrations.rllm.dataset` 提供 `ensure_dataset_registered` 与 JSON/JSONL loader，可将 RepoEnv 任务描述标准化后注册到 rLLM 的 `DatasetRegistry`。【F:graph_planner/integrations/rllm/dataset.py†L19-L97】
-- **训练入口**：`scripts/train_graphplanner_rllm.py` 读取 rLLM 默认 PPO 配置，注入 Graph Planner 专属的 agent/env 名称与步长参数，可选输出合并后的 Hydra 配置或直接启动 Ray 训练作业。【F:scripts/train_graphplanner_rllm.py†L1-L147】
+- **训练入口**：`scripts/train_graphplanner_rllm.py` 读取 rLLM 默认 PPO 配置，注入 Graph Planner 专属的 agent/env 名称与步长参数，可选输出合并后的 Hydra 配置或直接启动 Ray 训练作业。【F:scripts/train_graphplanner_rllm.py†L1-L152】
+- **路径与注册**：`graph_planner/infra/vendor.py` 自动探测项目内的 rLLM 子模块（含 `src/` 布局）并将其加入 `sys.path`，同时 `graph_planner/integrations/rllm/registry.py` 会把 Graph Planner 的 agent/env 映射写入 rLLM 的 `ENV_CLASS_MAPPING` 与 `AGENT_CLASS_MAPPING`，保证 Hydra 侧可直接按名称创建实例。训练、数据集注册脚本都会在导入 rLLM 之前调用该助手，用户也可通过 `GRAPH_PLANNER_RLLM_PATH` 环境变量覆盖搜索路径。【F:graph_planner/infra/vendor.py†L1-L86】【F:graph_planner/integrations/rllm/registry.py†L1-L33】【F:scripts/train_graphplanner_rllm.py†L1-L18】【F:scripts/register_graphplanner_dataset.py†L1-L17】
 
 ## 2. 模型与回退策略
 - 本地决策模型复用 `LocalLLMPlannerAgent` 中的解析逻辑，通过 `graph_planner/agents/common/chat.py` 的协议确保 rLLM 推理与本地 CLI 行为一致；当模型响应无效时，代理会调用规则策略保证环境仍可推进。【F:graph_planner/agents/model_based/planner.py†L38-L178】【F:graph_planner/agents/common/chat.py†L138-L196】

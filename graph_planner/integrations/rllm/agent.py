@@ -6,6 +6,10 @@ import json
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
+from ...infra.vendor import ensure_rllm_importable
+
+ensure_rllm_importable()
+
 try:
     from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
 except ImportError as _exc:  # pragma: no cover - optional dependency

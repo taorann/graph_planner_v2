@@ -5,7 +5,19 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any
 
+from ...infra.vendor import ensure_rllm_importable
 from .agent import GraphPlannerRLLMAgent
+from .registry import register_rllm_components
+
+ensure_rllm_importable()
+
+try:  # Best-effort eager registration for Hydra-driven entrypoints
+    from .env import GraphPlannerRLLMEnv as _GraphPlannerRLLMEnv  # noqa: F401
+except ImportError:  # pragma: no cover - optional dependency
+    _GraphPlannerRLLMEnv = None
+else:
+    register_rllm_components(GraphPlannerRLLMAgent, _GraphPlannerRLLMEnv)
+    GraphPlannerRLLMEnv = _GraphPlannerRLLMEnv
 
 __all__ = [
     "GraphPlannerRLLMAgent",
@@ -20,7 +32,9 @@ __all__ = [
 def __getattr__(name: str) -> Any:  # pragma: no cover - trivial dispatcher
     if name == "GraphPlannerRLLMEnv":
         module = import_module("graph_planner.integrations.rllm.env")
-        return module.GraphPlannerRLLMEnv
+        env_cls = module.GraphPlannerRLLMEnv
+        register_rllm_components(GraphPlannerRLLMAgent, env_cls)
+        return env_cls
     if name in {
         "GRAPH_PLANNER_DATASET_NAME",
         "load_task_entries",

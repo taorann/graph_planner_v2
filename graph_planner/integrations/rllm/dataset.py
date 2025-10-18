@@ -7,6 +7,10 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List
 
+from ...infra.vendor import ensure_rllm_importable
+
+ensure_rllm_importable()
+
 try:
     from rllm.data.dataset import Dataset, DatasetRegistry
 except ImportError as _exc:  # pragma: no cover - optional dependency

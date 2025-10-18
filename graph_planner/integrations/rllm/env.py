@@ -7,6 +7,10 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
+from ...infra.vendor import ensure_rllm_importable
+
+ensure_rllm_importable()
+
 try:
     from rllm.environments.base.base_env import BaseEnv
 except ImportError as _exc:  # pragma: no cover - optional dependency

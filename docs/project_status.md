@@ -11,30 +11,33 @@ Graph Planner 致力于复现 CGM + Planner 的双智能体代码修复流程：
 - **强化学习训练**：通过 rLLM/VERL 的 PPO 管线对 Planner 模型进行 on-policy/online 训练，训练过程中可以接入真实容器（RepoEnv/R2E 数据集）。
 - **Rule-based 串联**：为了便于集成测试，规则策略仍可覆盖全部流程，确保在本地模型尚未接入时依旧能跑通完整链路并记录修复日志。
 
-## 当前已有的训练链路组件
+## 当前已有的核心框架
 
-以下能力已经在仓库中实现并通过示例脚本串联：
+当前仓库已经落实以下框架与配套能力，确保“Planner + CGM” 双智能体流程可以在本地串联、在 rLLM 上训练，并通过规则策略兜底：
 
-1. **rLLM Agent 封装**（`graph_planner/integrations/rllm/agent.py`）
-   - `GraphPlannerRLLMAgent` 将环境观测整理成统一的系统提示，解析模型 JSON 输出，并在解析失败时回退到规则策略。
-   - 统一使用 `agents.common.chat` 中的协议，将 Planner 模型与本地 CLI 保持一致。
+1. **Graph Planner 统一包结构**（`graph_planner/`）
+   - `graph_planner.agents`：同时保留规则策略（`rule_based`）与本地模型策略（`model_based`），共享 `agents.common.chat` 定义的 JSON 协议，方便替换决策模型。
+   - `graph_planner.env`：`PlannerEnv` 封装 R2E/RepoEnv 任务生命周期，负责动作解析、奖励计算与遥测输出。
+   - `graph_planner.runtime`：`SandboxRuntime` 调度 FakeSandbox、RepoEnv、docker-py 三种后端，并统一将 lint/test 结果写入日志。
 
-2. **rLLM Env 封装**（`graph_planner/integrations/rllm/env.py`）
-   - `GraphPlannerRLLMEnv` 将 `graph_planner.env.planner_env.PlannerEnv` 暴露给 rLLM，封装奖励、终止条件与 RepoEnv / Sandbox 初始化逻辑。
-   - 集成 `ensure_dataset_registered`，可把 JSON/JSONL 数据集写入 rLLM 的 Verl 目录。
+2. **rLLM 训练集成**
+   - `graph_planner.integrations.rllm.agent.GraphPlannerRLLMAgent` 将环境观测整理成系统提示，解析模型 JSON 输出，并在解析失败时回退到规则策略。
+   - `graph_planner.integrations.rllm.env.GraphPlannerRLLMEnv` 将 `PlannerEnv` 暴露给 rLLM，封装奖励、终止条件与 RepoEnv/Sandbox 初始化逻辑。
+   - `graph_planner.integrations.rllm.registry` + `graph_planner.infra.vendor.ensure_rllm_importable` 负责定位子模块 rLLM 并在 Hydra/Verl 注册 Graph Planner 自定义 agent/env。
+   - `scripts/train_graphplanner_rllm.py` 读取 rLLM PPO 配置，覆盖数据路径与训练超参，可选择性关闭规则回退。
 
-3. **训练脚本**（`scripts/train_graphplanner_rllm.py`）
-   - 读取 rLLM 官方 PPO 配置，覆盖数据路径、agent/env 参数及训练超参。
-   - 支持 `--model-path` 传入基线 checkpoint，`--use-fallback` 控制是否启用规则回退。
-   - 默认通过 Ray 启动训练任务，可选择连接现有 Ray 集群。
+3. **本地运行与冒烟测试脚手架**
+   - `scripts/run_rule_agent.py` 支持在 FakeSandbox、RepoEnv、docker 模式下运行规则或本地 LLM 策略，方便训练前验证模型行为。
+   - `tests/test_rule_agent_pipeline.py` 通过 FakeSandbox 模拟完整修复流程，并把 `repair_trace` 写入 `logs/test_runs.jsonl`，用于回归测试和日志示例。
 
-4. **本地 LLM Planner 运行链路**（`graph_planner/agents/model_based/planner.py` + `scripts/run_rule_agent.py`）
-   - `LocalLLMPlannerAgent` 使用 OpenAI 兼容的本地部署接口，接入 Planner 模型并与 CGM 协同。
-   - CLI 支持 `--agent llm` 在有模型配置的情况下切换到本地 LLM，便于训练前做端到端冒烟测试。
+4. **补丁生成与护栏**
+   - `graph_planner.agents.rule_based.cgm_adapter` 暴露 CGM 的统一接口，既可调用真实模型，也能在缺席时回退到规则补丁。
+   - `aci.guard` 提供补丁护栏校验，确保 Planner 与 CGM 输出的 diff 满足安全约束。
+   - `aci` 工具链实现文件查看、编辑、lint/test 等基础能力，供 Sandbox 与训练流程复用。
 
-5. **规则策略与修复日志**（`graph_planner/agents/rule_based`、`tests/test_rule_agent_pipeline.py`）
-   - 规则策略完整覆盖探索、记忆、检索、补丁生成流程，同时记录 `repair_trace`，确保在模型缺席时仍能验证流程正确性。
-   - 日志默认写入 `logs/test_runs.jsonl`，内容包含读写片段、执行命令以及修复后的文件快照。
+5. **文档与操作指南**
+   - `docs/repoenv_smoke_test.md`、`docs/scripts_and_tests_guide.md`、`docs/github_update_instructions.md` 等文档分别覆盖容器冒烟、脚本说明、贡献流程。
+   - `README.md` 与本文件提供整体架构、配置方法与现状记录。
 
 ## 尚需补齐的关键条件
 

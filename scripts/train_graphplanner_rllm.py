@@ -6,6 +6,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from graph_planner.infra.vendor import ensure_rllm_importable
+
+ensure_rllm_importable()
+
 import ray
 from omegaconf import OmegaConf
 
