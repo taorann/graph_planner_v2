@@ -14,6 +14,8 @@ import torch
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from ...models import toy_lm as _toy_lm  # noqa: F401 - ensure toy model registration
+
 from .data import CGMExample, GraphLinearizer, SnippetFormatter
 from .formatting import ConversationEncoder
 

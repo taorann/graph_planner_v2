@@ -15,6 +15,8 @@ from typing import List, Mapping, Optional, Sequence
 
 import json
 
+import torch
+
 from transformers import PreTrainedTokenizerBase
 
 
@@ -221,7 +223,7 @@ class ConversationEncoder:
         """调用 tokenizer 聊天模板或退化为 ``role: content`` 拼接。"""
 
         if hasattr(self.tokenizer, "apply_chat_template"):
-            return self.tokenizer.apply_chat_template(
+            encoded = self.tokenizer.apply_chat_template(
                 messages,
                 tokenize=True,
                 add_generation_prompt=add_generation_prompt,
@@ -229,6 +231,10 @@ class ConversationEncoder:
                 truncation=True,
                 return_tensors="pt",
             )
+            if isinstance(encoded, torch.Tensor):
+                attention = torch.ones_like(encoded)
+                return {"input_ids": encoded, "attention_mask": attention}
+            return encoded
 
         # Fallback: join messages manually when the tokenizer does not define a
         # chat template.  We fall back to a simple "role: message" format.

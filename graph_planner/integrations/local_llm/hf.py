@@ -13,6 +13,8 @@ from typing import Any, Dict, Iterable, Optional
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from ...models import toy_lm as _toy_lm  # noqa: F401 - ensure toy model registration
+
 
 @dataclass
 class HuggingFaceChatConfig:

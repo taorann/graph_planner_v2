@@ -20,8 +20,8 @@ def register_rllm_components(
     if not ensure_rllm_importable():
         return False
     try:
-        from rllm.trainer import env_agent_mappings as mapping
-    except ImportError:  # pragma: no cover - optional dependency
+        from rllm.trainer import env_agent_mappings as mapping  # type: ignore[attr-defined]
+    except ModuleNotFoundError:  # pragma: no cover - optional dependency
         return False
 
     for container in (mapping.AGENT_CLASSES, mapping.AGENT_CLASS_MAPPING):

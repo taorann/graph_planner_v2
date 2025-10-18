@@ -23,6 +23,8 @@ from transformers import (
     get_scheduler,
 )
 
+from ...models import toy_lm as _toy_lm  # noqa: F401 - ensure toy model registration
+
 from .data import CGMExample, CodeFuseCGMDataset, GraphLinearizer, SnippetFormatter
 from .formatting import ConversationEncoder
 

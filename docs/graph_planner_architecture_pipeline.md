@@ -52,6 +52,16 @@ CLI / Scripts / Tests
 | `integrations/rllm/dataset.py` | `ensure_dataset_registered` | 将 JSON/JSONL 任务注册为 rLLM 可识别的数据集，解析路径与挂载信息。【F:graph_planner/integrations/rllm/dataset.py†L28-L109】 |
 | `scripts/train_graphplanner_rllm.py` | CLI helpers | 注入模型路径、注册数据集、绑定 Agent/Env，并委托 rLLM PPO 训练。【F:scripts/train_graphplanner_rllm.py†L32-L200】 |
 
+### 2.1 rLLM 模块导入路径 / rLLM import resolution
+
+- rLLM 源码以 Git 子模块形式放在仓库根目录下的 `rllm/`，其内部又包含 Python 包目录 `rllm/`（双层目录）。`graph_planner.infra.vendor.ensure_rllm_importable()` 在任何 rLLM 适配模块导入前调用，步骤如下：
+  1. 读取可选的环境变量 `GRAPH_PLANNER_RLLM_PATH`，若设置则直接把该路径加入 `sys.path`；
+  2. 若环境未指定，先尝试当前仓库根目录内的 `./rllm` 子模块；
+  3. 如果有人将 rLLM 独立检出到仓库同级目录，也会检测 `../rllm`；
+  4. 最后回退到仓库根本身，以兼容 `pip install -e .` 等开发方式；
+  5. 每次插入候选路径后刷新 `importlib` 缓存，并验证 `rllm` 与 `rllm.agents.agent`、`rllm.environments.base.base_env` 是否可解析，只有在确认结构完整后才返回成功。【F:graph_planner/infra/vendor.py†L1-L99】
+- 因为路径是明确定义的，所以 `integrations/rllm` 内部直接执行 `from rllm.agents.agent import BaseAgent`、`from rllm.data.dataset import DatasetRegistry` 等标准导入，不再尝试猜测别名或动态包装。IDE 若提示波浪线，通常是尚未执行 `ensure_rllm_importable()`（即缺少 sys.path 注入）导致，此函数在包的 `__init__` 与各子模块文件顶层都会最先运行一次，确保解释器和静态分析都能定位到 vendored rLLM。【F:graph_planner/integrations/rllm/__init__.py†L1-L61】【F:graph_planner/integrations/rllm/dataset.py†L12-L43】
+
 ## 3. 数据与上下文流 / Data flow
 
 1. **任务描述**：来自 `datasets/*.jsonl` 或自定义 JSON，包含 Issue 文本、最大步数、容器配置等。`rllm.dataset.load_task_entries` 会解析路径字段并标准化 sandbox 配置。【F:graph_planner/integrations/rllm/dataset.py†L59-L109】
@@ -63,6 +73,13 @@ CLI / Scripts / Tests
    - `ConversationEncoder.build_user_message` 合并 Issue、Plan、Graph、Snippets，最终构造聊天消息列表并在训练时输出标签掩码。【F:graph_planner/integrations/codefuse_cgm/formatting.py†L184-L266】
 5. **补丁生成**：`CodeFuseCGMGenerator.generate` 或远端 `CodeFuseCGMClient.complete` 获取补丁 JSON；若模型不可用则 `_LocalCGMRuntime` 在目标文件行尾添加 `CGM-LOCAL` 标记构造兜底补丁。【F:graph_planner/integrations/codefuse_cgm/inference.py†L62-L160】【F:graph_planner/agents/rule_based/cgm_adapter.py†L145-L207】
 6. **动作流**：Planner 代理（规则或 LLM）依据当前观测和计划决定 Explore/Memory/Repair/Submit 动作，通过 `core.actions` 传递给环境，再由 `SandboxRuntime` 实际执行命令或应用补丁。【F:graph_planner/core/actions.py†L6-L42】【F:graph_planner/runtime/sandbox.py†L60-L214】
+
+### 3.1 测试数据流（Toy MLP）/ Test data flow with the toy MLP
+
+1. **Checkpoint 构建**：`tests/test_toy_mlp.py::test_toy_checkpoint_integrates_with_cgm_generator` 调用 `create_toy_checkpoint()`，在临时目录写入字符粒度 `ToyTokenizer`、`ToyLMConfig` 以及两层 MLP 权重，形成 Hugging Face 兼容的本地模型目录。【F:graph_planner/models/toy_lm.py†L27-L200】【F:tests/test_toy_mlp.py†L13-L31】
+2. **CGM 推理链路**：`CodeFuseCGMGenerator` 读取该 checkpoint，与 `_build_example()` 构造的 `CGMExample`（含 issue、plan、subgraph、snippets）结合，通过 `ConversationEncoder` 组装消息后执行 `generate()`，输出字符串补丁候选，验证 CGM 集成完整性。【F:graph_planner/integrations/codefuse_cgm/data.py†L80-L210】【F:graph_planner/integrations/codefuse_cgm/inference.py†L62-L160】【F:tests/test_toy_mlp.py†L23-L33】
+3. **Planner 聊天链路**：同一测试文件在 `test_toy_checkpoint_integrates_with_planner_chat` 中使用 `HuggingFaceChatClient` 加载 toy checkpoint，通过 tokenizer 的 `chat_template` 将 system/user 消息格式化，并经 MLP 生成响应，证明 Planner LLM 代理的本地推理路径可用。【F:graph_planner/integrations/local_llm/hf.py†L32-L118】【F:graph_planner/models/toy_lm.py†L160-L218】【F:tests/test_toy_mlp.py†L35-L48】
+4. **梯度反向传播**：`test_toy_model_supports_backward_updates` 直接实例化 `ToyLMForCausalLM`，构造随机张量进行前向、计算交叉熵损失并触发 `SGD.step()`，确认模型权重随梯度更新，从而支撑 rLLM 训练链路的单步前/反向流程。【F:graph_planner/models/toy_lm.py†L108-L158】【F:tests/test_toy_mlp.py†L50-L66】
 
 ## 4. 训练与运行 Pipeline
 
