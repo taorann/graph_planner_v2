@@ -162,6 +162,8 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Alternative logging backend when W&B is disabled.",
     )
+    parser.add_argument("--project-name", default=None)
+    parser.add_argument("--experiment-name", default=None)
     return parser.parse_args()
 
 
