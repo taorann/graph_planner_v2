@@ -69,6 +69,6 @@
    ```
    若依赖项（如 `pydantic`）缺失，可先安装 `R2E-Gym` 提供的环境。
 
-3. **训练任务**：使用 `scripts/train_graphplanner_rllm.py` 启动 rLLM 强化学习，需提前配置本地部署的规划模型与 CGM 端点。
+3. **训练任务**：使用 `scripts/train_graphplanner_rllm.py` 启动 rLLM 强化学习；详细的准备步骤与命令示例请参考《graph_planner_architecture_pipeline.md》中的“4.3.2 训练脚本速查”。【F:docs/graph_planner_architecture_pipeline.md†L120-L172】
 
-通过以上梳理，贡献者可以快速理解脚本入口、回归保障与基础设施封装，从而在中文文档中定位具体代码并开展开发。
+通过以上梳理，贡献者可以快速理解脚本入口、回归保障与基础设施封装，并在需要时跳转到架构总览文档获取端到端 pipeline 与命令速查。

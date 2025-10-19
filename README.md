@@ -28,9 +28,8 @@ tests/             # FakeSandbox 测试与 CGM 适配器回归
 
 各目录的职责与详细说明可参考：
 
-- [`docs/r2e_gym_code_overview.md`](docs/r2e_gym_code_overview.md)：系统分层、动作协议以及三种容器后端。
+- [`docs/graph_planner_architecture_pipeline.md`](docs/graph_planner_architecture_pipeline.md)：架构分层、容器运行流以及 CGM / rLLM 训练流水线的统一参考。
 - [`docs/scripts_and_tests_guide.md`](docs/scripts_and_tests_guide.md)：脚本与测试入口、ACI/Git/Lint/Test 的实现来源。
-- [`docs/container_testing_reference.md`](docs/container_testing_reference.md)：SandboxRuntime 行为、日志位置与 Rule pipeline 测试桩。
 
 ## 快速上手
 
@@ -53,18 +52,19 @@ tests/             # FakeSandbox 测试与 CGM 适配器回归
 
 3. **启动强化学习训练（需要 rLLM + Docker 环境）**
    ```bash
-   python scripts/train_graphplanner_rllm.py \
-     --dataset datasets/graphplanner_repoenv_sample.jsonl \
-     --model-path <path/to/base/checkpoint>
+  PYTHONPATH=. python scripts/train_graphplanner_rllm.py \
+    --agent planner \
+    --dataset datasets/graphplanner_repoenv_sample.jsonl \
+    --model-path models/planner_model \
+    --cgm-model-path models/cgm_model \
+    --print-config
    ```
-   训练前请确认 Docker daemon 可用、数据集已注册且本地模型接口就绪。详细步骤可参阅 `docs/repoenv_smoke_test.md` 与 `docs/project_status.md`。
+   如需联动 CGM，可额外传入 `--cgm-model-path`；命令会在真正启动前打印最终 Hydra 配置，便于核对 `trainer.*` 覆写。详细准备步骤见 `docs/graph_planner_architecture_pipeline.md` 的“4.3 Planner / CGM 强化学习”章节。
 
 ## 文档索引
 
-- [`docs/repoenv_smoke_test.md`](docs/repoenv_smoke_test.md)：在拥有 Docker 的主机上进行 RepoEnv 冒烟测试的完整流程。
 - [`docs/github_update_instructions.md`](docs/github_update_instructions.md)：提交前的自检命令、Git 流程与日志要求。
-- [`docs/rllm_integration_report.md`](docs/rllm_integration_report.md)：rLLM/VERL 集成状态、配置项以及待办事项。
-- [`docs/container_testing_reference.md`](docs/container_testing_reference.md)：容器后端、遥测记录与测试桩说明。
+- [`docs/graph_planner_architecture_pipeline.md`](docs/graph_planner_architecture_pipeline.md)：端到端架构、RepoEnv 冒烟指引与训练命令速查。
 
 若需进一步了解 ACI 工具链与 Git 封装的使用方式，请参见 `docs/scripts_and_tests_guide.md` 中的“ACI / Git / Lint / Test 的实现来源”章节。
 
