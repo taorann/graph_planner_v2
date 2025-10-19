@@ -30,6 +30,11 @@ from ...integrations.codefuse_cgm import (
 from ..common.chat import extract_json_payload
 
 _MARKER = "CGM-LOCAL"
+_LOCAL_INSTRUCTION = (
+    "Generate a JSON object with a `patch` field. The `patch.edits` array must"
+    " list objects containing `path`, `start`, `end`, and `new_text`. Ensure"
+    " `new_text` ends with a newline."
+)
 
 _LOCAL_INSTRUCTION = CGM_PATCH_INSTRUCTION
 
