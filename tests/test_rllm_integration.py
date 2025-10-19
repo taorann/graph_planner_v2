@@ -149,8 +149,10 @@ def test_load_task_entries_normalises_paths(tmp_path):
     ds_path.write_text(json.dumps(entry) + "\n", encoding="utf-8")
 
     rows = dataset_mod.load_task_entries(ds_path)
-    assert rows[0]["sandbox"]["r2e_ds_json"] == str(r2e_file.resolve())
-    mounts = rows[0]["sandbox"]["mounts"]
+    assert rows[0]["task_id"] == "demo"
+    raw_entry = json.loads(rows[0]["raw_entry_json"])
+    assert raw_entry["sandbox"]["r2e_ds_json"] == str(r2e_file.resolve())
+    mounts = raw_entry["sandbox"]["mounts"]
     assert str(mount_src.resolve()) in mounts
 
 
@@ -307,6 +309,9 @@ def test_train_cli_print_config_planner(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr("scripts.train_graphplanner_rllm.ensure_dataset_registered", fake_register)
 
+    monkeypatch.setenv("WANDB_MODE", "test")
+    monkeypatch.setenv("WANDB_PROJECT", "demo")
+
     argv = [
         "train_graphplanner_rllm.py",
         "--model-path",
@@ -364,7 +369,7 @@ def test_train_cli_parallel_overrides(tmp_path, monkeypatch, capsys):
         "--ray-num-cpus",
         "256",
         "--ray-num-gpus",
-        "16",
+        "32",
         "--ray-memory",
         "107374182400",
         "--ray-object-store-memory",
@@ -386,7 +391,116 @@ def test_train_cli_parallel_overrides(tmp_path, monkeypatch, capsys):
     assert "num_workers: 40" in output
     assert "n_parallel_tasks: 64" in output
     assert "num_cpus: 256" in output
-    assert "num_gpus: 16" in output
+    assert "num_gpus: 32" in output
     assert "memory: 107374182400" in output
     assert "object_store_memory: 21474836480" in output
+
+
+def test_train_cli_training_overrides(tmp_path, monkeypatch, capsys):
+    dataset_file = Path("datasets/graphplanner_repoenv_sample.jsonl")
+    assert dataset_file.exists(), "sample dataset missing"
+
+    train_verl = tmp_path / "train_verl.parquet"
+    val_verl = tmp_path / "val_verl.parquet"
+
+    def fake_register(*, name, split, path):
+        assert Path(path) == dataset_file
+        target = train_verl if "val" not in name else val_verl
+        return SimpleNamespace(
+            get_verl_data_path=lambda: str(target),
+            get_data_path=lambda: str(target.with_suffix(".raw.parquet")),
+        )
+
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.ensure_dataset_registered", fake_register)
+
+    argv = [
+        "train_graphplanner_rllm.py",
+        "--model-path",
+        str(tmp_path / "policy"),
+        "--output-dir",
+        str(tmp_path / "outputs"),
+        "--val-dataset",
+        str(dataset_file),
+        "--save-interval",
+        "10",
+        "--eval-interval",
+        "20",
+        "--resume",
+        str(tmp_path / "resume"),
+        "--precision",
+        "fp16",
+        "--grad-accum-steps",
+        "3",
+        "--lr",
+        "0.0001",
+        "--weight-decay",
+        "0.01",
+        "--warmup-steps",
+        "5",
+        "--early-stop-metric",
+        "val/test_score/pass@k/graph_planner",
+        "--early-stop-mode",
+        "max",
+        "--early-stop-patience",
+        "2",
+        "--log-to-wandb",
+        "--wandb-offline",
+        "--project-name",
+        "demo_proj",
+        "--experiment-name",
+        "demo_exp",
+        "--print-config",
+    ]
+    monkeypatch.setattr(sys, "argv", argv, raising=False)
+
+    from scripts import train_graphplanner_rllm as train_mod
+
+    train_mod.main()
+
+    output = capsys.readouterr().out
+    assert "save_interval: 10" in output
+    assert "test_freq: 20" in output
+    assert "resume_from:" in output and "resume_mode: manual" in output
+    assert "mixed_precision: fp16" in output
+    assert "gradient_accumulation_steps: 3" in output
+    assert "optimizer:" in output and "lr: 0.0001" in output
+    assert "weight_decay: 0.01" in output
+    assert "scheduler:" in output and "warmup_steps: 5" in output
+    assert "early_stop:" in output and "metric: val/test_score/pass@k/graph_planner" in output
+    assert "logger:" in output and "wandb" in output
+
+
+def test_eval_cli_print_config(tmp_path, monkeypatch, capsys):
+    dataset_file = Path("datasets/graphplanner_repoenv_sample.jsonl")
+    assert dataset_file.exists(), "sample dataset missing"
+
+    verl_path = tmp_path / "eval_verl.parquet"
+
+    def fake_register(*, name, split, path):
+        assert Path(path) == dataset_file
+        return SimpleNamespace(
+            get_verl_data_path=lambda: str(verl_path),
+            get_data_path=lambda: str(verl_path.with_suffix(".raw.parquet")),
+        )
+
+    monkeypatch.setattr("scripts.eval_graphplanner_rllm.ensure_dataset_registered", fake_register)
+
+    argv = [
+        "eval_graphplanner_rllm.py",
+        "--dataset",
+        str(dataset_file),
+        "--model-path",
+        str(tmp_path / "policy"),
+        "--print-config",
+    ]
+    monkeypatch.setattr(sys, "argv", argv, raising=False)
+
+    from scripts import eval_graphplanner_rllm as eval_mod
+
+    eval_mod.main()
+
+    output = capsys.readouterr().out
+    assert "val_only: true" in output
+    assert str(verl_path) in output
+    assert "Graph Planner rLLM evaluation launch summary:" in output
 

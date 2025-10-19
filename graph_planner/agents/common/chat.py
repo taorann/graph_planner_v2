@@ -13,17 +13,9 @@ from ...core.actions import (
     RepairAction,
     SubmitAction,
 )
+from .contracts import PLANNER_SYSTEM_PROMPT
 
-SYSTEM_PROMPT = (
-    "You are the Graph Planner decision model.\n"
-    "You operate on a code graph derived from a software repository.\n"
-    "For every observation produce a JSON object with the keys 'thought' and 'action'.\n"
-    "The 'action' object must contain a 'type' field (explore, memory, repair, submit).\n"
-    "For explore you may also set 'op' (find|expand|read), 'anchors', 'nodes', 'hop', and 'limit'.\n"
-    "For memory provide 'ops' describing memory operations.\n"
-    "For repair include 'apply', 'plan', 'plan_targets', and optionally 'patch'.\n"
-    "Always respond with valid JSON (optionally inside ```json fences)."
-)
+SYSTEM_PROMPT = PLANNER_SYSTEM_PROMPT
 
 JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{.*?\})```", re.DOTALL)
 FALLBACK_REASON_KEY = "fallback_reason"

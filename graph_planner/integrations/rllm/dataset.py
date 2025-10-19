@@ -45,7 +45,8 @@ def _coerce_path(value: str | os.PathLike[str], *, base_dir: Path | None = None)
 
 
 def _normalise_entry(entry: Dict[str, Any], *, base_dir: Path | None = None) -> Dict[str, Any]:
-    """深拷贝任务条目并解析 sandbox/mounts 等路径。"""
+    """深拷贝任务条目并解析 sandbox/mounts 等路径，同时输出平铺字段。"""
+
     payload = json.loads(json.dumps(entry))  # deep copy without NumPy types
     sandbox = payload.get("sandbox") or {}
     ds_path = sandbox.get("r2e_ds_json")
@@ -58,7 +59,21 @@ def _normalise_entry(entry: Dict[str, Any], *, base_dir: Path | None = None) -> 
             resolved[_coerce_path(host, base_dir=base_dir)] = container
         sandbox["mounts"] = resolved
     payload["sandbox"] = sandbox
-    return payload
+
+    issue = payload.get("issue") or {}
+    data_source = payload.get("data_source") or "graph_planner"
+    summary: Dict[str, Any] = {
+        "task_id": payload.get("task_id"),
+        "issue_id": issue.get("id"),
+        "max_steps": payload.get("max_steps"),
+        "data_source": data_source,
+        "raw_entry_json": json.dumps(payload, ensure_ascii=False),
+    }
+    if "language" in payload:
+        summary["language"] = payload["language"]
+    if "repo" in payload:
+        summary["repo"] = payload["repo"]
+    return summary
 
 
 def load_task_entries(path: str | os.PathLike[str]) -> List[Dict[str, Any]]:

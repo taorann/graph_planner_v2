@@ -62,6 +62,12 @@ CLI / Scripts / Tests
   5. 每次插入候选路径后刷新 `importlib` 缓存，并验证 `rllm` 与 `rllm.rllm.agents.agent`/`rllm.agents.agent`、`rllm.rllm.environments.base.base_env`/`rllm.environments.base.base_env` 是否可解析，只有在确认结构完整后才返回成功。【F:graph_planner/infra/vendor.py†L1-L112】
 - 因为路径是明确定义的，所以 `integrations/rllm` 内部在导入时会优先尝试 `from rllm.rllm.agents.agent import BaseAgent`、`from rllm.rllm.data.dataset import DatasetRegistry`，若该层级不存在则退回到 `from rllm.agents.agent import ...`。IDE 若提示波浪线，通常是尚未执行 `ensure_rllm_importable()`（即缺少 sys.path 注入）导致，此函数在包的 `__init__` 与各子模块文件顶层都会最先运行一次，确保解释器和静态分析都能定位到 vendored rLLM。【F:graph_planner/integrations/rllm/__init__.py†L1-L61】【F:graph_planner/integrations/rllm/dataset.py†L12-L43】
 
+### 2.2 Planner / CGM Prompt & Response Contracts
+
+- 新增的 `graph_planner.agents.common.contracts` 使用 `PromptContract` 数据类集中记录提示结构、系统指令与响应 JSON schema，目前内置了 Planner 与 CGM 两份协议，并通过 `PLANNER_SYSTEM_PROMPT`、`CGM_SYSTEM_PROMPT`、`CGM_PATCH_INSTRUCTION` 常量暴露给运行时代码复用。【F:graph_planner/agents/common/contracts.py†L1-L128】
+- Planner 代理的系统提示 (`SYSTEM_PROMPT`) 直接引用合同中的指令，保证模型始终输出带 `thought`/`action` 的 JSON，且各动作字段与解析器保持一致。【F:graph_planner/agents/common/chat.py†L1-L29】
+- CGM 侧的 `ConversationEncoder` 与本地 fallback 亦复用同一份合同，确保子图、片段拼接后的提示文本与补丁输出格式（`patch.edits`）在远端服务、本地生成器与标注文档之间保持一致。【F:graph_planner/integrations/codefuse_cgm/formatting.py†L1-L103】【F:graph_planner/agents/rule_based/cgm_adapter.py†L1-L56】
+
 ## 3. 数据与上下文流 / Data flow
 
 1. **任务描述**：来自 `datasets/*.jsonl` 或自定义 JSON，包含 Issue 文本、最大步数、容器配置等。`rllm.dataset.load_task_entries` 会解析路径字段并标准化 sandbox 配置。【F:graph_planner/integrations/rllm/dataset.py†L59-L109】
@@ -110,8 +116,10 @@ CLI / Scripts / Tests
 ### 4.3 Planner / CGM 强化学习（rLLM PPO）
 1. 使用 `register_graphplanner_dataset.py` 或直接在训练脚本中调用 `ensure_dataset_registered` 将 RepoEnv 任务 JSONL 注册到 rLLM 的数据集注册表，获得 Verl parquet 路径。【F:graph_planner/integrations/rllm/dataset.py†L85-L109】【F:scripts/train_graphplanner_rllm.py†L123-L145】
 2. 运行 `python scripts/train_graphplanner_rllm.py --agent planner --dataset <jsonl> --model-path <checkpoint>`：
-   - CLI 解析命令行，注册训练/验证集，按需写入模型路径、温度、TP 及并行配置。【F:scripts/train_graphplanner_rllm.py†L70-L220】
-   - 根据 `--agent` 选择 `GraphPlannerRLLMAgent` + `GraphPlannerRLLMEnv` 或 `CGMRLLMAgent` + `CGMRLLMEnv`，并在 Planner 模式下根据 `--cgm-model-path` 设置 CGM 本地推理参数。【F:scripts/train_graphplanner_rllm.py†L167-L220】
+   - CLI 解析命令行，注册训练/验证集，按需写入模型路径、温度、TP 及并行配置，并默认使用 `--seed` 统一设定 Python / NumPy / Torch 随机数，确保可复现性。【F:scripts/train_graphplanner_rllm.py†L70-L220】
+   - `--output-dir`、`--save-interval`、`--eval-interval` 与 `--resume` 将映射到 `trainer.output_dir/save_freq/test_freq/resume_from`，配合 `--print-config` 可在启动前检查最终 Hydra 配置；`--precision`、`--grad-accum-steps`、`--lr/--weight-decay/--warmup-steps` 等参数直接覆写优化器与调度器设置。【F:scripts/train_graphplanner_rllm.py†L215-L335】
+   - 根据 `--agent` 选择 `GraphPlannerRLLMAgent` + `GraphPlannerRLLMEnv` 或 `CGMRLLMAgent` + `CGMRLLMEnv`，并在 Planner 模式下根据 `--cgm-model-path` 设置 CGM 本地推理参数；新增的 `--reward-scale`、`--failure-penalty`、`--step-penalty`、`--timeout-penalty`、`--repo-op-limit`、`--disable-cgm-synthesis` 等选项会通过 `env.env_args` 下发到环境层，调节奖励 shaping 与并发容器行为。【F:scripts/train_graphplanner_rllm.py†L220-L286】【F:graph_planner/integrations/rllm/env.py†L46-L170】【F:graph_planner/integrations/rllm/cgm_env.py†L70-L214】
+   - `--log-to-wandb/--wandb-offline` 与 `--log-backend tensorboard` 控制 `trainer.logger`，而 `_validate_parallel_config` 会在 `tensor_parallel`、GPU 数或 Ray 资源不匹配时快速失败并给出修复建议。【F:scripts/train_graphplanner_rllm.py†L200-L336】
    - 脚本将覆盖写入的 OmegaConf 配置交给 rLLM 的 `AgentPPOTrainer` 执行分布式训练。
 3. 训练过程中：
    - `GraphPlannerRLLMAgent.update_from_env` 把环境观测转成聊天消息并维护 PPO 轨迹；`update_from_model` 解析模型输出并在失败时触发规则 fallback。【F:graph_planner/integrations/rllm/agent.py†L101-L200】
@@ -148,7 +156,41 @@ CLI / Scripts / Tests
 5. **结果产出与复现**
    - 训练中的行动日志、fallback 信息保存在 rLLM 日志目录；若带 `--print-config` 可查看最终 Hydra 配置。使用相同命令与模型路径即可在同一容器中复现完整训练流程。
 
-#### 4.3.2 16 GPU 并行配置
+#### 4.3.2 训练脚本速查 / CLI quick start
+
+> 希望“直接跑起来”时，可依次完成以下步骤；更深入的流程说明请参考前文各节。
+
+1. **激活环境与依赖**：
+   ```bash
+   source .venv/bin/activate   # 或进入自定义虚拟环境
+   export PYTHONPATH=$(pwd)
+   ```
+   - 执行 `pip install -e .` 与 `pip install -e rllm` 以安装 Graph Planner 与 rLLM 依赖。
+   - 如 rLLM 子模块位于非默认路径，设置 `export GRAPH_PLANNER_RLLM_PATH=/abs/path/to/rllm`；`ensure_rllm_importable()` 会读取该变量完成导入。【F:graph_planner/infra/vendor.py†L1-L112】
+
+2. **准备数据与模型**：
+   - `DATASET_JSONL`：RepoEnv/Repo 任务描述文件；脚本会调用 `ensure_dataset_registered` 自动生成 Verl 可读的 parquet。【F:graph_planner/integrations/rllm/dataset.py†L85-L109】
+   - `PLANNER_MODEL`：Planner 的 Hugging Face checkpoint（可以是仓库随附的 Toy 模型或自定义权重）。
+   - （可选）`CGM_MODEL`：若训练 Planner agent 并需要 CGM 输出补丁，提供可被 `AutoModelForCausalLM` 加载的目录。
+
+3. **执行训练命令**：
+   ```bash
+   PYTHONPATH=. python scripts/train_graphplanner_rllm.py \
+     --agent planner \
+     --dataset "$DATASET_JSONL" \
+     --model-path "$PLANNER_MODEL" \
+     --cgm-model-path "$CGM_MODEL" \
+     --max-steps 6 \
+     --total-epochs 1
+   ```
+   - 省略 `--cgm-model-path` 即可禁用 CGM；改用 `--agent cgm` 可只训练补丁模型轨迹。
+   - 附加 `--print-config` 可在真正启动前打印最终 Hydra 配置；`--ray-address`、`--workflow-parallel`、`--parallel-agents` 等参数用于扩展到多节点或多 GPU。【F:scripts/train_graphplanner_rllm.py†L70-L220】
+
+4. **观察输出**：
+   - rLLM 会在当前目录生成 `outputs/`（Hydra 配置、Ray 日志、checkpoint）。
+   - Graph Planner 的遥测仍写入 `logs/`，可检查容器步骤、补丁 diff 与测试结果。【F:graph_planner/infra/telemetry.py†L20-L39】
+
+#### 4.3.3 16 GPU 并行配置
 
 针对 16 张 A800 的集群，可以通过新增的 CLI 参数在同一容器内同时扩展模型推理、容器交互和 GRPO 训练：
 
@@ -170,6 +212,23 @@ CLI / Scripts / Tests
 4. **容器隔离**：新的 `issue_uid` 机制为每个并发任务生成独立的子图缓存键，防止 16 个容器同时写 `.aci/subgraphs` 时互相覆盖。【F:graph_planner/integrations/rllm/env.py†L46-L134】【F:graph_planner/integrations/rllm/cgm_env.py†L70-L197】
 
 5. **配置验证**：执行 `--print-config` 可打印最终 Hydra 配置，确认 `num_workers`、`n_parallel_agents`、`ray_init` 等字段已经按照 16 卡并发需求调整。【F:tests/test_rllm_integration.py†L197-L244】
+
+#### 4.3.4 验证脚本（evaluation-only）
+
+当只需要收集 pass@k / 成功率指标而不做参数更新时，可使用 `scripts/eval_graphplanner_rllm.py`：
+
+1. `--dataset` 指向需要评估的 JSON/JSONL，脚本会将其注册到 rLLM 数据集并复用相同的 Verl parquet。【F:scripts/eval_graphplanner_rllm.py†L78-L115】
+2. `--model-path`、`--tokenizer-path`、`--cgm-model-path` 等参数与训练脚本一致，且同样支持 `--reward-scale`、`--failure-penalty` 等环境配置，实现与训练时一致的奖励 shaping。【F:scripts/eval_graphplanner_rllm.py†L17-L146】
+3. 运行示例：
+   ```bash
+   PYTHONPATH=. python scripts/eval_graphplanner_rllm.py \
+     --agent planner \
+     --dataset datasets/graphplanner_repoenv_sample.jsonl \
+     --model-path "$PLANNER_MODEL" \
+     --print-config
+   ```
+   - 启动时同样会打印汇总信息（数据规模、并行度、输出目录）；Hydra 配置中的 `trainer.val_only: true` 使得 `AgentTrainer` 只运行验证阶段，不执行优化步骤。【F:scripts/eval_graphplanner_rllm.py†L117-L171】
+   - CLI 复用训练脚本的 `_validate_parallel_config` 与 `_sanity_checks`，因此 `tensor-parallel` 与 GPU 数不匹配时会立即报错，避免在 Ray/Verl 阶段才发现资源不足。
 
 ### 4.4 远端 CGM / 本地 fallback
 - 若 `.aci/config.json` 或环境变量启用了 `cgm.endpoint`，`cgm_adapter` 会优先使用 `CodeFuseCGMClient` 向官方服务发起请求；否则回退到本地 `CodeFuseCGMGenerator` 或规则标记补丁，确保补丁流程不会因模型缺失而中断。【F:graph_planner/agents/rule_based/cgm_adapter.py†L145-L207】

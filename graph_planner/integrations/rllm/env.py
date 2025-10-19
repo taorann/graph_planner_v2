@@ -46,11 +46,20 @@ else:
         def __init__(self, entry: Dict[str, Any], *, max_steps: int = 8) -> None:
             self.entry = deepcopy(entry)
             self.max_steps = int(entry.get("max_steps", max_steps))
+            self.reward_scale = float(entry.get("reward_scale", 1.0))
+            self.failure_penalty = float(entry.get("failure_penalty", 0.0))
+            self.step_penalty = float(entry.get("step_penalty", 0.0))
+            self.timeout_penalty = float(entry.get("timeout_penalty", 0.0))
+            limit = entry.get("repo_operation_limit") or entry.get("repo_op_limit")
+            self.repo_operation_limit = int(limit) if limit else None
+            self.enable_cgm_synthesis = bool(entry.get("enable_cgm_synthesis", True))
+            self.synthesis_strategy = entry.get("synthesis_strategy")
             self._planner: PlannerEnv | None = None
             self._last_observation: Dict[str, Any] | None = None
             self._issue_uid = uuid4().hex
             issue = self.entry.get("issue") or {}
             self._source_issue_id = str(issue.get("id") or "")
+            self._step_count = 0
 
         # ------------------------------------------------------------------
         # BaseEnv interface
@@ -60,12 +69,22 @@ else:
             self._planner = self._spawn_planner()
             observation = self._planner.reset()
             self._last_observation = observation
+            self._step_count = 0
             info = {
                 "task_id": self.entry.get("task_id"),
                 "issue": self.entry.get("issue", {}),
                 "max_steps": self.max_steps,
                 "issue_uid": self._issue_uid,
                 "source_issue_id": self._source_issue_id,
+                "env_config": {
+                    "reward_scale": self.reward_scale,
+                    "failure_penalty": self.failure_penalty,
+                    "step_penalty": self.step_penalty,
+                    "timeout_penalty": self.timeout_penalty,
+                    "repo_operation_limit": self.repo_operation_limit,
+                    "enable_cgm_synthesis": self.enable_cgm_synthesis,
+                    "synthesis_strategy": self.synthesis_strategy,
+                },
             }
             return observation, info
 
@@ -76,6 +95,29 @@ else:
             info = info or {}
             info.setdefault("max_steps", self.max_steps)
             self._last_observation = observation
+            self._step_count += 1
+
+            adjusted = float(reward) * self.reward_scale
+            if not done:
+                adjusted -= self.step_penalty
+
+            limit_triggered = False
+            if self.repo_operation_limit and self._step_count >= self.repo_operation_limit:
+                done = True
+                limit_triggered = True
+                info.setdefault("termination_reason", "repo_operation_limit")
+            if not done and self._step_count >= self.max_steps:
+                done = True
+                limit_triggered = True
+                info.setdefault("termination_reason", "max_steps")
+
+            if done:
+                if reward <= 0:
+                    adjusted -= self.failure_penalty
+                if limit_triggered and adjusted <= 0:
+                    adjusted -= self.timeout_penalty
+
+            reward = adjusted
             return observation, reward, done, info
 
         def close(self) -> None:
@@ -85,6 +127,7 @@ else:
                 finally:
                     self._planner = None
                     self._last_observation = None
+            self._step_count = 0
 
         def compute_final_reward(self) -> float:
             if self._planner is None:
@@ -92,15 +135,38 @@ else:
             info = self._planner.last_info or {}
             tests = info.get("tests") or info.get("submit", {})
             if isinstance(tests, dict) and tests.get("passed"):
-                return 1.0
-            return 0.0
+                base = 1.0 * self.reward_scale
+                return base
+            penalty = self.failure_penalty
+            if self._step_count >= self.max_steps:
+                penalty += self.timeout_penalty
+            return -(penalty)
 
         @staticmethod
         def from_dict(extra_info: Dict[str, Any] | str) -> "GraphPlannerRLLMEnv":
             if isinstance(extra_info, str):
                 extra_info = json.loads(extra_info)
-            max_steps = int(extra_info.get("max_steps", 8))
-            return GraphPlannerRLLMEnv(entry=extra_info, max_steps=max_steps)
+            env_kwargs: Dict[str, Any] = {}
+            if isinstance(extra_info, dict):
+                for key in (
+                    "reward_scale",
+                    "failure_penalty",
+                    "step_penalty",
+                    "timeout_penalty",
+                    "repo_operation_limit",
+                    "repo_op_limit",
+                    "enable_cgm_synthesis",
+                    "synthesis_strategy",
+                ):
+                    if key in extra_info:
+                        env_kwargs[key] = extra_info[key]
+            raw_entry = extra_info.get("raw_entry_json") if isinstance(extra_info, dict) else None
+            if raw_entry:
+                extra_payload = json.loads(raw_entry)
+            else:
+                extra_payload = extra_info
+            max_steps = int(extra_payload.get("max_steps", 8))
+            return GraphPlannerRLLMEnv(entry=extra_payload, max_steps=max_steps, **env_kwargs)
 
         # ------------------------------------------------------------------
         # Helpers

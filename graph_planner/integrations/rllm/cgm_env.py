@@ -73,17 +73,31 @@ else:
             *,
             max_steps: int = 1,
             instruction: str | None = None,
+            reward_scale: float = 1.0,
+            failure_penalty: float = 0.0,
+            step_penalty: float = 0.0,
+            timeout_penalty: float = 0.0,
+            repo_operation_limit: int | None = None,
+            synthesis_strategy: str | None = None,
         ) -> None:
             """复制任务条目并保存交互限制/指令配置。"""
 
             self.entry = json.loads(json.dumps(entry))
             self.max_steps = max(1, int(entry.get("max_steps", max_steps)))
             self.instruction = instruction or entry.get("instruction") or DEFAULT_INSTRUCTION
+            self.reward_scale = float(entry.get("reward_scale", reward_scale))
+            self.failure_penalty = float(entry.get("failure_penalty", failure_penalty))
+            self.step_penalty = float(entry.get("step_penalty", step_penalty))
+            self.timeout_penalty = float(entry.get("timeout_penalty", timeout_penalty))
+            limit = entry.get("repo_operation_limit") or entry.get("repo_op_limit") or repo_operation_limit
+            self.repo_operation_limit = int(limit) if limit else None
+            self.synthesis_strategy = entry.get("synthesis_strategy") or synthesis_strategy
             self._planner: PlannerEnv | None = None
             self._context: _Context | None = None
             self._issue_uid = uuid4().hex
             issue = self.entry.get("issue") or {}
             self._source_issue_id = str(issue.get("id") or "")
+            self._step_count = 0
 
         # ------------------------------------------------------------------
         # BaseEnv interface
@@ -95,6 +109,7 @@ else:
             self._planner = self._spawn_planner()
             base_obs = self._planner.reset()
             self._context = self._prepare_context(base_obs)
+            self._step_count = 0
             obs = {
                 "issue": base_obs.get("issue", {}),
                 "plan_text": self._context.plan_text,
@@ -104,6 +119,14 @@ else:
                 "snippets": self._context.snippets,
                 "snippets_text": self._context.snippets_text,
                 "instruction": self.instruction,
+                "env_config": {
+                    "reward_scale": self.reward_scale,
+                    "failure_penalty": self.failure_penalty,
+                    "step_penalty": self.step_penalty,
+                    "timeout_penalty": self.timeout_penalty,
+                    "repo_operation_limit": self.repo_operation_limit,
+                    "synthesis_strategy": self.synthesis_strategy,
+                },
             }
             info = {
                 "task_id": self.entry.get("task_id"),
@@ -119,6 +142,7 @@ else:
             if self._planner is None or self._context is None:
                 raise RuntimeError("Environment must be reset before calling step().")
 
+            self._step_count += 1
             patch = action.action if hasattr(action, "action") else action
             if not isinstance(patch, dict):
                 patch = {}
@@ -143,7 +167,26 @@ else:
                 "tests": submit_info.get("tests"),
                 "plan_text": self._context.plan_text,
             }
-            return obs, reward, done, info
+            adjusted = float(reward) * self.reward_scale
+            if not done:
+                adjusted -= self.step_penalty
+
+            limit_triggered = False
+            if self.repo_operation_limit and self._step_count >= self.repo_operation_limit:
+                done = True
+                limit_triggered = True
+                info.setdefault("termination_reason", "repo_operation_limit")
+            if not done and self._step_count >= self.max_steps:
+                done = True
+                limit_triggered = True
+                info.setdefault("termination_reason", "max_steps")
+
+            if done and reward <= 0:
+                adjusted -= self.failure_penalty
+                if limit_triggered:
+                    adjusted -= self.timeout_penalty
+
+            return obs, adjusted, done, info
 
         def close(self) -> None:
             """关闭底层 PlannerEnv 并释放上下文缓存。"""
@@ -154,6 +197,7 @@ else:
                 finally:
                     self._planner = None
                     self._context = None
+            self._step_count = 0
 
         @staticmethod
         def from_dict(extra_info: Dict[str, Any] | str) -> "CGMRLLMEnv":
@@ -161,7 +205,25 @@ else:
 
             if isinstance(extra_info, str):
                 extra_info = json.loads(extra_info)
-            return CGMRLLMEnv(entry=extra_info)
+            env_kwargs: Dict[str, Any] = {}
+            if isinstance(extra_info, dict):
+                for key in (
+                    "reward_scale",
+                    "failure_penalty",
+                    "step_penalty",
+                    "timeout_penalty",
+                    "repo_operation_limit",
+                    "repo_op_limit",
+                    "synthesis_strategy",
+                ):
+                    if key in extra_info:
+                        env_kwargs[key] = extra_info[key]
+            raw_entry = extra_info.get("raw_entry_json") if isinstance(extra_info, dict) else None
+            if raw_entry:
+                entry_payload = json.loads(raw_entry)
+            else:
+                entry_payload = extra_info
+            return CGMRLLMEnv(entry=entry_payload, **env_kwargs)
 
         # ------------------------------------------------------------------
         # Helpers

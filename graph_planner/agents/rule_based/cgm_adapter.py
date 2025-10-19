@@ -17,6 +17,7 @@ import os
 from aci.schema import Patch, PatchEdit, Plan, PlanTarget
 from ...infra import telemetry
 from ...infra.config import load as load_config
+from ..common.contracts import CGM_PATCH_INSTRUCTION
 from ...integrations.codefuse_cgm import (
     CGMExample,
     CGMGenerationConfig,
@@ -34,6 +35,8 @@ _LOCAL_INSTRUCTION = (
     " list objects containing `path`, `start`, `end`, and `new_text`. Ensure"
     " `new_text` ends with a newline."
 )
+
+_LOCAL_INSTRUCTION = CGM_PATCH_INSTRUCTION
 
 
 # ---------------- helpers ----------------

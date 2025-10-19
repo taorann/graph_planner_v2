@@ -19,6 +19,8 @@ import torch
 
 from transformers import PreTrainedTokenizerBase
 
+from ...agents.common.contracts import CGM_SYSTEM_PROMPT, CGM_CONTRACT
+
 
 # ---------------------------------------------------------------------------
 # Graph formatting
@@ -175,12 +177,8 @@ class SnippetFormatter:
 # ---------------------------------------------------------------------------
 
 
-DEFAULT_SYSTEM_PROMPT = (
-    "You are CodeFuse-CGM, a graph-aware assistant that generates precise "
-    "code patches.  Use the provided issue description, planner plan and "
-    "graph context to infer the necessary edits.  Reply with the patch diff "
-    "or a detailed fix strategy when code changes are not possible."
-)
+DEFAULT_SYSTEM_PROMPT = CGM_SYSTEM_PROMPT
+PROMPT_CONTRACT = CGM_CONTRACT
 
 
 @dataclass

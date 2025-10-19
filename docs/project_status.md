@@ -36,7 +36,7 @@ Graph Planner 致力于复现 CGM + Planner 的双智能体代码修复流程：
    - `aci` 工具链实现文件查看、编辑、lint/test 等基础能力，供 Sandbox 与训练流程复用。
 
 5. **文档与操作指南**
-   - `docs/graph_planner_architecture_pipeline.md` 汇总项目架构、模块职责以及 CGM/rLLM 训练运行 pipeline。
+   - `docs/graph_planner_architecture_pipeline.md` 汇总项目架构、模块职责以及 CGM/rLLM 训练运行 pipeline，其中包含最新的训练脚本速查命令（参见第 4.3.2 节）。【F:docs/graph_planner_architecture_pipeline.md†L120-L172】
    - `docs/repoenv_smoke_test.md`、`docs/scripts_and_tests_guide.md`、`docs/github_update_instructions.md` 等文档分别覆盖容器冒烟、脚本说明、贡献流程。
    - `README.md` 与本文件提供整体架构、配置方法与现状记录。
 
