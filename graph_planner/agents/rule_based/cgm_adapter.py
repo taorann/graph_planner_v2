@@ -38,6 +38,8 @@ _LOCAL_INSTRUCTION = (
 
 _LOCAL_INSTRUCTION = CGM_PATCH_INSTRUCTION
 
+_LOCAL_INSTRUCTION = CGM_PATCH_INSTRUCTION
+
 
 # ---------------- helpers ----------------
 

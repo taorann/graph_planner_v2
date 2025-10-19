@@ -156,6 +156,22 @@ CLI / Scripts / Tests
 5. **结果产出与复现**
    - 训练中的行动日志、fallback 信息保存在 rLLM 日志目录；若带 `--print-config` 可查看最终 Hydra 配置。使用相同命令与模型路径即可在同一容器中复现完整训练流程。
 
+#### 4.3.1.1 与「通用 ToolAgent/ToolEnvironment」流程的对比
+
+近期有同事提到一套更贴近原生 rLLM 示例的流程：直接复用 rLLM 自带的 `ToolAgent` / `ToolEnvironment`，通过配置 `agent_args`（工具清单、解析器、system prompt）、`env_args`（奖励函数、工具开关）、`sampling_params`（温度、top-p、模型名），再交给 `AgentExecutionEngine(engine_name="openai", rollout_engine_args={...})`，并由 `n_parallel_agents` 控制并发。我们当前仓库的实现与该描述既有重合也存在明显差异，具体如下表所示：
+
+| 维度 | 通用 ToolAgent/ToolEnvironment 示例流程 | 本仓库现有实现 | 备注 |
+| --- | --- | --- | --- |
+| Agent 类型 | 使用 rLLM 内置 `ToolAgent`，主要依赖通用工具接口 | 自定义 `GraphPlannerRLLMAgent` / `CGMRLLMAgent`，继承自 `BaseAgent`，封装 planner prompt、CGM fallback 与轨迹字段。【F:graph_planner/integrations/rllm/agent.py†L56-L200】【F:graph_planner/integrations/rllm/cgm_agent.py†L1-L220】 | 为了保证动作 JSON、补丁调用与本地记忆结构对齐，我们实现了专用 agent，而不是直接复用通用工具 agent。 |
+| Environment | 直接使用 rLLM 的 `ToolEnvironment`，依赖工具抽象 | 自定义 `GraphPlannerRLLMEnv` / `CGMRLLMEnv`，在 `reset/step` 内部驱动 `PlannerEnv` 与 RepoEnv 容器，并注入奖励 shaping。【F:graph_planner/integrations/rllm/env.py†L1-L134】【F:graph_planner/integrations/rllm/cgm_env.py†L70-L214】 | 需要与 RepoEnv/CGM 的数据结构深度耦合，故编写了专用环境包装。 |
+| Prompt & 输出约定 | 由工具解析器决定，通常是标准的思维链 + 工具指令模板 | 通过 `graph_planner.agents.common.contracts` 定义 planner/CGM 的系统提示、section 布局与 JSON schema，并在 agent/encoder 中复用。【F:graph_planner/agents/common/contracts.py†L1-L128】【F:graph_planner/agents/common/chat.py†L1-L56】 | 该合同是我们仓库新增的约束，确保模型输出与代码解析器完全一致。 |
+| 采样/推理引擎 | `AgentExecutionEngine` 可以配置为 `engine_name="openai"` 并指向 HTTP API | 训练脚本使用本地 Hugging Face 模型（或玩具模型）作为 planner/CGM，推理由 `HuggingFaceChatClient` 和 `CodeFuseCGMGenerator` 实现。【F:graph_planner/integrations/local_llm/hf.py†L19-L186】【F:graph_planner/integrations/codefuse_cgm/inference.py†L18-L152】 | 这样能在离线容器中完成训练，无需外部 API。 |
+| 经验采样与更新 | `AgentExecutionEngine` 同时负责 rollout 和工具调用 | 采样由自定义 env/agent 执行，轨迹交给 Verl GRPO / PPO 算法处理；Ray 并发、资源检查、日志等由 `train_graphplanner_rllm.py` 注入配置。【F:scripts/train_graphplanner_rllm.py†L70-L336】 | 虽然同属 rLLM 生态，但我们直接对接 Verl 的训练器，而非 AgentExecutionEngine 的“一站式”接口。 |
+| 配置方式 | 主要靠传入 `agent_args`、`env_args`、`sampling_params` 字典 | 结合 CLI 参数与 OmegaConf 覆写，提供 `--reward-scale`、`--failure-penalty`、`--precision`、`--grad-accum-steps` 等开关，并通过 `_set_if_exists` 写入 Hydra 配置。【F:scripts/train_graphplanner_rllm.py†L180-L336】 | CLI 更贴近项目习惯，也方便与 Ray 资源、dataset 注册流程统一。 |
+| 复用点 | 使用 rLLM 的 BaseAgent/BaseEnv 基类、Ray 并发、Verl GRPO 算法 | 同上 | 核心算法与并行设施仍然来自 rLLM/Verl，两边在此保持一致。 |
+
+总结：我们并没有直接照搬「ToolAgent + ToolEnvironment + AgentExecutionEngine」的最小示例，而是在其基础设施之上实现了专用的 Agent/Env，以匹配 Graph Planner 的动作集合、RepoEnv 容器交互和 CGM 契约。不过，两者在奖励算法（Verl GRPO/PPO）、并发管理、OmegaConf 配置体系等底层组件上完全一致。如果后续需要与原生示例互通，可参考本节表格逐项映射所需配置与抽象。
+
 #### 4.3.2 训练脚本速查 / CLI quick start
 
 > 希望“直接跑起来”时，可依次完成以下步骤；更深入的流程说明请参考前文各节。
@@ -181,16 +197,41 @@ CLI / Scripts / Tests
      --model-path "$PLANNER_MODEL" \
      --cgm-model-path "$CGM_MODEL" \
      --max-steps 6 \
-     --total-epochs 1
+     --total-epochs 1 \
+     --print-config
    ```
    - 省略 `--cgm-model-path` 即可禁用 CGM；改用 `--agent cgm` 可只训练补丁模型轨迹。
-   - 附加 `--print-config` 可在真正启动前打印最终 Hydra 配置；`--ray-address`、`--workflow-parallel`、`--parallel-agents` 等参数用于扩展到多节点或多 GPU。【F:scripts/train_graphplanner_rllm.py†L70-L220】
+   - `--print-config` 可在真正启动前打印最终 Hydra 配置；`--ray-address`、`--workflow-parallel`、`--parallel-agents` 等参数用于扩展到多节点或多 GPU。【F:scripts/train_graphplanner_rllm.py†L70-L220】
 
 4. **观察输出**：
    - rLLM 会在当前目录生成 `outputs/`（Hydra 配置、Ray 日志、checkpoint）。
    - Graph Planner 的遥测仍写入 `logs/`，可检查容器步骤、补丁 diff 与测试结果。【F:graph_planner/infra/telemetry.py†L20-L39】
 
-#### 4.3.3 16 GPU 并行配置
+#### 4.3.3 RepoEnv 冒烟测试（规则或本地 Planner）
+
+在具备 Docker 权限的主机上，可通过下列步骤快速验证容器运行链路：
+
+1. **准备环境**
+   - 安装 Python 3.10+ 并创建虚拟环境，执行 `pip install -e .` 与 `pip install -e R2E-Gym` 获取 RepoEnv 依赖；
+   - 确保 Docker daemon 可访问（本地或远程 socket）。
+2. **拉取示例镜像与数据集**
+   - 样例数据位于 `datasets/graphplanner_repoenv_sample.jsonl`，对应 RepoEnv 配置为 `config/r2e_ds_repoenv_sample.json`；
+   - 运行 `docker pull graph-planner/repoenv-sample:latest` 预热镜像。
+3. **执行冒烟命令**
+   ```bash
+   PYTHONPATH=. python scripts/run_rule_agent.py \
+     --backend repoenv \
+     --ds-json config/r2e_ds_repoenv_sample.json \
+     --agent rule \
+     --max-steps 6 \
+     --report smoke_report.json
+   ```
+   - 使用 `--agent llm` 可切换到本地 Planner 模型；命令会打印奖励、补丁 diff，并将完整轨迹写入 `smoke_report.json`。
+4. **检查日志**
+   - `logs/test_runs.jsonl`、`logs/events.jsonl` 会追加遥测记录，包括阅读片段、补丁 diff、命令序列与测试结果；
+   - `tests/test_rule_agent_pipeline.py` 在 FakeSandbox 上提供无 Docker 的替代验证路径。
+
+#### 4.3.4 16 GPU 并行配置
 
 针对 16 张 A800 的集群，可以通过新增的 CLI 参数在同一容器内同时扩展模型推理、容器交互和 GRPO 训练：
 
@@ -213,7 +254,7 @@ CLI / Scripts / Tests
 
 5. **配置验证**：执行 `--print-config` 可打印最终 Hydra 配置，确认 `num_workers`、`n_parallel_agents`、`ray_init` 等字段已经按照 16 卡并发需求调整。【F:tests/test_rllm_integration.py†L197-L244】
 
-#### 4.3.4 验证脚本（evaluation-only）
+#### 4.3.5 验证脚本（evaluation-only）
 
 当只需要收集 pass@k / 成功率指标而不做参数更新时，可使用 `scripts/eval_graphplanner_rllm.py`：
 
