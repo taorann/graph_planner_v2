@@ -31,6 +31,8 @@ from graph_planner.integrations.rllm import (  # noqa: E402
     load_task_entries,
 )
 from scripts.train_graphplanner_rllm import (  # noqa: E402
+    DEFAULT_CGM_MODEL_PATH,
+    DEFAULT_PLANNER_MODEL_PATH,
     _apply_logging_overrides,
     _apply_model_overrides,
     _apply_parallel_overrides,
@@ -53,14 +55,24 @@ def _parse_args() -> argparse.Namespace:
         description="Evaluate Graph Planner agents with rLLM (validation only)"
     )
     parser.add_argument("--agent", choices=["planner", "cgm"], default="planner")
-    parser.add_argument("--dataset", type=Path, required=True, help="Evaluation dataset in JSON/JSONL format.")
+    parser.add_argument(
+        "--dataset",
+        type=Path,
+        required=True,
+        help="Evaluation dataset in JSON/JSONL format.",
+    )
     parser.add_argument("--dataset-name", default=None)
     parser.add_argument("--dataset-split", default="eval")
-    parser.add_argument("--model-path", type=Path, required=True, help="Policy checkpoint to evaluate.")
+    parser.add_argument(
+        "--model-path",
+        type=Path,
+        default=None,
+        help="Policy checkpoint to evaluate (defaults to models/planner_model or models/cgm_model).",
+    )
     parser.add_argument("--tokenizer-path", type=Path, default=None)
     parser.add_argument("--critic-model-path", type=Path, default=None)
     parser.add_argument("--critic-tokenizer-path", type=Path, default=None)
-    parser.add_argument("--cgm-model-path", type=Path, default=None)
+    parser.add_argument("--cgm-model-path", type=Path, default=DEFAULT_CGM_MODEL_PATH)
     parser.add_argument("--cgm-tokenizer-path", type=Path, default=None)
     parser.add_argument("--cgm-instruction", default=None)
     parser.add_argument("--seed", type=int, default=42)
@@ -118,6 +130,10 @@ def _resolve_eval_dataset(path: Path, *, name: str, split: str) -> tuple[str, in
 
 def main() -> None:
     args = _parse_args()
+
+    if args.model_path is None:
+        default_model = DEFAULT_PLANNER_MODEL_PATH if args.agent == "planner" else DEFAULT_CGM_MODEL_PATH
+        args.model_path = default_model
 
     logging.basicConfig(level=logging.INFO)
     _seed_everything(args.seed)

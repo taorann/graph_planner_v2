@@ -11,6 +11,7 @@ agents/rule_based/cgm_adapter.py
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 import os
 
@@ -30,13 +31,6 @@ from ...integrations.codefuse_cgm import (
 from ..common.chat import extract_json_payload
 
 _MARKER = "CGM-LOCAL"
-_LOCAL_INSTRUCTION = (
-    "Generate a JSON object with a `patch` field. The `patch.edits` array must"
-    " list objects containing `path`, `start`, `end`, and `new_text`. Ensure"
-    " `new_text` ends with a newline."
-)
-
-_LOCAL_INSTRUCTION = CGM_PATCH_INSTRUCTION
 
 _LOCAL_INSTRUCTION = CGM_PATCH_INSTRUCTION
 
@@ -370,8 +364,14 @@ def _get_local_runtime() -> Optional[_LocalCGMRuntime]:
     if not model_path:
         return None
 
+    path_obj = Path(model_path)
+    if not path_obj.exists():
+        return None
+    if path_obj.is_dir() and not (path_obj / "config.json").exists():
+        return None
+
     fingerprint = (
-        model_path,
+        str(path_obj),
         getattr(cgm_cfg, "tokenizer_path", None),
         getattr(cgm_cfg, "max_tokens", None),
         getattr(cgm_cfg, "temperature", None),
@@ -383,7 +383,7 @@ def _get_local_runtime() -> Optional[_LocalCGMRuntime]:
         return _LOCAL_RUNTIME_CACHE
 
     generation_cfg = CGMGenerationConfig(
-        model_name_or_path=model_path,
+        model_name_or_path=str(path_obj),
         tokenizer_name_or_path=getattr(cgm_cfg, "tokenizer_path", None),
         max_length=int(getattr(cgm_cfg, "max_input_tokens", 8192)),
         max_new_tokens=int(getattr(cgm_cfg, "max_tokens", 2048)),

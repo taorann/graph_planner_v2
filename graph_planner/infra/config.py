@@ -19,6 +19,10 @@ import os
 import json
 
 
+PLANNER_MODEL_DIR = os.path.join("models", "planner_model")
+CGM_MODEL_DIR = os.path.join("models", "cgm_model")
+
+
 # ---------------- dataclasses ----------------
 
 @dataclass
@@ -56,7 +60,7 @@ class CGMCfg:
     top_p: float = 0.9
     max_tokens: int = 2048
     timeout_s: int = 60
-    model_path: Optional[str] = None      # 本地模型权重路径（Hugging Face 兼容）
+    model_path: Optional[str] = CGM_MODEL_DIR      # 本地模型权重路径（Hugging Face 兼容）
     tokenizer_path: Optional[str] = None  # 如未指定则复用 model_path
     max_input_tokens: int = 8192
     device: Optional[str] = None
@@ -74,7 +78,7 @@ class PlannerModelCfg:
     timeout_s: int = 60
     system_prompt: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
-    model_path: Optional[str] = None          # 本地推理：HF checkpoint
+    model_path: Optional[str] = PLANNER_MODEL_DIR          # 本地推理：HF checkpoint
     tokenizer_path: Optional[str] = None
     max_input_tokens: int = 4096
     device: Optional[str] = None

@@ -52,11 +52,12 @@ tests/             # FakeSandbox 测试与 CGM 适配器回归
 
 3. **启动强化学习训练（需要 rLLM + Docker 环境）**
    ```bash
-   PYTHONPATH=. python scripts/train_graphplanner_rllm.py \
-     --agent planner \
-     --dataset datasets/graphplanner_repoenv_sample.jsonl \
-     --model-path <path/to/base/checkpoint> \
-     --print-config
+  PYTHONPATH=. python scripts/train_graphplanner_rllm.py \
+    --agent planner \
+    --dataset datasets/graphplanner_repoenv_sample.jsonl \
+    --model-path models/planner_model \
+    --cgm-model-path models/cgm_model \
+    --print-config
    ```
    如需联动 CGM，可额外传入 `--cgm-model-path`；命令会在真正启动前打印最终 Hydra 配置，便于核对 `trainer.*` 覆写。详细准备步骤见 `docs/graph_planner_architecture_pipeline.md` 的“4.3 Planner / CGM 强化学习”章节。
 

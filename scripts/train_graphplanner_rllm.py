@@ -42,6 +42,9 @@ from graph_planner.integrations.rllm import (  # noqa: E402
 
 LOGGER = logging.getLogger(__name__)
 
+DEFAULT_PLANNER_MODEL_PATH = Path("models/planner_model")
+DEFAULT_CGM_MODEL_PATH = Path("models/cgm_model")
+
 
 def _default_config_path() -> Path:
     """返回 rLLM 默认 PPO 配置文件路径。"""
@@ -65,7 +68,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-split", default="train")
     parser.add_argument("--val-dataset", type=Path, default=None)
     parser.add_argument("--val-split", default="val")
-    parser.add_argument("--model-path", type=Path, required=True, help="Target policy checkpoint path.")
+    parser.add_argument(
+        "--model-path",
+        type=Path,
+        default=None,
+        help="Target policy checkpoint path (defaults to models/planner_model or models/cgm_model).",
+    )
     parser.add_argument("--output-dir", type=Path, default=None, help="Directory for checkpoints and logs (defaults to model path).")
     parser.add_argument("--tokenizer-path", type=Path, default=None)
     parser.add_argument(
@@ -83,7 +91,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cgm-model-path",
         type=Path,
-        default=None,
+        default=DEFAULT_CGM_MODEL_PATH,
         help="Optional CGM model used for planner patch synthesis.",
     )
     parser.add_argument("--cgm-tokenizer-path", type=Path, default=None)
@@ -162,8 +170,6 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Alternative logging backend when W&B is disabled.",
     )
-    parser.add_argument("--project-name", default=None)
-    parser.add_argument("--experiment-name", default=None)
     return parser.parse_args()
 
 
@@ -520,6 +526,10 @@ def main() -> None:
     """脚本入口：解析参数、准备数据集并触发 rLLM 训练。"""
 
     args = _parse_args()
+
+    if args.model_path is None:
+        default_model = DEFAULT_PLANNER_MODEL_PATH if args.agent == "planner" else DEFAULT_CGM_MODEL_PATH
+        args.model_path = default_model
 
     logging.basicConfig(level=logging.INFO)
     _seed_everything(args.seed)
