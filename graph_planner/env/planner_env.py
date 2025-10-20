@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import base64
 import json
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from difflib import unified_diff
+
+from ..agents.common import text_protocol
 from ..core.actions import (
     ActionUnion,
     ExploreAction,
@@ -236,40 +239,53 @@ class PlannerEnv:
         if not act.apply:
             return info
 
-        if isinstance(act.patch, dict):
+        if act.patch and isinstance(act.patch, dict) and act.patch.get("edits"):
             patch: Dict[str, Any] = dict(act.patch)
-        elif act.patch:
-            patch = dict(act.patch)  # type: ignore[arg-type]
-        else:
-            patch = {"edits": [], "summary": act.plan or ""}
+            if "summary" not in patch:
+                patch["summary"] = act.plan or ""
+            plan = self._build_plan(act.plan_targets)
+            try:
+                enforce_patch_guard(patch, plan, self.config)
+            except GuardError as ge:
+                info["guard_error"] = str(ge)
+                info["applied"] = False
+                return info
 
-        if "edits" not in patch or not isinstance(patch["edits"], list):
-            patch["edits"] = []
-        if "summary" not in patch:
-            patch["summary"] = act.plan or ""
+            apply_result = self._apply_patch_edits(patch.get("edits") or [])
+            info.update(apply_result)
+            info["plan_targets"] = act.plan_targets
 
-        plan = self._build_plan(act.plan_targets)
-
-        try:
-            enforce_patch_guard(patch, plan, self.config)
-        except GuardError as ge:
-            info["guard_error"] = str(ge)
-            info["applied"] = False
+            lint_report = self.box.lint()
+            tests_report = self.box.test()
+            info["lint"] = lint_report
+            info["tests"] = tests_report
+            info["applied"] = bool(apply_result.get("success"))
+            info["priority_tests"] = prioritize_tests(
+                self._observation_pack(),
+                subgraph=self.subgraph,
+            ).get("priority_tests", [])
             return info
 
-        apply_result = self._apply_patch_edits(patch.get("edits") or [])
-        info.update(apply_result)
-        info["plan_targets"] = act.plan_targets
+        subplan_text = (act.plan or "").strip()
+        focus_ids = [str(t.get("id")) for t in act.plan_targets or [] if isinstance(t, dict) and t.get("id")]
+        try:
+            runtime_state = self._build_repair_state(subplan_text, focus_ids)
+        except Exception as exc:
+            info["applied"] = False
+            info["error"] = f"repair-state-failed:{exc}"
+            return info
 
-        lint_report = self.box.lint()
-        tests_report = self.box.test()
-        info["lint"] = lint_report
-        info["tests"] = tests_report
-        info["applied"] = bool(apply_result.get("success"))
-        info["priority_tests"] = prioritize_tests(
-            self._observation_pack(),
-            subgraph=self.subgraph,
-        ).get("priority_tests", [])
+        action_payload = {"name": "repair", "params": {"subplan": subplan_text, "focus_ids": focus_ids, "apply": act.apply}}
+        try:
+            result = text_protocol.handle_planner_repair(action_payload, runtime_state)
+        except Exception as exc:
+            info["applied"] = False
+            info["error"] = f"text-repair-error:{exc}"
+            return info
+
+        info.update(result)
+        info.setdefault("plan_targets", act.plan_targets)
+        info.setdefault("applied", bool(result.get("applied")))
         return info
 
     def _handle_submit(self) -> Dict[str, Any]:
@@ -376,6 +392,188 @@ class PlannerEnv:
         if abs_path:
             data["abs_path"] = abs_path
         return data
+
+    def _build_repair_state(self, subplan: str, focus_ids: List[str]) -> text_protocol.RepairRuntimeState:
+        if not subplan:
+            raise ValueError("repair subplan is required for CGM execution")
+        text_memory = self._build_text_memory_snapshot()
+        related_files = self._collect_related_files(focus_ids)
+        if not related_files:
+            related_files = self._collect_related_files(self._default_focus_ids())
+        default_focus = focus_ids or self._default_focus_ids()
+        token_budget = int(getattr(self.config.cgm, "max_input_tokens", 8192))
+        state = text_protocol.RepairRuntimeState(
+            issue=dict(self.issue),
+            subgraph=subgraph_store.wrap(self.subgraph),
+            sandbox=self.box,
+            repo_root=self.repo_root_in_container,
+            text_memory=text_memory,
+            related_files=related_files,
+            default_focus_ids=default_focus,
+            snippets=self.last_reads or [],
+            token_budget=token_budget,
+            max_graph_nodes=min(128, int(self.config.candidate_total_limit or 200)),
+            max_files=4,
+            max_file_bytes=40000,
+            cgm_top_k=1,
+            cgm_generate=self._generate_cgm_candidates,
+        )
+        return state
+
+    def _build_text_memory_snapshot(self) -> Dict[str, str]:
+        stats = subgraph_store.stats(self.subgraph)
+        summary_parts = [
+            f"steps={self.steps}",
+            f"nodes={stats.get('nodes', 0)}",
+            f"edges={stats.get('edges', 0)}",
+        ]
+        session_summary = " | ".join(summary_parts)
+        turn_notes = json.dumps(self.last_info, ensure_ascii=False) if self.last_info else ""
+        memory = {"session_summary": session_summary, "turn_notes": turn_notes}
+        return memory
+
+    def _collect_related_files(self, focus_ids: Iterable[str]) -> Dict[str, str]:
+        paths: List[str] = []
+        for node_id in focus_ids:
+            node = self._resolve_node(node_id)
+            if node and node.get("path"):
+                paths.append(str(node.get("path")))
+        if not paths:
+            paths.extend([snip.get("path") for snip in self.last_reads or [] if snip.get("path")])
+        unique_paths = []
+        seen = set()
+        for path in paths:
+            if path and path not in seen:
+                seen.add(path)
+                unique_paths.append(path)
+        files: Dict[str, str] = {}
+        for path in unique_paths:
+            text = self._read_full_file_text(path)
+            if text:
+                files[path] = text
+        return files
+
+    def _read_full_file_text(self, path: str) -> str:
+        payload = json.dumps({"path": path, "base": self.repo_root_in_container})
+        script = (
+            "python - <<'PY'\n"
+            "import json\nfrom pathlib import Path\n"
+            "req=json.loads('''" + payload.replace("'", "\\'") + "''')\n"
+            "path=Path(req['path'])\n"
+            "if not path.is_absolute():\n"
+            "    path = Path(req['base']).joinpath(path)\n"
+            "try:\n"
+            "    text = path.read_text(encoding='utf-8', errors='ignore')\n"
+            "except Exception:\n"
+            "    text = ''\n"
+            "print(json.dumps({'text': text}))\n"
+            "PY"
+        )
+        out, rc = self.box.run(script, timeout=30)
+        if rc != 0:
+            return ""
+        lines = [line for line in out.strip().splitlines() if line.strip()]
+        if not lines:
+            return ""
+        try:
+            data = json.loads(lines[-1])
+        except Exception:
+            return ""
+        return str(data.get("text") or "")
+
+    def _default_focus_ids(self) -> List[str]:
+        ids = [snip.get("node_id") for snip in self.last_reads or [] if snip.get("node_id")]
+        if ids:
+            return [str(i) for i in ids if i]
+        return [str(nid) for nid in getattr(self.subgraph, "node_ids", [])]
+
+    def _plan_targets_from_focus(self, focus_ids: Iterable[str]) -> List[Dict[str, Any]]:
+        targets: List[Dict[str, Any]] = []
+        for node_id in focus_ids:
+            node = self._resolve_node(node_id)
+            if not node:
+                continue
+            path = node.get("path")
+            span = node.get("span") or {}
+            if not path:
+                continue
+            start = _safe_int(span.get("start"), 1)
+            end = max(start, _safe_int(span.get("end"), start))
+            targets.append(
+                {
+                    "path": str(path),
+                    "start": start,
+                    "end": end,
+                    "id": node.get("id") or node_id,
+                    "why": "graph_planner-focus",
+                }
+            )
+        return targets
+
+    def _generate_cgm_candidates(self, payload: Dict[str, Any], k: int) -> List[Dict[str, Any]]:
+        focus_ids = payload.get("graph", {}).get("focus_ids") or []
+        plan_targets = self._plan_targets_from_focus(focus_ids)
+        if not plan_targets:
+            plan_targets = self._plan_targets_from_snippets(self.last_reads or [])
+        if not plan_targets:
+            return []
+        plan = self._build_plan(plan_targets)
+        plan_text = payload.get("plan_text") or "\n".join(payload.get("plan") or [])
+        linearized = subgraph_store.linearize(self.subgraph, mode=getattr(self.config.collate, "mode", "wsd"))
+        patch = cgm_adapter.generate(
+            subgraph_linearized=linearized,
+            plan=plan,
+            constraints={"max_edits": max(1, len(plan_targets))},
+            snippets=self.last_reads or [],
+            plan_text=plan_text,
+            issue=self.issue,
+        )
+        candidates = self._patch_to_unified_candidates(patch)
+        return candidates[:k]
+
+    def _patch_to_unified_candidates(self, patch: Dict[str, Any]) -> List[Dict[str, Any]]:
+        edits = list(patch.get("edits") or [])
+        if not edits:
+            return []
+        grouped: Dict[str, List[Dict[str, Any]]] = {}
+        for edit in edits:
+            path = edit.get("path")
+            if not path:
+                continue
+            grouped.setdefault(str(path), []).append(edit)
+
+        candidates: List[Dict[str, Any]] = []
+        summary = patch.get("summary", "")
+        for path, group in grouped.items():
+            original = self._read_full_file_text(path)
+            if original == "":
+                continue
+            original_lines = original.splitlines(keepends=True)
+            new_lines = list(original_lines)
+            for edit in sorted(group, key=lambda e: _safe_int(e.get("start"), 1)):
+                start = _safe_int(edit.get("start"), 1)
+                end = max(start, _safe_int(edit.get("end"), start))
+                new_text = str(edit.get("new_text") or "")
+                replacement = new_text.splitlines(keepends=True)
+                if replacement and not replacement[-1].endswith("\n"):
+                    replacement[-1] = replacement[-1] + "\n"
+                new_lines[start - 1 : end] = replacement
+            diff_lines = list(
+                unified_diff(original_lines, new_lines, fromfile=f"a/{path}", tofile=f"b/{path}", lineterm="")
+            )
+            if not diff_lines:
+                continue
+            diff_text = "\n".join(diff_lines) + "\n"
+            candidates.append(
+                {
+                    "patch": diff_text,
+                    "path": path,
+                    "rationale": summary,
+                    "tests": patch.get("tests", []),
+                    "confidence": float(patch.get("confidence", 0.5)),
+                }
+            )
+        return candidates
 
     def _build_plan(self, targets: List[Dict[str, Any]]) -> Plan:
         plan_targets: List[PlanTarget] = []
