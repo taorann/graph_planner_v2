@@ -65,8 +65,34 @@ CLI / Scripts / Tests
 ### 2.2 Planner / CGM Prompt & Response Contracts
 
 - 新增的 `graph_planner.agents.common.contracts` 使用 `PromptContract` 数据类集中记录提示结构、系统指令与响应 JSON schema，目前内置了 Planner 与 CGM 两份协议，并通过 `PLANNER_SYSTEM_PROMPT`、`CGM_SYSTEM_PROMPT`、`CGM_PATCH_INSTRUCTION` 常量暴露给运行时代码复用。【F:graph_planner/agents/common/contracts.py†L1-L128】
-- Planner 代理的系统提示 (`SYSTEM_PROMPT`) 直接引用合同中的指令，保证模型始终输出带 `thought`/`action` 的 JSON，且各动作字段与解析器保持一致。【F:graph_planner/agents/common/chat.py†L1-L29】
-- CGM 侧的 `ConversationEncoder` 与本地 fallback 亦复用同一份合同，确保子图、片段拼接后的提示文本与补丁输出格式（`patch.edits`）在远端服务、本地生成器与标注文档之间保持一致。【F:graph_planner/integrations/codefuse_cgm/formatting.py†L1-L103】【F:graph_planner/agents/rule_based/cgm_adapter.py†L1-L56】
+- Planner 代理的系统提示 (`SYSTEM_PROMPT`) 直接引用合同中的指令，保证模型始终输出带 `thought`/`action` 的 JSON，且各动作字段与解析器保持一致。【F:graph_planner/agents/common/chat.py†L1-L83】
+- CGM 侧的 `ConversationEncoder` 与本地 fallback 亦复用同一份合同，确保子图、片段拼接后的提示文本与补丁输出格式（`patch.edits`）在远端服务、本地生成器与标注文档之间保持一致。【F:graph_planner/integrations/codefuse_cgm/formatting.py†L69-L266】【F:graph_planner/agents/rule_based/cgm_adapter.py†L1-L207】
+
+#### 2.2.1 Planner 动作协议
+
+- **动作枚举**：模型回复的 JSON `action.type` 必须是 `explore`、`memory`、`repair` 或 `submit` 四选一。解析逻辑由 `action_from_payload` 实现，字段不符合规范时直接返回 `None` 并触发规则兜底策略。【F:graph_planner/agents/common/chat.py†L73-L133】
+- **Explore**：允许额外的 `op`（`find|expand|read`）、`anchors`（节点列表）、`nodes`、`hop` 与 `limit` 字段，直接映射到 `ExploreAction` 数据类，驱动图扩展与代码片段读取。【F:graph_planner/core/actions.py†L6-L42】【F:graph_planner/agents/common/chat.py†L85-L100】
+- **Memory**：`ops` 指定记忆操作（如 `write_subgraph`、`clear_plan`），`budget` 与 `diversify_by_dir` 控制备选节点数。解析后交给 `MemoryAction`，环境会据此更新 Planner 内部状态。【F:graph_planner/memory/manager.py†L32-L146】【F:graph_planner/agents/common/chat.py†L100-L108】
+- **Repair**：`apply` 表示是否应用补丁，`issue`/`plan`/`plan_targets` 透传给 CGM，请求补丁或执行 Planner 计划；若模型直接提供 `patch` 字段，会被视为即刻补丁，由 `RepairAction` 传递给 `cgm_adapter`。【F:graph_planner/agents/rule_based/cgm_adapter.py†L145-L207】【F:graph_planner/agents/common/chat.py†L108-L123】
+- **Submit**：`SubmitAction` 不需要额外字段，环境收到后执行最终测试并结束 episode。【F:graph_planner/agents/common/chat.py†L123-L126】
+- **Thought 字段**：`thought` 字符串记录模型的思考过程，`GraphPlannerRLLMAgent` 会把它写入 rollout 轨迹，便于日志分析与奖励塑形。【F:graph_planner/integrations/rllm/agent.py†L122-L180】
+
+#### 2.2.2 Planner Prompt 布局
+
+| Prompt 区块 | 填充内容 | 关联实现 |
+| --- | --- | --- |
+| `[Issue]` | issue id/title/body，来自 `PlannerEnv.reset()` 的观测 | `summarise_observation` 将 `issue` 与 `failure_frame` 等字段整理为自然语言摘要。【F:graph_planner/agents/common/chat.py†L20-L72】 |
+| `[Instruction]` | 最近一步的环境反馈（失败信息、reward、动作摘要） | 同上，`summarise_observation` 会把 `last_info`、`reward`、`done` 等写入文本，并返回给聊天客户端。 |
+| `[Planner memory]` | 可选的历史上下文：子图统计、plan 摘要等 | `PlannerEnv.render_memory_for_llm()` 将记忆模块内容注入用户提示，缺省时留空。【F:graph_planner/env/planner_env.py†L136-L173】 |
+
+- 系统提示要求模型始终输出 JSON（可包裹在 ```json fenced code block 中）。`extract_json_payload` 负责解析响应，最后一个有效 JSON 会被转换为动作；若失败则触发规则 fallback 并记录原因。【F:graph_planner/agents/common/chat.py†L57-L96】
+
+#### 2.2.3 CGM Prompt / Patch Schema
+
+- **Prompt 区块**：Issue → Instruction → Plan → Subgraph → Snippets，分别注入 Planner 请求、结构化计划、`GraphLinearizer` 线性化后的节点文本，以及 `SnippetFormatter` 拼接的候选代码片段。【F:graph_planner/integrations/codefuse_cgm/formatting.py†L69-L199】
+- **系统指令**：要求输出 JSON `{ "patch": { "edits": [...] }, "summary": "..." }`；`CodeFuseCGMGenerator`、`CodeFuseCGMClient` 与 fallback runtime 使用相同 system prompt，保证本地、远端或标注路径一致。【F:graph_planner/agents/common/contracts.py†L60-L126】【F:graph_planner/integrations/codefuse_cgm/inference.py†L18-L152】
+- **补丁结构**：`patch.edits` 中的每个对象必须包含 `path`、`start`、`end`、`new_text`，其中 `new_text` 必须以换行结尾。`CGMPatch` 数据结构与 `SandboxRuntime.apply_patch` 都假定这一 schema，缺项会导致补丁被拒绝。【F:graph_planner/core/patches.py†L1-L96】【F:graph_planner/runtime/sandbox.py†L120-L214】
+- **输出解析**：`CodeFuseCGMGenerator._parse_patch` 会在 Hugging Face 生成结果上调用合同中的 schema 校验，若缺失必需字段则回退到规则补丁，并在日志中标记原因。【F:graph_planner/integrations/codefuse_cgm/inference.py†L94-L150】
 
 ## 3. 数据与上下文流 / Data flow
 
