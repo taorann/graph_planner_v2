@@ -94,6 +94,24 @@ CLI / Scripts / Tests
 - **补丁结构**：`patch.edits` 中的每个对象必须包含 `path`、`start`、`end`、`new_text`，其中 `new_text` 必须以换行结尾。`CGMPatch` 数据结构与 `SandboxRuntime.apply_patch` 都假定这一 schema，缺项会导致补丁被拒绝。【F:graph_planner/core/patches.py†L1-L96】【F:graph_planner/runtime/sandbox.py†L120-L214】
 - **输出解析**：`CodeFuseCGMGenerator._parse_patch` 会在 Hugging Face 生成结果上调用合同中的 schema 校验，若缺失必需字段则回退到规则补丁，并在日志中标记原因。【F:graph_planner/integrations/codefuse_cgm/inference.py†L94-L150】
 
+#### 2.2.4 文本轨迹修复管线（Text-trajectory Repair Pipeline）
+
+> **背景**：当 Planner 仅输出“修复计划”而非直接附带 diff 时，环境需要基于文本轨迹协议 `<function=...>` / `<observation for=...>` 自行拼装上下文、调用 CGM 生成 unified diff，并返回规范化的观测。`graph_planner.agents.common.text_protocol` 汇总了这一闭环逻辑。
+
+| 层级 | 关键函数 | 作用 | 关联实现 |
+| --- | --- | --- | --- |
+| 解析 | `parse_action_block(text, allowed)` | 严格解析单个 `<function=...>` 区块，提取函数名与参数并确保动作合法；检测到额外文本、重复块或标签缺失时立即抛出 `ValueError`，避免 Planner 输出多段内容。【F:graph_planner/agents/common/text_protocol.py†L42-L128】 |
+| 运行时状态 | `RepairRuntimeState` | 汇集 issue 描述、子图缓存、文本记忆、沙箱路径等上下文字段，统一供上下文构建与补丁应用阶段使用，隔离环境内部实现细节。【F:graph_planner/agents/common/text_protocol.py†L131-L209】 |
+| 上下文抽取 | `build_cgm_payload(state, subplan, focus_ids)` | 读取图节点/边、`focus_ids`、记忆摘要、相关文件全文与 issue 信息，并把 `subplan` 拆成步骤列表；同时执行 Top-K 裁剪和 token 预算控制，确保请求不会超出 CGM 长度限制。【F:graph_planner/agents/common/text_protocol.py†L212-L334】 |
+| CGM 调用 | `call_cgm(payload, k)` / `pick_best_candidate(cands)` | 透传到本地/远端 CGM 客户端生成补丁候选，并依据置信度、测试建议等字段选择最佳补丁；若返回多文件 diff，`handle_planner_repair` 会拆分并逐一尝试。【F:graph_planner/agents/common/text_protocol.py†L337-L447】 |
+| 补丁校验 | `validate_unified_diff(patch, path)` | 检查 diff 头部与目标路径匹配、hunk 语法合法、禁止跨文件编辑；违反约束时抛出 `ValueError`，阻止异常补丁污染仓库。【F:graph_planner/agents/common/text_protocol.py†L450-L522】 |
+| 应用与测试 | `try_apply_and_test(path, patch)` | 在沙箱临时目录应用 diff，并调用构建/测试/静态检查；将是否应用、hunk 数量、测试与 lint 结果封装为 JSON，供 observation 使用。【F:graph_planner/agents/common/text_protocol.py†L525-L642】 |
+| 观察发射 | `emit_observation(name, data)` | 将任意 JSON 编码为 `<observation for="name">…</observation>` 字符串，下一轮直接送回 Planner。【F:graph_planner/agents/common/text_protocol.py†L645-L678】 |
+| 管线入口 | `handle_planner_repair(action, state)` | 统筹整个流程：解析 Planner 的 `repair` 参数（`subplan` 必填、`focus_ids`/`apply` 可选），构建 payload、调用 CGM、按需应用补丁并组装最终 observation；失败时会在 `error` 字段标识 `apply-failed`/`build-failed` 等阶段。【F:graph_planner/agents/common/text_protocol.py†L681-L842】 |
+
+- `PlannerEnv.step()` 在检测到 Planner 动作为 `repair` 且未携带显式 `patch` 时，会实例化 `RepairRuntimeState` 并委托上述管线；若 Planner 请求 `apply=false`，则仅返回候选补丁信息，不会修改仓库。【F:graph_planner/env/planner_env.py†L142-L229】
+- 新增的 `tests/test_text_protocol.py` 覆盖了动作解析、payload 构建、补丁应用成功/失败、observation 编码等场景，确保文本轨迹协议端到端闭环可复现。【F:tests/test_text_protocol.py†L1-L198】
+
 ## 3. 数据与上下文流 / Data flow
 
 1. **任务描述**：来自 `datasets/*.jsonl` 或自定义 JSON，包含 Issue 文本、最大步数、容器配置等。`rllm.dataset.load_task_entries` 会解析路径字段并标准化 sandbox 配置。【F:graph_planner/integrations/rllm/dataset.py†L59-L109】
@@ -141,7 +159,7 @@ CLI / Scripts / Tests
 
 ### 4.3 Planner / CGM 强化学习（rLLM PPO）
 1. 使用 `register_graphplanner_dataset.py` 或直接在训练脚本中调用 `ensure_dataset_registered` 将 RepoEnv 任务 JSONL 注册到 rLLM 的数据集注册表，获得 Verl parquet 路径。【F:graph_planner/integrations/rllm/dataset.py†L85-L109】【F:scripts/train_graphplanner_rllm.py†L123-L145】
-2. 运行 `python scripts/train_graphplanner_rllm.py --agent planner --dataset <jsonl> --model-path models/planner_model --cgm-model-path models/cgm_model`：
+2. 运行 `python scripts/train_graphplanner_rllm.py --agent planner --dataset <jsonl> --model-path models/qwen3-14b-instruct --cgm-model-path models/codefuse-cgm`：
    - CLI 解析命令行，注册训练/验证集，按需写入模型路径、温度、TP 及并行配置，并默认使用 `--seed` 统一设定 Python / NumPy / Torch 随机数，确保可复现性。【F:scripts/train_graphplanner_rllm.py†L70-L220】
    - `--output-dir`、`--save-interval`、`--eval-interval` 与 `--resume` 将映射到 `trainer.output_dir/save_freq/test_freq/resume_from`，配合 `--print-config` 可在启动前检查最终 Hydra 配置；`--precision`、`--grad-accum-steps`、`--lr/--weight-decay/--warmup-steps` 等参数直接覆写优化器与调度器设置。【F:scripts/train_graphplanner_rllm.py†L215-L335】
    - 根据 `--agent` 选择 `GraphPlannerRLLMAgent` + `GraphPlannerRLLMEnv` 或 `CGMRLLMAgent` + `CGMRLLMEnv`，并在 Planner 模式下根据 `--cgm-model-path` 设置 CGM 本地推理参数；新增的 `--reward-scale`、`--failure-penalty`、`--step-penalty`、`--timeout-penalty`、`--repo-op-limit`、`--disable-cgm-synthesis` 等选项会通过 `env.env_args` 下发到环境层，调节奖励 shaping 与并发容器行为。【F:scripts/train_graphplanner_rllm.py†L220-L286】【F:graph_planner/integrations/rllm/env.py†L46-L170】【F:graph_planner/integrations/rllm/cgm_env.py†L70-L214】
@@ -158,17 +176,17 @@ CLI / Scripts / Tests
 > **结论**：当前仓库已串联 planner 与 CGM 的本地/远端模型加载逻辑，并在 `train_graphplanner_rllm.py` 中将回合轨迹直接送入 Verl GRPO 算法，因此只需提供模型路径即可在容器内完成“代码修复 → 经验采样 → GRPO 更新”的闭环训练。
 
 1. **准备模型 checkpoint**
-   - Planner：支持 Hugging Face 目录或玩具 `ToyLM`。默认放在仓库根目录的 `models/planner_model/` 下（脚本也会引用此路径）；若 tokenizer 不在同一路径，可通过 `--tokenizer-path` 指定。【F:scripts/train_graphplanner_rllm.py†L40-L95】
-   - CGM：若训练 planner 代理且希望调用本地 CGM，请将模型保存到 `models/cgm_model/`，该路径会在训练/评测脚本中作为默认值。【F:scripts/train_graphplanner_rllm.py†L70-L95】
+   - Planner：默认使用 Qwen3-14B-Instruct 权重，需解压到仓库根目录的 `models/qwen3-14b-instruct/`；若需快速验证亦可把仓库内的 ToyLM checkpoint 拷贝到该目录（或通过 `--model-path` 指向其它 Hugging Face 目录）。若 tokenizer 不在同一路径，可通过 `--tokenizer-path` 指定。【F:scripts/train_graphplanner_rllm.py†L40-L95】
+   - CGM：请将 CodeFuse CGM 的本地权重与 tokenizer 放在 `models/codefuse-cgm/`，该路径会在训练/评测脚本中作为默认值。【F:scripts/train_graphplanner_rllm.py†L70-L95】
 2. **准备任务数据集**
-   - 以 JSON/JSONL 形式提供 Issue、容器配置、最大步数等字段（示例：`datasets/graphplanner_repoenv_sample.jsonl`）。脚本会通过 `ensure_dataset_registered` 将其转换为 Verl 读取的 parquet。【F:graph_planner/integrations/rllm/dataset.py†L85-L109】
+   - 以 JSON/JSONL 形式提供 Issue、容器配置、最大步数等字段（仓库已在 `datasets/r2e_gym/graphplanner_repoenv_train.jsonl` 中预置一份按照 R2E-Gym 训练数据格式整理的样例；验证示例位于 `datasets/r2e_gym/graphplanner_repoenv_val.jsonl`）。脚本会通过 `ensure_dataset_registered` 将其转换为 Verl 读取的 parquet。【F:graph_planner/integrations/rllm/dataset.py†L85-L109】
 3. **执行训练命令**
    ```bash
    PYTHONPATH=. python scripts/train_graphplanner_rllm.py \
      --agent planner \
-     --dataset datasets/graphplanner_repoenv_sample.jsonl \
-     --model-path models/planner_model \
-     --cgm-model-path models/cgm_model \
+     --dataset datasets/r2e_gym/graphplanner_repoenv_train.jsonl \
+     --model-path models/qwen3-14b-instruct \
+     --cgm-model-path models/codefuse-cgm \
      --max-steps 6 \
      --train-batch-size 4 \
      --total-epochs 1
@@ -230,16 +248,16 @@ R2E-Gym 本身提供了 RepoEnv 环境、动作解析与容器运行时等通用
 
 2. **准备数据与模型**：
    - `DATASET_JSONL`：RepoEnv/Repo 任务描述文件；脚本会调用 `ensure_dataset_registered` 自动生成 Verl 可读的 parquet。【F:graph_planner/integrations/rllm/dataset.py†L85-L109】
-   - `PLANNER_MODEL`：Planner 的 Hugging Face checkpoint（可以是仓库随附的 Toy 模型或自定义权重），默认放置在 `models/planner_model/`。
-   - （可选）`CGM_MODEL`：若训练 Planner agent 并需要 CGM 输出补丁，可使用默认的 `models/cgm_model/` 目录存放模型。
+   - `PLANNER_MODEL`：Planner 的 Hugging Face checkpoint（可以是仓库随附的 Toy 模型或自定义权重），默认放置在 `models/qwen3-14b-instruct/`。
+   - （可选）`CGM_MODEL`：若训练 Planner agent 并需要 CGM 输出补丁，可使用默认的 `models/codefuse-cgm/` 目录存放模型。
 
 3. **执行训练命令**：
    ```bash
    PYTHONPATH=. python scripts/train_graphplanner_rllm.py \
      --agent planner \
      --dataset "$DATASET_JSONL" \
-     --model-path models/planner_model \
-     --cgm-model-path models/cgm_model \
+     --model-path models/qwen3-14b-instruct \
+     --cgm-model-path models/codefuse-cgm \
      --max-steps 6 \
      --total-epochs 1 \
      --print-config
@@ -259,7 +277,7 @@ R2E-Gym 本身提供了 RepoEnv 环境、动作解析与容器运行时等通用
    - 安装 Python 3.10+ 并创建虚拟环境，执行 `pip install -e .` 与 `pip install -e R2E-Gym` 获取 RepoEnv 依赖；
    - 确保 Docker daemon 可访问（本地或远程 socket）。
 2. **拉取示例镜像与数据集**
-   - 样例数据位于 `datasets/graphplanner_repoenv_sample.jsonl`，对应 RepoEnv 配置为 `config/r2e_ds_repoenv_sample.json`；
+- 样例数据位于 `datasets/r2e_gym/graphplanner_repoenv_train.jsonl`，对应 RepoEnv 配置为 `config/r2e_ds_repoenv_sample.json`；
    - 运行 `docker pull graph-planner/repoenv-sample:latest` 预热镜像。
 3. **执行冒烟命令**
    ```bash
@@ -308,9 +326,9 @@ R2E-Gym 本身提供了 RepoEnv 环境、动作解析与容器运行时等通用
    ```bash
    PYTHONPATH=. python scripts/eval_graphplanner_rllm.py \
      --agent planner \
-     --dataset datasets/graphplanner_repoenv_sample.jsonl \
-     --model-path models/planner_model \
-     --cgm-model-path models/cgm_model \
+     --dataset datasets/r2e_gym/graphplanner_repoenv_val.jsonl \
+     --model-path models/qwen3-14b-instruct \
+     --cgm-model-path models/codefuse-cgm \
      --print-config
    ```
    - 启动时同样会打印汇总信息（数据规模、并行度、输出目录）；Hydra 配置中的 `trainer.val_only: true` 使得 `AgentTrainer` 只运行验证阶段，不执行优化步骤。【F:scripts/eval_graphplanner_rllm.py†L117-L171】
@@ -328,7 +346,7 @@ R2E-Gym 本身提供了 RepoEnv 环境、动作解析与容器运行时等通用
 | 本地 LLM 调试 | `PYTHONPATH=. python scripts/run_rule_agent.py --backend repoenv --ds-json config/r2e_ds_repoenv_sample.json --agent llm --planner-model-path <hf-model>` |
 | CGM 本地推理 | `python - <<'PY'`<br>`from graph_planner.integrations.codefuse_cgm import CodeFuseCGMGenerator, CGMExample;`<br>`gen = CodeFuseCGMGenerator.from_pretrained("<model>");`<br>`example = CGMExample.from_json_file("sample.json");`<br>`print(gen.generate(example).model_dump())`<br>`PY` |
 | CGM 监督微调 | `PYTHONPATH=. python - <<'PY'`<br>`from graph_planner.integrations.codefuse_cgm import CodeFuseCGMTrainer, CGMTrainingConfig;`<br>`cfg = CGMTrainingConfig(model_name="<model>", train_path="train.jsonl", output_dir="runs/cgm");`<br>`CodeFuseCGMTrainer(cfg).train()`<br>`PY` |
-| rLLM PPO 训练 | `python scripts/train_graphplanner_rllm.py --agent planner --dataset datasets/graphplanner_repoenv_sample.jsonl --model-path models/planner_model --cgm-model-path models/cgm_model --max-steps 6` |
+| rLLM PPO 训练 | `python scripts/train_graphplanner_rllm.py --agent planner --dataset datasets/r2e_gym/graphplanner_repoenv_train.jsonl --model-path models/qwen3-14b-instruct --cgm-model-path models/codefuse-cgm --max-steps 6` |
 
 ## 6. 日志与调试建议 / Logging & troubleshooting
 

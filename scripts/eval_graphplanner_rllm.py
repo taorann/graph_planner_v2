@@ -67,7 +67,7 @@ def _parse_args() -> argparse.Namespace:
         "--model-path",
         type=Path,
         default=None,
-        help="Policy checkpoint to evaluate (defaults to models/planner_model or models/cgm_model).",
+        help="Policy checkpoint to evaluate (defaults to models/qwen3-14b-instruct or models/codefuse-cgm).",
     )
     parser.add_argument("--tokenizer-path", type=Path, default=None)
     parser.add_argument("--critic-model-path", type=Path, default=None)

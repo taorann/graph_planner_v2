@@ -54,7 +54,7 @@ Graph Planner 致力于复现 CGM + Planner 的双智能体代码修复流程：
 
 3. **本地模型接入信息**
    - `.aci/config.json` 中 `planner_model`、`cgm` 默认均为禁用状态，需要提供实际的本地部署端点、模型名、鉴权 token 等信息。
-   - 虽然仓库已预留 `models/planner_model/` 与 `models/cgm_model/` 目录作为默认 checkpoint 路径，但仍需在这些目录内放入真实权重与 tokenizer 才能执行训练或推理。
+   - 虽然仓库已预留 `models/qwen3-14b-instruct/` 与 `models/codefuse-cgm/` 目录作为默认 checkpoint 路径，但仍需在这些目录内放入真实权重与 tokenizer 才能执行训练或推理。
 
 4. **数据与奖励配置**
    - 尚未定义更多 RepoEnv/R2E 任务的奖励 shaping、终止条件调整等策略；如需与真实训练目标对齐，需要进一步扩充。
@@ -75,7 +75,7 @@ Graph Planner 致力于复现 CGM + Planner 的双智能体代码修复流程：
    - 通过 `scripts/run_rule_agent.py --agent llm` 进行冒烟测试，确认模型输出合法 JSON，补丁流程可走通。
 
 4. **训练启动**
-   - 将基础 checkpoint 拷贝至 `models/planner_model/`（以及需要的 `models/cgm_model/`），脚本会自动使用这些路径作为 `--model-path` 与 `--cgm-model-path` 的默认值。
+   - 将基础 checkpoint 拷贝至 `models/qwen3-14b-instruct/`（以及需要的 `models/codefuse-cgm/`），脚本会自动使用这些路径作为 `--model-path` 与 `--cgm-model-path` 的默认值。
    - 根据实验计划调整 `--max-steps`、`--trainer-epochs` 等参数，运行 `scripts/train_graphplanner_rllm.py` 启动 PPO 训练。
    - 在训练过程中关注 `logs/` 与 Ray dashboard，确保奖励、轨迹记录符合预期。
 

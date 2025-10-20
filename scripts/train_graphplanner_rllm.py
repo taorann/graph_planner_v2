@@ -42,8 +42,8 @@ from graph_planner.integrations.rllm import (  # noqa: E402
 
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_PLANNER_MODEL_PATH = Path("models/planner_model")
-DEFAULT_CGM_MODEL_PATH = Path("models/cgm_model")
+DEFAULT_PLANNER_MODEL_PATH = Path("models/qwen3-14b-instruct")
+DEFAULT_CGM_MODEL_PATH = Path("models/codefuse-cgm")
 
 
 def _default_config_path() -> Path:
@@ -61,7 +61,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset",
         type=Path,
-        default=Path("datasets/graphplanner_repoenv_sample.jsonl"),
+        default=Path("datasets/r2e_gym/graphplanner_repoenv_train.jsonl"),
         help="Training dataset in JSON/JSONL format.",
     )
     parser.add_argument("--dataset-name", default=None, help="Override dataset registry name.")
@@ -72,7 +72,7 @@ def _parse_args() -> argparse.Namespace:
         "--model-path",
         type=Path,
         default=None,
-        help="Target policy checkpoint path (defaults to models/planner_model or models/cgm_model).",
+        help="Target policy checkpoint path (defaults to models/qwen3-14b-instruct or models/codefuse-cgm).",
     )
     parser.add_argument("--output-dir", type=Path, default=None, help="Directory for checkpoints and logs (defaults to model path).")
     parser.add_argument("--tokenizer-path", type=Path, default=None)
