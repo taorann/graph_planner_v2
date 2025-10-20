@@ -109,6 +109,29 @@ CLI / Scripts / Tests
 | 观察发射 | `emit_observation(name, data)` | 将任意 JSON 编码为 `<observation for="name">…</observation>` 字符串，下一轮直接送回 Planner。【F:graph_planner/agents/common/text_protocol.py†L645-L678】 |
 | 管线入口 | `handle_planner_repair(action, state)` | 统筹整个流程：解析 Planner 的 `repair` 参数（`subplan` 必填、`focus_ids`/`apply` 可选），构建 payload、调用 CGM、按需应用补丁并组装最终 observation；失败时会在 `error` 字段标识 `apply-failed`/`build-failed` 等阶段。【F:graph_planner/agents/common/text_protocol.py†L681-L842】 |
 
+- **执行示例 / Worked example**：
+  1. Planner 输出：
+
+     ```
+     <function=repair>
+       <param name="subplan"><![CDATA[
+     1) Locate check_bound
+     2) Change <= to <
+     3) Add regression test for boundary case
+     ]]></param>
+       <param name="focus_ids">["n_buf"]</param>
+       <param name="apply">true</param>
+     </function>
+     ```
+
+  2. `parse_action_block` 校验只有一个 `<function>` 块，并产出 `{"name": "repair", "params": {"subplan": "…", "focus_ids": ["n_buf"], "apply": true}}`；
+  3. `build_cgm_payload` 结合 `RepairRuntimeState` 中的图节点、历史笔记、相关文件与 Issue 文本生成 CGM 请求 JSON，并将 `subplan` 拆分为 `plan` 列表；
+  4. `call_cgm` 根据 payload 返回候选补丁，`pick_best_candidate` 按置信度和测试建议挑选最佳项，若出现多文件 diff 会拆分成多个单文件尝试；
+  5. `validate_unified_diff` 确认补丁语法与路径一致，`try_apply_and_test` 在沙箱内应用补丁、运行构建/测试/静态检查并统计 hunk 数、测试结果；
+  6. `emit_observation("repair", {...})` 产出形如 `<observation for="repair">{"ok":true,"applied":true,"tests_passed":true,...}</observation>` 的字符串发回 Planner。
+
+- **协议对齐 / Contract alignment**：生成的 CGM payload 与回包严格遵循“单文件 unified diff”约束，`constraints.one_file_per_patch=true` 让 CGM 只编辑一个文件。若 CGM 侧仍返回多文件 diff，`handle_planner_repair` 会拆分并串行处理，确保每次只对一个文件运行 `validate_unified_diff` 和 `try_apply_and_test`。
+
 - `PlannerEnv.step()` 在检测到 Planner 动作为 `repair` 且未携带显式 `patch` 时，会实例化 `RepairRuntimeState` 并委托上述管线；若 Planner 请求 `apply=false`，则仅返回候选补丁信息，不会修改仓库。【F:graph_planner/env/planner_env.py†L142-L229】
 - 新增的 `tests/test_text_protocol.py` 覆盖了动作解析、payload 构建、补丁应用成功/失败、observation 编码等场景，确保文本轨迹协议端到端闭环可复现。【F:tests/test_text_protocol.py†L1-L198】
 
