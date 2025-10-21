@@ -63,7 +63,6 @@ tests/             # FakeSandbox 测试与 CGM 适配器回归
 
 ## 文档索引
 
-- [`docs/github_update_instructions.md`](docs/github_update_instructions.md)：提交前的自检命令、Git 流程与日志要求。
 - [`docs/graph_planner_architecture_pipeline.md`](docs/graph_planner_architecture_pipeline.md)：端到端架构、RepoEnv 冒烟指引与训练命令速查。
 
 若需进一步了解 ACI 工具链与 Git 封装的使用方式，请参见 `docs/scripts_and_tests_guide.md` 中的“ACI / Git / Lint / Test 的实现来源”章节。

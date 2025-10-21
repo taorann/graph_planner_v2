@@ -37,7 +37,7 @@ Graph Planner 致力于复现 CGM + Planner 的双智能体代码修复流程：
 
 5. **文档与操作指南**
    - `docs/graph_planner_architecture_pipeline.md` 汇总项目架构、模块职责以及 CGM/rLLM 训练运行 pipeline，其中包含最新的冒烟测试与训练脚本速查命令（参见第 4.3 节）。【F:docs/graph_planner_architecture_pipeline.md†L120-L214】
-   - `docs/scripts_and_tests_guide.md`、`docs/github_update_instructions.md` 分别覆盖脚本说明与贡献流程。
+   - `docs/scripts_and_tests_guide.md` 概述脚本入口、测试回归与 ACI/Git/Lint 实现来源。
    - `README.md` 与本文件提供整体架构、配置方法与现状记录。
 
 ## 尚需补齐的关键条件

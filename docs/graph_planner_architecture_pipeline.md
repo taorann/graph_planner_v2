@@ -14,8 +14,12 @@ CLI / Scripts / Tests
     ├── run_rule_agent.py …… 规则 & 本地 LLM 入口
     └── train_graphplanner_rllm.py …… rLLM PPO 训练入口
 └── tests/ …… FakeSandbox & 集成测试
-    └── tests/test_cgm_adapter.py …… CGM 本地推理覆盖
-    └── tests/test_rllm_integration.py …… rLLM 适配层冒烟
+    └── tests/test_rule_agent_pipeline.py …… 规则代理在 FakeSandbox 上的冒烟回归
+    └── tests/test_cgm_adapter.py …… CGM 本地/远端推理覆盖
+    └── tests/test_text_protocol.py …… 文本轨迹修复管线解析与补丁流程
+    └── tests/test_text_memory.py …… Memory 动作配额与提交/删除流程
+    └── tests/test_rllm_integration.py …… rLLM 适配层与 GRPO 回归
+    └── tests/test_toy_mlp.py …… 玩具 MLP 模型的 tokenizer/推理/反向链路
 └── graph_planner/
     ├── agents/(rule_based|model_based|common)
     ├── env/planner_env.py …… 环境包装（R2E/RepoEnv）
@@ -50,6 +54,7 @@ CLI / Scripts / Tests
 | `integrations/rllm/env.py` | `GraphPlannerRLLMEnv` | 将 `PlannerEnv` 暴露为 rLLM `BaseEnv`，并为每个任务生成唯一 `issue_uid` 以支撑并发容器训练。【F:graph_planner/integrations/rllm/env.py†L1-L134】 |
 | `integrations/rllm/cgm_agent.py` & `cgm_env.py` | `CGMRLLMAgent`、`CGMRLLMEnv` | 面向 CGM 的 PPO 训练包装，封装唯一 issue id 与上下文采集流程。【F:graph_planner/integrations/rllm/cgm_agent.py†L1-L220】【F:graph_planner/integrations/rllm/cgm_env.py†L11-L197】 |
 | `integrations/rllm/dataset.py` | `ensure_dataset_registered` | 将 JSON/JSONL 任务注册为 rLLM 可识别的数据集，解析路径与挂载信息。【F:graph_planner/integrations/rllm/dataset.py†L28-L109】 |
+| `memory/text_memory.py` | `memory_commit`、`memory_delete`、`TurnState` | 维护 Explore/工具 observation 的记忆提交与删除，执行配额估算与拒绝逻辑，供环境与代理共享最新上下文。【F:graph_planner/memory/text_memory.py†L37-L420】 |
 | `scripts/train_graphplanner_rllm.py` | CLI helpers | 注入模型路径、注册数据集、绑定 Agent/Env，并暴露并行训练开关（`--parallel-agents`、`--rollout-workers`、`--ray-*` 等）后委托 rLLM PPO。【F:scripts/train_graphplanner_rllm.py†L70-L220】 |
 
 ### 2.1 rLLM 模块导入路径 / rLLM import resolution
