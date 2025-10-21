@@ -16,12 +16,12 @@ Graph Planner 致力于复现 CGM + Planner 的双智能体代码修复流程：
 当前仓库已经落实以下框架与配套能力，确保“Planner + CGM” 双智能体流程可以在本地串联、在 rLLM 上训练，并通过规则策略兜底：
 
 1. **Graph Planner 统一包结构**（`graph_planner/`）
-   - `graph_planner.agents`：同时保留规则策略（`rule_based`）与本地模型策略（`model_based`），共享 `agents.common.chat` 定义的 JSON 协议，方便替换决策模型。
+   - `graph_planner.agents`：同时保留规则策略（`rule_based`）与本地模型策略（`model_based`），共享 `agents.common.text_protocol` 定义的 `<function=...>` 文本轨迹协议，方便替换决策模型。
    - `graph_planner.env`：`PlannerEnv` 封装 R2E/RepoEnv 任务生命周期，负责动作解析、奖励计算与遥测输出。
    - `graph_planner.runtime`：`SandboxRuntime` 调度 FakeSandbox、RepoEnv、docker-py 三种后端，并统一将 lint/test 结果写入日志。
 
 2. **rLLM 训练集成**
-   - `graph_planner.integrations.rllm.agent.GraphPlannerRLLMAgent` 将环境观测整理成系统提示，解析模型 JSON 输出，并在解析失败时回退到规则策略。
+   - `graph_planner.integrations.rllm.agent.GraphPlannerRLLMAgent` 将环境观测整理成系统提示，解析模型输出的 `<function=...>` 区块，并在解析失败时回退到规则策略。
    - `graph_planner.integrations.rllm.env.GraphPlannerRLLMEnv` 将 `PlannerEnv` 暴露给 rLLM，封装奖励、终止条件与 RepoEnv/Sandbox 初始化逻辑。
    - `graph_planner.integrations.rllm.registry` + `graph_planner.infra.vendor.ensure_rllm_importable` 负责定位子模块 rLLM 并在 Hydra/Verl 注册 Graph Planner 自定义 agent/env。
    - `scripts/train_graphplanner_rllm.py` 读取 rLLM PPO 配置，覆盖数据路径与训练超参，可选择性关闭规则回退。
@@ -36,7 +36,8 @@ Graph Planner 致力于复现 CGM + Planner 的双智能体代码修复流程：
    - `aci` 工具链实现文件查看、编辑、lint/test 等基础能力，供 Sandbox 与训练流程复用。
 
 5. **文档与操作指南**
-   - `docs/repoenv_smoke_test.md`、`docs/scripts_and_tests_guide.md`、`docs/github_update_instructions.md` 等文档分别覆盖容器冒烟、脚本说明、贡献流程。
+   - `docs/graph_planner_architecture_pipeline.md` 汇总项目架构、模块职责以及 CGM/rLLM 训练运行 pipeline，其中包含最新的冒烟测试与训练脚本速查命令（参见第 4.3 节）。【F:docs/graph_planner_architecture_pipeline.md†L120-L214】
+   - `docs/scripts_and_tests_guide.md` 概述脚本入口、测试回归与 ACI/Git/Lint 实现来源。
    - `README.md` 与本文件提供整体架构、配置方法与现状记录。
 
 ## 尚需补齐的关键条件
@@ -53,7 +54,7 @@ Graph Planner 致力于复现 CGM + Planner 的双智能体代码修复流程：
 
 3. **本地模型接入信息**
    - `.aci/config.json` 中 `planner_model`、`cgm` 默认均为禁用状态，需要提供实际的本地部署端点、模型名、鉴权 token 等信息。
-   - 还缺少 Planner 模型初始 checkpoint/权重路径，训练脚本在未指定 `--model-path` 时只能跑配置流程，无法真正优化参数。
+   - 虽然仓库已预留 `models/qwen3-14b-instruct/` 与 `models/codefuse-cgm/` 目录作为默认 checkpoint 路径，但仍需在这些目录内放入真实权重与 tokenizer 才能执行训练或推理。
 
 4. **数据与奖励配置**
    - 尚未定义更多 RepoEnv/R2E 任务的奖励 shaping、终止条件调整等策略；如需与真实训练目标对齐，需要进一步扩充。
@@ -71,10 +72,10 @@ Graph Planner 致力于复现 CGM + Planner 的双智能体代码修复流程：
 
 3. **模型服务配置**
    - 将 Planner LLM、CGM 的本地推理服务端点填入 `.aci/config.json`（或使用环境变量覆盖），并确保接口遵循 OpenAI / CGM 适配器协议。
-   - 通过 `scripts/run_rule_agent.py --agent llm` 进行冒烟测试，确认模型输出合法 JSON，补丁流程可走通。
+   - 通过 `scripts/run_rule_agent.py --agent llm` 进行冒烟测试，确认模型输出合法的 `<function=...>` 块，补丁流程可走通。
 
 4. **训练启动**
-   - 选择或训练一个基础 checkpoint，使用 `--model-path` 传入同一路径给 actor/critic。
+   - 将基础 checkpoint 拷贝至 `models/qwen3-14b-instruct/`（以及需要的 `models/codefuse-cgm/`），脚本会自动使用这些路径作为 `--model-path` 与 `--cgm-model-path` 的默认值。
    - 根据实验计划调整 `--max-steps`、`--trainer-epochs` 等参数，运行 `scripts/train_graphplanner_rllm.py` 启动 PPO 训练。
    - 在训练过程中关注 `logs/` 与 Ray dashboard，确保奖励、轨迹记录符合预期。
 
