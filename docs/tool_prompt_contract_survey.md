@@ -13,14 +13,23 @@
 
 ### 2.1 动作执行映射一览
 
+#### 2.1.1 工具实现文件速查
+
+| 动作 | 数据类定义 | 环境入口 | 依赖工具/模块 | 实现状态 |
+| --- | --- | --- | --- | --- |
+| `explore` | `graph_planner/core/actions.py` → `ExploreAction`【F:graph_planner/core/actions.py†L1-L40】 | `graph_planner/env/planner_env.py` → `_handle_explore`【F:graph_planner/env/planner_env.py†L97-L169】 | `graph_planner/graph/context.py`（子图上下文）、`graph_planner/memory/candidates.py`（候选生成）、`graph_planner/retriever/snippet_reader.py`（代码片段）等 | ✅ 已实现，可根据 anchors 与 budget 选择 `find`/`expand`/`read`。 |
+| `memory` | `MemoryAction`【F:graph_planner/core/actions.py†L42-L74】 | `_handle_memory`【F:graph_planner/env/planner_env.py†L171-L233】 | `graph_planner/memory/text_memory.py`（`memory_commit`/`memory_delete`、配额估算）【F:graph_planner/memory/text_memory.py†L1-L407】 | ✅ 已实现，支持 explore/observation 目标、turn/session scope 与 over-budget 拒绝。 |
+| `repair` | `RepairAction`【F:graph_planner/core/actions.py†L76-L118】 | `_handle_repair`【F:graph_planner/env/planner_env.py†L235-L327】 | `graph_planner/agents/common/text_protocol.py`（`handle_planner_repair`、CGM payload）【F:graph_planner/agents/common/text_protocol.py†L189-L401】；`graph_planner/agents/rule_based/cgm_adapter.py`（本地 CGM 客户端）【F:graph_planner/agents/rule_based/cgm_adapter.py†L1-L358】 | ✅ 已实现，Planner 只写 subplan，CGM 生成统一 diff 并可自动测试。 |
+| `submit` | `SubmitAction`【F:graph_planner/core/actions.py†L120-L150】 | `_handle_submit`【F:graph_planner/env/planner_env.py†L329-L352】 | `graph_planner/tools/testing.py`（`run_all_checks`）、`graph_planner/tools/git_utils.py`（补丁状态）等 | ✅ 已实现，负责最终测试与 episode 结束。 |
+| `noop` | `NoopAction`【F:graph_planner/core/actions.py†L152-L170】 | `PlannerEnv.step` 顶层判断【F:graph_planner/env/planner_env.py†L61-L95】 | 无（直接回传空 observation） | ✅ 已实现，允许模型显式跳过操作。 |
+
 | 动作 | 触发位置 | 环境/实现 | 说明 |
 | --- | --- | --- | --- |
-| `explore` | Planner 输出 `<function=explore>`；`LocalLLMPlannerAgent._action_from_block`/`action_from_payload` 解析为 `ExploreAction`。 | `PlannerEnv._handle_explore` 调用锚点扩展、图检索与 snippet 读取。【F:graph_planner/graph_planner/agents/model_based/planner.py†L224-L247】【F:graph_planner/graph_planner/agents/common/chat.py†L106-L123】【F:graph_planner/graph_planner/env/planner_env.py†L75-L131】 | 已实现；支持 `find`/`expand`/`read` 三种 `op`。 |
-| `memory` | `<function=memory>`；解析为 `MemoryAction`。 | `text_memory.memory_commit`/`memory_delete` 根据 target/scope/intent 处理探索候选或工具 observation，`PlannerEnv._handle_memory` 负责调用并持久化子图/文本记忆。【F:graph_planner/memory/text_memory.py†L1-L319】【F:graph_planner/env/planner_env.py†L80-L173】 | 已实现；支持 over-budget 拒绝、commit/delete 版本号递增。 |
-| `repair` | `<function=repair>`；解析为 `RepairAction`。 | `_handle_repair` 若带 patch 则直接应用，否则调用 `text_protocol.handle_planner_repair` → CGM 修复链。【F:graph_planner/graph_planner/env/planner_env.py†L200-L289】 | 已实现；遵循统一 diff 与 Sandbox 测试流程。 |
-| `submit` | `<function=submit>`；解析为 `SubmitAction`。 | `_handle_submit` 运行测试并返回终局结果。【F:graph_planner/graph_planner/env/planner_env.py†L291-L296】 | 已实现；触发奖励与 episode 结束。 |
-| `noop` | `<function=noop>`；解析为 `NoopAction`。【F:graph_planner/graph_planner/agents/model_based/planner.py†L247-L249】【F:graph_planner/graph_planner/agents/common/chat.py†L123-L151】 | `PlannerEnv.step` 识别 `NoopAction` 并返回 `{"kind": "noop"}`，不上链任何容器操作。【F:graph_planner/graph_planner/env/planner_env.py†L61-L88】 | 新增显式空操作，便于模型放弃本轮动作且保持协议一致。 |
-
+| `explore` | Planner 输出 `<function=explore>`；`LocalLLMPlannerAgent._action_from_block`/`action_from_payload` 解析为 `ExploreAction`。 | `PlannerEnv._handle_explore` 调用锚点扩展、图检索与 snippet 读取。【F:graph_planner/agents/model_based/planner.py†L224-L247】【F:graph_planner/agents/common/chat.py†L106-L123】【F:graph_planner/env/planner_env.py†L97-L169】 | 已实现；支持 `find`/`expand`/`read` 三种 `op`。 |
+| `memory` | `<function=memory>`；解析为 `MemoryAction`。 | `text_memory.memory_commit`/`memory_delete` 根据 target/scope/intent 处理探索候选或工具 observation，`PlannerEnv._handle_memory` 负责调用并持久化子图/文本记忆。【F:graph_planner/memory/text_memory.py†L1-L407】【F:graph_planner/env/planner_env.py†L171-L233】 | 已实现；支持 over-budget 拒绝、commit/delete 版本号递增。 |
+| `repair` | `<function=repair>`；解析为 `RepairAction`。 | `_handle_repair` 若带 patch 则直接应用，否则调用 `text_protocol.handle_planner_repair` → CGM 修复链。【F:graph_planner/env/planner_env.py†L235-L327】 | 已实现；遵循统一 diff 与 Sandbox 测试流程。 |
+| `submit` | `<function=submit>`；解析为 `SubmitAction`。 | `_handle_submit` 运行测试并返回终局结果。【F:graph_planner/env/planner_env.py†L329-L352】 | 已实现；触发奖励与 episode 结束。 |
+| `noop` | `<function=noop>`；解析为 `NoopAction`。【F:graph_planner/agents/model_based/planner.py†L247-L249】【F:graph_planner/agents/common/chat.py†L123-L151】 | `PlannerEnv.step` 识别 `NoopAction` 并返回 {"kind": "noop"}，不上链任何容器操作。【F:graph_planner/env/planner_env.py†L61-L95】 | 新增显式空操作，便于模型放弃本轮动作且保持协议一致。 |
 Graph Planner 约定 **单回合仅一个 `<function=...>` 块**，内含多段 `<param>`。`parse_action_block` 会验证起止标签、参数唯一性与合法动作名，不允许额外文本或重复参数，从而把模型输出解成 `{"name": ..., "params": {...}}` 结构；`format_action_block` 用于 fallback 再输出同样的文本协议。【F:graph_planner/graph_planner/agents/common/text_protocol.py†L59-L167】
 
 Planner 将环境 observation 包装成 `<observation for="{name}">{...JSON...}</observation>`，下一轮模型可直接读取；这一封装由 `emit_observation` 统一实现并在单测中确保严格输出 JSON。【F:graph_planner/graph_planner/agents/common/text_protocol.py†L330-L335】【F:graph_planner/tests/test_text_protocol.py†L136-L141】
