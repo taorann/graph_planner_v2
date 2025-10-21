@@ -35,19 +35,8 @@ def test_find_in_rllm_handles_namespace_packages():
     assert cfg_path.is_file()
 
 
-def test_planner_agent_generates_patch(monkeypatch):
+def test_planner_agent_parses_text_trajectory():
     agent = GraphPlannerRLLMAgent(use_rule_fallback=False)
-
-    stub_patch = {"edits": [{"path": "foo.py", "start": 1, "end": 1, "new_text": "print('hi')\n"}], "summary": "fix"}
-
-    monkeypatch.setattr(
-        "graph_planner.integrations.rllm.agent.cgm_adapter.generate",
-        lambda **_: stub_patch,
-    )
-    monkeypatch.setattr(
-        "graph_planner.integrations.rllm.agent.subgraph_store.linearize",
-        lambda *args, **kwargs: [{"path": "foo.py", "text": "body"}],
-    )
 
     observation = {
         "issue": {"id": "demo", "title": "Bug"},
@@ -61,16 +50,21 @@ def test_planner_agent_generates_patch(monkeypatch):
 
     agent.update_from_env(observation, reward=0.0, done=False, info=None)
     response = (
-        "{" "\"thought\": \"apply fix\","
-        " \"action\": {\"type\": \"repair\", \"apply\": true,"
-        " \"plan_targets\": [{\"path\": \"foo.py\", \"start\": 1, \"end\": 1}]}}"
+        "<function=repair>\n"
+        "  <param name=\"thought\">Investigate buffer bounds</param>\n"
+        "  <param name=\"subplan\"><![CDATA[\nFix foo.py bounds check\n]]></param>\n"
+        "  <param name=\"focus_ids\">[\"n1\"]</param>\n"
+        "  <param name=\"apply\">true</param>\n"
+        "</function>"
     )
 
     result = agent.update_from_model(response)
     repair_action = result.action
 
-    assert repair_action.patch == stub_patch
-    assert repair_action.plan_targets
+    assert repair_action.plan == "Fix foo.py bounds check"
+    assert repair_action.apply is True
+    assert repair_action.patch is None
+    assert repair_action.plan_targets == [{"id": "n1", "why": "planner-focus"}]
 
 
 def test_cgm_env_uses_provided_plan(monkeypatch):

@@ -8,7 +8,6 @@ English summary
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List
 
@@ -32,20 +31,40 @@ except ModuleNotFoundError:
 else:
     _AGENT_IMPORT_ERROR = None
 
+from ...agents.common import text_protocol
 from ...agents.common.chat import (
     FALLBACK_REASON_KEY,
     SYSTEM_PROMPT,
-    action_from_payload,
     action_to_payload,
-    extract_json_payload,
     summarise_observation,
 )
-from ...agents.rule_based import cgm_adapter
 from ...agents.rule_based.planner import PlannerAgent as RuleFallbackAgent
-from ...core.actions import ActionUnion, RepairAction, SubmitAction
+from ...core.actions import (
+    ActionUnion,
+    ExploreAction,
+    MemoryAction,
+    NoopAction,
+    RepairAction,
+    SubmitAction,
+)
 from ...infra.config import Config, load as load_config
-from ...memory import subgraph_store
-from aci.schema import Plan, PlanTarget
+
+
+ALLOWED_ACTIONS = {"explore", "memory", "repair", "submit", "noop"}
+
+
+def _safe_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"false", "0", "no", "off"}:
+            return False
+        if lowered in {"true", "1", "yes", "on"}:
+            return True
+    return bool(value)
 
 
 if BaseAgent is None:
@@ -163,34 +182,35 @@ else:
         ) -> tuple[str, ActionUnion, str, Dict[str, Any]]:
             """尝试从模型回复中解析 Thought 与 Action，失败时触发 fallback。"""
 
-            payload = extract_json_payload(response)
-            if payload is None:
-                return self._fallback_action("no_json", response)
-            thought = str(payload.get("thought") or payload.get("reasoning") or "").strip()
-            raw_action = payload.get("action")
-            if isinstance(raw_action, str):
-                try:
-                    raw_action = json.loads(raw_action)
-                except json.JSONDecodeError:
-                    raw_action = None
-            action_obj = action_from_payload(raw_action)
-            if action_obj is None:
-                return self._fallback_action("invalid_action", response, raw_action)
-            if isinstance(action_obj, RepairAction):
-                try:
-                    action_obj = self._ensure_patch(action_obj)
-                except Exception:
-                    return self._fallback_action("patch_error", response, raw_action)
-            return thought, action_obj, response or json.dumps(payload, ensure_ascii=False), {
+            try:
+                block = text_protocol.parse_action_block(response, ALLOWED_ACTIONS)
+            except text_protocol.ActionParseError as exc:
+                return self._fallback_action("parse_error", response, error=str(exc))
+
+            params = dict(block.get("params") or {})
+            thought = str(params.pop("thought", "")).strip()
+            try:
+                action_obj = self._action_from_block(block.get("name"), params)
+            except ValueError as exc:
+                return self._fallback_action("invalid_action", response, raw_action=params, error=str(exc))
+
+            meta = {
                 "used_fallback": False,
-                "raw_action": raw_action,
+                "raw_action": {"name": block.get("name"), "params": params},
             }
+            assistant_msg = response or text_protocol.format_action_block(
+                str(block.get("name") or "noop"),
+                {"thought": thought, **params},
+            )
+            return thought, action_obj, assistant_msg, meta
 
         def _fallback_action(
             self,
             reason: str,
             response: str,
             raw_action: Any | None = None,
+            *,
+            error: str | None = None,
         ) -> tuple[str, ActionUnion, str, Dict[str, Any]]:
             """调用规则代理生成保底动作，并记录失败原因。"""
 
@@ -200,20 +220,20 @@ else:
             fallback = self._rule_agent.step(observation)
             action = fallback.get("action_obj") or SubmitAction()
             thought = fallback.get("plan", fallback.get("prompt", ""))
-            assistant_msg = json.dumps(
-                {
-                    "thought": thought,
-                    "action": action_to_payload(action),
-                    FALLBACK_REASON_KEY: reason,
-                },
-                ensure_ascii=False,
-            )
+            payload = action_to_payload(action)
+            params = {"thought": thought, **{k: v for k, v in payload.items() if k != "type"}}
+            params[FALLBACK_REASON_KEY] = reason
+            if error:
+                params["error"] = error
+            assistant_msg = text_protocol.format_action_block(payload.get("type", "noop"), params)
             meta = {
                 "used_fallback": True,
                 FALLBACK_REASON_KEY: reason,
                 "raw_action": raw_action,
                 "model_response": response,
             }
+            if error:
+                meta["error"] = error
             return thought, action, assistant_msg, meta
 
         # ------------------------------------------------------------------
@@ -243,138 +263,79 @@ else:
                 else:
                     self._state.phase = "expand"
 
-        def _ensure_patch(self, action: RepairAction) -> RepairAction:
-            """如果模型动作缺少补丁，则调用 CGM 生成并填充。"""
-
-            plan_targets = self._normalise_plan_targets(action.plan_targets)
-            if not plan_targets:
-                plan_targets = self._plan_targets_from_snippets(self._state.last_snippets or [])
-            if not plan_targets:
-                return action
-
-            plan_text = action.plan or self._build_plan_text(plan_targets)
-            snippets = self._state.last_snippets or self._fallback_snippets()
-
-            plan_obj = Plan(
-                targets=[
-                    PlanTarget(
-                        path=pt["path"],
-                        start=int(pt["start"]),
-                        end=int(pt["end"]),
-                        id=str(pt.get("id") or f"{pt['path']}::{pt['start']}-{pt['end']}") ,
-                        why=pt.get("why", "graph_planner-rl"),
-                    )
-                    for pt in plan_targets
-                ],
-                budget={"mode": self._config.mode},
-                priority_tests=[],
-            )
-
-            subgraph = subgraph_store.wrap((self._last_env_observation or {}).get("subgraph") or {})
-            linearized = subgraph_store.linearize(subgraph, mode=self._config.collate.mode)
-            patch = cgm_adapter.generate(
-                subgraph_linearized=linearized,
-                plan=plan_obj,
-                constraints={"max_edits": max(1, len(plan_targets))},
-                snippets=snippets,
-                plan_text=plan_text,
-                issue=self._state.issue,
-            )
-            patch.setdefault("summary", plan_text)
-
-            action.plan = plan_text
-            action.plan_targets = plan_targets
-            action.patch = patch
-            self._state.plan_targets = plan_targets
-            self._state.plan_text = plan_text
-            return action
-
-        def _normalise_plan_targets(self, raw: Iterable[Any]) -> List[Dict[str, Any]]:
-            """将模型输出的 plan_targets 规范化为路径/行号字典。"""
-
-            targets: List[Dict[str, Any]] = []
-            for entry in raw or []:
-                if not isinstance(entry, dict):
-                    continue
-                path = entry.get("path")
-                start = entry.get("start", entry.get("line"))
-                end = entry.get("end", start)
-                if not path or start is None:
-                    continue
-                try:
-                    start_i = int(start)
-                    end_i = int(end if end is not None else start_i)
-                except Exception:
-                    continue
-                targets.append(
-                    {
-                        "path": str(path),
-                        "start": start_i,
-                        "end": end_i,
-                        "id": entry.get("id"),
-                        "why": entry.get("why", "graph_planner-rl"),
-                    }
+        def _action_from_block(self, name: Any, params: Dict[str, Any]) -> ActionUnion:
+            action_name = str(name or "").lower()
+            if action_name == "explore":
+                op = str(params.get("op") or "expand").lower()
+                anchors = self._ensure_dict_list(params.get("anchors"))
+                nodes = self._ensure_str_list(params.get("nodes"))
+                hop = self._safe_int(params.get("hop"), 1)
+                limit = self._safe_int(params.get("limit"), 50)
+                return ExploreAction(op=op, anchors=anchors, nodes=nodes, hop=hop, limit=limit)
+            if action_name == "memory":
+                target = str(params.get("target", "explore"))
+                scope = str(params.get("scope", "turn"))
+                intent = str(params.get("intent", "commit"))
+                selector = params.get("selector")
+                if isinstance(selector, (list, dict)):
+                    selector = json.dumps(selector, ensure_ascii=False)
+                return MemoryAction(target=target, scope=scope, intent=intent, selector=selector)
+            if action_name == "repair":
+                subplan = params.get("subplan")
+                if not isinstance(subplan, str) or not subplan.strip():
+                    raise ValueError("repair action requires non-empty subplan")
+                focus_ids = self._ensure_str_list(params.get("focus_ids"))
+                apply_flag = _safe_bool(params.get("apply", True))
+                plan_targets = [
+                    {"id": fid, "why": "planner-focus"}
+                    for fid in focus_ids
+                    if fid
+                ]
+                return RepairAction(
+                    apply=apply_flag,
+                    issue=dict(self._state.issue or {}),
+                    plan=subplan.strip(),
+                    plan_targets=plan_targets,
+                    patch=None,
                 )
-            return targets
+            if action_name == "submit":
+                return SubmitAction()
+            if action_name == "noop":
+                return NoopAction()
+            raise ValueError(f"unsupported action '{action_name}'")
 
-        def _plan_targets_from_snippets(self, snippets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-            """当缺少 plan_targets 时根据片段自动推断。"""
+        def _ensure_str_list(self, value: Any) -> List[str]:
+            if value is None:
+                return []
+            if isinstance(value, str):
+                return [value] if value else []
+            if isinstance(value, Iterable):
+                result: List[str] = []
+                for item in value:
+                    if isinstance(item, str) and item:
+                        result.append(item)
+                    elif isinstance(item, (int, float)):
+                        result.append(str(item))
+                return result
+            return []
 
-            plan_targets: List[Dict[str, Any]] = []
-            for snip in snippets:
-                path = snip.get("path")
-                if not path:
-                    continue
-                start = int(snip.get("start", 1))
-                end = int(snip.get("end", start))
-                node_id = snip.get("node_id") or f"{path}::{start}-{end}"
-                plan_targets.append(
-                    {
-                        "path": path,
-                        "start": start,
-                        "end": end,
-                        "id": node_id,
-                        "why": "graph_planner-snippet",
-                    }
-                )
-            return plan_targets
+        def _ensure_dict_list(self, value: Any) -> List[Dict[str, Any]]:
+            if value is None:
+                return []
+            if isinstance(value, dict):
+                return [dict(value)]
+            if isinstance(value, Iterable):
+                result: List[Dict[str, Any]] = []
+                for item in value:
+                    if isinstance(item, dict):
+                        result.append(dict(item))
+                return result
+            return []
 
-        def _build_plan_text(self, plan_targets: List[Dict[str, Any]]) -> str:
-            """使用片段摘要生成自然语言计划描述。"""
-
-            lines = []
-            snippet_index = {snip.get("path"): snip for snip in self._state.last_snippets or []}
-            for target in plan_targets:
-                path = target["path"]
-                start = target["start"]
-                end = target["end"]
-                snippet = snippet_index.get(path) or {}
-                preview = " | ".join(line.split(":", 1)[-1].strip() for line in (snippet.get("snippet") or [])[:3])
-                lines.append(f"- {path} L{start}-{end}: {preview[:160]}")
-            return "Plan to address the following locations:\n" + "\n".join(lines)
-
-        def _fallback_snippets(self) -> List[Dict[str, Any]]:
-            """当模型/环境无片段可用时构造最小补丁上下文。"""
-
-            snippets: List[Dict[str, Any]] = []
-            for cand in self._state.last_candidates[:1]:
-                path = cand.get("path")
-                if not path:
-                    continue
-                span = cand.get("span") or {}
-                start = int(span.get("start", 1))
-                end = int(span.get("end", start))
-                snippet_line = f"{start:04d}: {cand.get('name', '')}"
-                snippets.append(
-                    {
-                        "path": path,
-                        "start": start,
-                        "end": end,
-                        "node_id": cand.get("id"),
-                        "snippet": [snippet_line],
-                    }
-                )
-            return snippets
-
+        def _safe_int(self, value: Any, default: int) -> int:
+            try:
+                return int(value)
+            except Exception:
+                return default
 
 __all__ = ["GraphPlannerRLLMAgent"]

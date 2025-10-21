@@ -21,6 +21,7 @@ __all__ = [
     "ActionParseError",
     "RepairRuntimeState",
     "parse_action_block",
+    "format_action_block",
     "build_cgm_payload",
     "call_cgm",
     "pick_best_candidate",
@@ -107,6 +108,26 @@ def parse_action_block(text: str, allowed: Iterable[str]) -> Dict[str, Any]:
         raise ActionParseError("unexpected trailing content after last <param>")
 
     return {"name": name, "params": params}
+
+
+def format_action_block(name: str, params: Mapping[str, Any]) -> str:
+    """Render a ``<function=...>`` block from structured parameters."""
+
+    lines = [f"<function={name}>"]
+    for key, value in params.items():
+        lines.append(f"  <param name=\"{key}\">{_format_param_value(value)}</param>")
+    lines.append("</function>")
+    return "\n".join(lines)
+
+
+def _format_param_value(value: Any) -> str:
+    if isinstance(value, str):
+        if not value:
+            return ""
+        if any(ch in value for ch in "<>\n"):
+            return "<![CDATA[\n" + value + "\n]]>"
+        return value
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _canonicalise_step(line: str) -> str:

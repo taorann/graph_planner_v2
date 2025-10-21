@@ -70,12 +70,12 @@ CLI / Scripts / Tests
 
 #### 2.2.1 Planner 动作协议
 
-- **动作枚举**：模型回复的 JSON `action.type` 必须是 `explore`、`memory`、`repair` 或 `submit` 四选一。解析逻辑由 `action_from_payload` 实现，字段不符合规范时直接返回 `None` 并触发规则兜底策略。【F:graph_planner/agents/common/chat.py†L73-L133】
-- **Explore**：允许额外的 `op`（`find|expand|read`）、`anchors`（节点列表）、`nodes`、`hop` 与 `limit` 字段，直接映射到 `ExploreAction` 数据类，驱动图扩展与代码片段读取。【F:graph_planner/core/actions.py†L6-L42】【F:graph_planner/agents/common/chat.py†L85-L100】
-- **Memory**：`ops` 指定记忆操作（如 `write_subgraph`、`clear_plan`），`budget` 与 `diversify_by_dir` 控制备选节点数。解析后交给 `MemoryAction`，环境会据此更新 Planner 内部状态。【F:graph_planner/memory/manager.py†L32-L146】【F:graph_planner/agents/common/chat.py†L100-L108】
-- **Repair**：`apply` 表示是否应用补丁，`issue`/`plan`/`plan_targets` 透传给 CGM，请求补丁或执行 Planner 计划；若模型直接提供 `patch` 字段，会被视为即刻补丁，由 `RepairAction` 传递给 `cgm_adapter`。【F:graph_planner/agents/rule_based/cgm_adapter.py†L145-L207】【F:graph_planner/agents/common/chat.py†L108-L123】
-- **Submit**：`SubmitAction` 不需要额外字段，环境收到后执行最终测试并结束 episode。【F:graph_planner/agents/common/chat.py†L123-L126】
-- **Thought 字段**：`thought` 字符串记录模型的思考过程，`GraphPlannerRLLMAgent` 会把它写入 rollout 轨迹，便于日志分析与奖励塑形。【F:graph_planner/integrations/rllm/agent.py†L122-L180】
+- **动作枚举**：Planner 模型必须输出单个 `<function=ACTION>` 区块，`ACTION` 取自 `explore`、`memory`、`repair`、`submit` 或 `noop`。`parse_action_block` 会验证标签、参数唯一性与动作合法性，非法格式立即抛错并触发规则兜底。【F:graph_planner/agents/common/text_protocol.py†L59-L133】【F:graph_planner/agents/model_based/planner.py†L150-L210】
+- **Explore**：可携带 `op`（`find|expand|read`）、`anchors`（节点/锚点列表）、`nodes`、`hop` 与 `limit` 参数，解析后映射到 `ExploreAction`，驱动图扩展与代码片段读取。【F:graph_planner/core/actions.py†L1-L26】【F:graph_planner/agents/model_based/planner.py†L212-L225】
+- **Memory**：`target`/`scope`/`intent` 指定是提交最新 `explore` 结果还是其他工具 observation，`MemoryAction` 交由 `text_memory.memory_commit`/`memory_delete` 判断配额并更新子图或文本记忆。【F:graph_planner/core/actions.py†L28-L39】【F:graph_planner/memory/text_memory.py†L151-L319】
+- **Repair**：必须提供 `subplan`（支持 `<![CDATA[...]]>` 多行文本），可选 `focus_ids` 与 `apply`。转换后的 `RepairAction` 仅保留计划文本与关注节点，后续由 `PlannerEnv` 的文本轨迹修复管线拉起 CGM；模型不再直接下发 `patch`。【F:graph_planner/agents/model_based/planner.py†L230-L247】【F:graph_planner/env/planner_env.py†L240-L302】
+- **Submit/Noop**：`SubmitAction` 仍然终止 episode；`noop` 会映射为不执行记忆操作的空 `MemoryAction`，供模型显式跳过当前回合。【F:graph_planner/agents/model_based/planner.py†L247-L250】
+- **Thought 字段**：`<param name="thought">` 保留模型思考过程，`GraphPlannerRLLMAgent` 与本地 Planner 都会把该文本写入轨迹，便于调试与奖励塑形。【F:graph_planner/integrations/rllm/agent.py†L114-L161】【F:graph_planner/agents/model_based/planner.py†L141-L174】
 
 #### 2.2.2 Planner Prompt 布局
 
@@ -85,7 +85,7 @@ CLI / Scripts / Tests
 | `[Instruction]` | 最近一步的环境反馈（失败信息、reward、动作摘要） | 同上，`summarise_observation` 会把 `last_info`、`reward`、`done` 等写入文本，并返回给聊天客户端。 |
 | `[Planner memory]` | 可选的历史上下文：子图统计、plan 摘要等 | `PlannerEnv.render_memory_for_llm()` 将记忆模块内容注入用户提示，缺省时留空。【F:graph_planner/env/planner_env.py†L136-L173】 |
 
-- 系统提示要求模型始终输出 JSON（可包裹在 ```json fenced code block 中）。`extract_json_payload` 负责解析响应，最后一个有效 JSON 会被转换为动作；若失败则触发规则 fallback 并记录原因。【F:graph_planner/agents/common/chat.py†L57-L96】
+- 系统提示明确要求模型“只输出一个 `<function=...>` 区块”，并提醒多行文本需包裹在 CDATA 中。`parse_action_block` 与 `_action_from_block` 组合完成解析；若模型输出缺失标签或动作非法，将直接走规则 fallback 并在元数据中记录原因。【F:graph_planner/agents/common/contracts.py†L55-L106】【F:graph_planner/agents/model_based/planner.py†L141-L210】
 
 #### 2.2.3 CGM Prompt / Patch Schema
 
@@ -218,7 +218,7 @@ CLI / Scripts / Tests
    - 如果 CGM tokenizer 不在模型目录，附加 `--cgm-tokenizer-path`；若需单独指定 critic 模型，可使用 `--critic-model-path` 与 `--critic-tokenizer-path`。
 4. **训练期工作流**
    - `GraphPlannerRLLMEnv` 调用 `PlannerEnv` 在容器内执行真实代码修复流程，并利用 `issue_uid` 保证并发采样互不覆盖，所有 observation/reward 会写入 agent 轨迹。【F:graph_planner/integrations/rllm/env.py†L46-L134】
-   - `GraphPlannerRLLMAgent` 根据轨迹构造聊天消息并请求 planner 模型生成 JSON 动作；遇到 Repair 动作时通过 `cgm_adapter` 使用 CGM 模型生成补丁。【F:graph_planner/integrations/rllm/agent.py†L101-L200】【F:graph_planner/agents/rule_based/cgm_adapter.py†L145-L207】
+   - `GraphPlannerRLLMAgent` 根据轨迹构造聊天消息并请求 planner 模型生成 `<function=...>` 区块；遇到 Repair 动作时将参数交给文本轨迹修复管线，由环境统一调用 CGM。【F:graph_planner/integrations/rllm/agent.py†L101-L210】【F:graph_planner/env/planner_env.py†L240-L302】
    - `tests/test_rllm_integration.py::test_grpo_step_updates_toy_model` 验证了采集到的 token-level 奖励会经过 Verl 的 `compute_grpo_outcome_advantage` 与 `compute_policy_loss`，执行一次 `optimizer.step()` 后权重发生变化，说明经验确实被用于 GRPO 更新。【F:tests/test_rllm_integration.py†L182-L276】
 5. **结果产出与复现**
    - 训练中的行动日志、fallback 信息保存在 rLLM 日志目录；若带 `--print-config` 可查看最终 Hydra 配置。使用相同命令与模型路径即可在同一容器中复现完整训练流程。
@@ -229,9 +229,9 @@ CLI / Scripts / Tests
 
 | 维度 | 通用 ToolAgent/ToolEnvironment 示例流程 | 本仓库现有实现 | 备注 |
 | --- | --- | --- | --- |
-| Agent 类型 | 使用 rLLM 内置 `ToolAgent`，主要依赖通用工具接口 | 自定义 `GraphPlannerRLLMAgent` / `CGMRLLMAgent`，继承自 `BaseAgent`，封装 planner prompt、CGM fallback 与轨迹字段。【F:graph_planner/integrations/rllm/agent.py†L56-L200】【F:graph_planner/integrations/rllm/cgm_agent.py†L1-L220】 | 为了保证动作 JSON、补丁调用与本地记忆结构对齐，我们实现了专用 agent，而不是直接复用通用工具 agent。 |
+| Agent 类型 | 使用 rLLM 内置 `ToolAgent`，主要依赖通用工具接口 | 自定义 `GraphPlannerRLLMAgent` / `CGMRLLMAgent`，继承自 `BaseAgent`，封装 planner prompt、CGM fallback 与轨迹字段。【F:graph_planner/integrations/rllm/agent.py†L56-L210】【F:graph_planner/integrations/rllm/cgm_agent.py†L1-L220】 | 为了保证 `<function=...>` 文本协议、补丁调用与本地记忆结构对齐，我们实现了专用 agent，而不是直接复用通用工具 agent。 |
 | Environment | 直接使用 rLLM 的 `ToolEnvironment`，依赖工具抽象 | 自定义 `GraphPlannerRLLMEnv` / `CGMRLLMEnv`，在 `reset/step` 内部驱动 `PlannerEnv` 与 RepoEnv 容器，并注入奖励 shaping。【F:graph_planner/integrations/rllm/env.py†L1-L134】【F:graph_planner/integrations/rllm/cgm_env.py†L70-L214】 | 需要与 RepoEnv/CGM 的数据结构深度耦合，故编写了专用环境包装。 |
-| Prompt & 输出约定 | 由工具解析器决定，通常是标准的思维链 + 工具指令模板 | 通过 `graph_planner.agents.common.contracts` 定义 planner/CGM 的系统提示、section 布局与 JSON schema，并在 agent/encoder 中复用。【F:graph_planner/agents/common/contracts.py†L1-L128】【F:graph_planner/agents/common/chat.py†L1-L56】 | 该合同是我们仓库新增的约束，确保模型输出与代码解析器完全一致。 |
+| Prompt & 输出约定 | 由工具解析器决定，通常是标准的思维链 + 工具指令模板 | 通过 `graph_planner.agents.common.contracts` 定义 planner/CGM 的系统提示、section 布局与响应协议；Planner 使用 `<function=...>` 区块，CGM 仍输出 JSON 补丁。【F:graph_planner/agents/common/contracts.py†L1-L147】【F:graph_planner/agents/common/text_protocol.py†L59-L167】 | 该合同是我们仓库新增的约束，确保模型输出与代码解析器完全一致。 |
 | 采样/推理引擎 | `AgentExecutionEngine` 可以配置为 `engine_name="openai"` 并指向 HTTP API | 训练脚本使用本地 Hugging Face 模型（或玩具模型）作为 planner/CGM，推理由 `HuggingFaceChatClient` 和 `CodeFuseCGMGenerator` 实现。【F:graph_planner/integrations/local_llm/hf.py†L19-L186】【F:graph_planner/integrations/codefuse_cgm/inference.py†L18-L152】 | 这样能在离线容器中完成训练，无需外部 API。 |
 | 经验采样与更新 | `AgentExecutionEngine` 同时负责 rollout 和工具调用 | 采样由自定义 env/agent 执行，轨迹交给 Verl GRPO / PPO 算法处理；Ray 并发、资源检查、日志等由 `train_graphplanner_rllm.py` 注入配置。【F:scripts/train_graphplanner_rllm.py†L70-L336】 | 虽然同属 rLLM 生态，但我们直接对接 Verl 的训练器，而非 AgentExecutionEngine 的“一站式”接口。 |
 | 配置方式 | 主要靠传入 `agent_args`、`env_args`、`sampling_params` 字典 | 结合 CLI 参数与 OmegaConf 覆写，提供 `--reward-scale`、`--failure-penalty`、`--precision`、`--grad-accum-steps` 等开关，并通过 `_set_if_exists` 写入 Hydra 配置。【F:scripts/train_graphplanner_rllm.py†L180-L336】 | CLI 更贴近项目习惯，也方便与 Ray 资源、dataset 注册流程统一。 |

@@ -10,6 +10,7 @@ from ...core.actions import (
     ActionUnion,
     ExploreAction,
     MemoryAction,
+    NoopAction,
     RepairAction,
     SubmitAction,
 )
@@ -141,9 +142,10 @@ def action_from_payload(payload: Dict[str, Any] | None) -> ActionUnion | None:
         )
     if type_name == "memory":
         return MemoryAction(
-            ops=list(payload.get("ops") or []),
-            budget=int(payload.get("budget", 30)),
-            diversify_by_dir=int(payload.get("diversify_by_dir", 3)),
+            target=str(payload.get("target", "explore")),
+            scope=str(payload.get("scope", "turn")),
+            intent=str(payload.get("intent", "commit")),
+            selector=payload.get("selector"),
         )
     if type_name == "repair":
         plan_targets = payload.get("plan_targets") or payload.get("targets") or []
@@ -156,6 +158,8 @@ def action_from_payload(payload: Dict[str, Any] | None) -> ActionUnion | None:
         )
     if type_name == "submit":
         return SubmitAction()
+    if type_name == "noop":
+        return NoopAction()
     return None
 
 
@@ -172,9 +176,10 @@ def action_to_payload(action: ActionUnion) -> Dict[str, Any]:
     if isinstance(action, MemoryAction):
         return {
             "type": "memory",
-            "ops": action.ops,
-            "budget": action.budget,
-            "diversify_by_dir": action.diversify_by_dir,
+            "target": action.target,
+            "scope": action.scope,
+            "intent": action.intent,
+            "selector": action.selector,
         }
     if isinstance(action, RepairAction):
         return {
@@ -185,7 +190,9 @@ def action_to_payload(action: ActionUnion) -> Dict[str, Any]:
             "plan_targets": action.plan_targets,
             "patch": action.patch,
         }
-    return {"type": "submit"}
+    if isinstance(action, SubmitAction):
+        return {"type": "submit"}
+    return {"type": "noop"}
 
 
 __all__ = [

@@ -71,23 +71,36 @@ PLANNER_CONTRACT = PromptContract(
     system_instructions=dedent(
         """
         You are the Graph Planner decision model.
-        Respond to every observation with a JSON object containing the keys
-        "thought" and "action".  The "action" object must include a "type"
-        field with one of: explore, memory, repair, submit.
-        For explore actions you may also set "op" (find|expand|read),
-        "anchors", "nodes", "hop", and "limit".  For memory actions provide
-        "ops" describing memory operations.  For repair actions include
-        "apply", "plan", "plan_targets", and optionally "patch".
-        Always respond with valid JSON (optionally inside ```json fences).
+        Every reply MUST contain exactly one text-trajectory block:
+
+        <function=ACTION_NAME>
+          <param name="thought"><![CDATA[free-form reasoning]]></param>
+          <param name="k">JSON or text values</param>
+        </function>
+
+        Replace ACTION_NAME with one of: explore, memory, repair, submit, noop.
+        Do not emit any other text outside the block.
+
+        For each action:
+        - explore: params may include op (find|expand|read), anchors (list),
+          nodes (list), hop (int), limit (int).
+        - memory: provide target (explore|observation), scope (turn|session),
+          intent (commit|delete) and optional selector ("latest" or specific id).
+        - repair: set subplan (multi-line steps, wrap in CDATA), optional
+          focus_ids (list of graph node ids) and apply (true/false).
+        - submit: no extra params besides thought.
+        - noop: empty operation when no action fits.
+
+        Encode lists/dicts as JSON. Use CDATA for multi-line text.
         """
     ).strip(),
     response_schema={
-        "thought": "string — natural language reasoning behind the action.",
-        "action": dedent(
+        "thought": "CDATA string inside <param name=\"thought\">.",
+        "function": "ACTION_NAME in <function=...> (explore/memory/repair/submit/noop).",
+        "params": dedent(
             """
-            object — structured action payload with at least a "type" field.
-            Additional fields depend on the action type: explore/memory/repair/
-            submit.  Downstream code parses this payload to execute actions.
+            Additional <param> blocks. Keys depend on the action type and must
+            encode JSON-compatible values (numbers, strings, lists, dicts).
             """
         ).strip(),
     },

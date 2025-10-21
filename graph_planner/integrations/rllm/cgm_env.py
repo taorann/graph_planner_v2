@@ -311,7 +311,9 @@ else:
             obs, _, _, info = planner.step(expand)
             candidates = info.get("candidates") or []
 
-            planner.step(MemoryAction())
+            planner.step(
+                MemoryAction(target="explore", scope="session", intent="commit", selector="latest")
+            )
 
             node_ids = [cand.get("id") for cand in candidates[:3] if cand.get("id")]
             read = ExploreAction(op="read", nodes=node_ids, limit=len(node_ids) or 1)

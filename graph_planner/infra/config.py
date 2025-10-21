@@ -100,6 +100,15 @@ class Config:
     # ---- 记忆/测试策略 ----
     prefer_test_files: bool = True
     max_tfile_fraction: float = 0.60
+    memory_caps: Dict[str, int] = field(
+        default_factory=lambda: {
+            "nodes": 200,
+            "edges": 1000,
+            "frontier": 50,
+            "planner_tokens": 2000,
+            "cgm_tokens": 16000,
+        }
+    )
 
     # ---- 子系统配置 ----
     lint: LintCfg = field(default_factory=LintCfg)

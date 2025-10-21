@@ -12,17 +12,26 @@ from ..core.actions import (
     ActionUnion,
     ExploreAction,
     MemoryAction,
+    NoopAction,
     RepairAction,
     SubmitAction,
 )
 from ..infra.config import Config, load as load_config
-from ..memory.memory_bank import ApplyPolicy, MemoryBank, apply_ops as apply_memory_ops
-from ..memory import graph_adapter, mem_candidates, mem_ops_head, subgraph_store
+from ..memory import graph_adapter, mem_candidates, subgraph_store, text_memory
 from ..memory.subgraph_store import WorkingSubgraph
 from ..runtime.sandbox import SandboxConfig, SandboxRuntime
 from aci.schema import Plan, PlanTarget
 from aci.guard import GuardError, enforce_patch_guard
 from ..agents.rule_based.test_prioritizer import prioritize_tests
+
+
+DEFAULT_MEMORY_CAPS = {
+    "nodes": 200,
+    "edges": 1000,
+    "frontier": 50,
+    "planner_tokens": 2000,
+    "cgm_tokens": 16000,
+}
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -59,10 +68,14 @@ class PlannerEnv:
         self.last_info: Dict[str, Any] = {}
         self.repo_root_in_container: str = sandbox_cfg.workdir or "."
 
-        self.mem_bank = MemoryBank()
         self.subgraph: WorkingSubgraph = subgraph_store.new()
         self.last_candidates: List[Dict[str, Any]] = []
         self.last_reads: List[Dict[str, Any]] = []
+        raw_caps = dict(getattr(self.config, "memory_caps", {}) or {})
+        self.memory_caps: Dict[str, int] = {**DEFAULT_MEMORY_CAPS, **raw_caps}
+        self.memory_graph_store: Optional[text_memory.WorkingGraphStore] = None
+        self.memory_text_store: Optional[text_memory.NoteTextStore] = None
+        self.memory_state: Optional[text_memory.TurnState] = None
 
     # ------------------------------------------------------------------
     # 环境基础
@@ -77,6 +90,20 @@ class PlannerEnv:
             self.subgraph = subgraph_store.load(self.issue_id)
         except Exception:
             self.subgraph = subgraph_store.new()
+
+        self.memory_graph_store = text_memory.WorkingGraphStore(self.subgraph)
+        self.memory_text_store = text_memory.NoteTextStore()
+        self.memory_state = text_memory.TurnState(
+            graph_store=self.memory_graph_store,
+            text_store=self.memory_text_store,
+        )
+        self.memory_state.size = text_memory.Size(
+            nodes=len(self.subgraph.nodes),
+            edges=len(self.subgraph.edges),
+            frontier=0,
+            planner_tokens_est=0,
+            cgm_tokens_est=0,
+        )
 
         # 记录容器内工作目录（pwd 优先，其次配置）
         try:
@@ -115,8 +142,17 @@ class PlannerEnv:
             info = self._handle_repair(action)
         elif isinstance(action, SubmitAction):
             info = self._handle_submit()
+        elif isinstance(action, NoopAction):
+            info = {"kind": "noop"}
         else:
             info = {"kind": "noop"}
+
+        if self.memory_state:
+            kind = info.get("kind")
+            if kind == "explore":
+                self.memory_state.latest_explore = info
+            elif kind and kind != "memory":
+                self.memory_state.latest_observation = info
 
         reward = 1.0 if info.get("submit") and info.get("tests", {}).get("passed") else 0.0
         done = bool(info.get("submit"))
@@ -176,59 +212,31 @@ class PlannerEnv:
 
     def _handle_memory(self, act: MemoryAction) -> Dict[str, Any]:
         info: Dict[str, Any] = {"kind": "memory"}
-
-        ops = list(act.ops or [])
-        if not ops and self.last_candidates:
-            context = {
-                "policy": {"prefer_test_files": bool(self.config.prefer_test_files)},
-                "thresholds": {},
-                "budgets": {
-                    "add_limit": int(self.config.candidate_total_limit),
-                    "delete_limit": max(5, int(self.config.candidate_total_limit // 4)),
-                    "update_limit": max(5, int(self.config.candidate_total_limit // 4)),
-                },
-            }
-            ops = [
-                dict(op)
-                for op in mem_ops_head.suggest(
-                    self.last_candidates,
-                    context=context,
-                    subgraph=self.subgraph,
-                )
-            ]
-
-        if not ops:
-            info["ops"] = []
-            info["summary"] = {"applied": False, "reason": "no_ops"}
-            info["subgraph_stats"] = subgraph_store.stats(self.subgraph)
+        if not self.memory_state:
+            info.update({"ok": False, "error": "memory-uninitialized"})
             return info
 
-        policy = ApplyPolicy(
-            total_node_cap=int(self.config.subgraph_total_cap),
-            add_limit=int(self.config.candidate_total_limit),
-            delete_limit=max(5, int(self.config.candidate_total_limit // 4)),
-            update_limit=max(5, int(self.config.candidate_total_limit // 4)),
-            dir_diversity_k=int(self.config.dir_diversity_k),
-            per_dir_cap=ApplyPolicy().per_dir_cap,
-            prefer_test_files=bool(self.config.prefer_test_files),
-            max_tfile_fraction=float(self.config.max_tfile_fraction),
-            forbid_delete_tfile=True,
-            forbid_pure_delete_epoch=True,
-        )
-
-        summary = apply_memory_ops(ops=ops, subgraph=self.subgraph, policy=policy)
+        caps = self.memory_caps or {}
         try:
-            self.mem_bank.record_memops(self.issue_id, ops, summary)
-        except Exception:
-            pass
-        try:
-            subgraph_store.save(self.issue_id, self.subgraph)
-        except Exception:
-            pass
+            if act.intent == "delete":
+                result = text_memory.memory_delete(
+                    self.memory_state, act.target, act.scope, act.selector
+                )
+            else:
+                result = text_memory.memory_commit(
+                    self.memory_state, act.target, act.scope, act.selector, caps
+                )
+        except Exception as exc:
+            info.update({"ok": False, "error": f"memory-exception:{exc}"})
+            return info
 
-        info["ops"] = ops
-        info["summary"] = summary
+        info.update(result)
         info["subgraph_stats"] = subgraph_store.stats(self.subgraph)
+        if info.get("ok"):
+            try:
+                subgraph_store.save(self.issue_id, self.subgraph)
+            except Exception:
+                pass
         return info
 
     # ------------------------------------------------------------------

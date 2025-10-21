@@ -72,6 +72,11 @@ def test_parse_action_block_rejects_extra_text() -> None:
         text_protocol.parse_action_block("hello <function=noop></function>", {"noop"})
 
 
+def test_parse_action_block_allows_noop_without_params() -> None:
+    parsed = text_protocol.parse_action_block("<function=noop></function>", {"noop"})
+    assert parsed == {"name": "noop", "params": {}}
+
+
 def test_handle_planner_repair_apply_true_success() -> None:
     candidate = {
         "patch": "--- a/app.py\n+++ b/app.py\n@@\n-print('hello')\n+print('patched')\n",
