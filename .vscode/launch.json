@@ -1,0 +1,47 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Train planner agent with rLLM (toy checkpoint)",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/train_graphplanner_rllm.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--agent", "planner",
+                "--dataset", "${workspaceFolder}/datasets/graphplanner_repoenv_sample.jsonl",
+                "--model-path", "${workspaceFolder}/artifacts/toy_planner",
+                "--tokenizer-path", "${workspaceFolder}/artifacts/toy_planner",
+                "--cgm-model-path", "${workspaceFolder}/artifacts/toy_cgm",
+                "--cgm-tokenizer-path", "${workspaceFolder}/artifacts/toy_cgm",
+                "--train-batch-size", "2",
+                "--total-epochs", "1",
+                "--print-config"
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}:${env:PYTHONPATH}"
+            }
+        },
+        {
+            "name": "Train CGM agent with rLLM (toy checkpoint)",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/train_graphplanner_rllm.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--agent", "cgm",
+                "--dataset", "${workspaceFolder}/datasets/graphplanner_repoenv_sample.jsonl",
+                "--model-path", "${workspaceFolder}/artifacts/toy_cgm",
+                "--tokenizer-path", "${workspaceFolder}/artifacts/toy_cgm",
+                "--train-batch-size", "2",
+                "--total-epochs", "1",
+                "--print-config"
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}:${env:PYTHONPATH}"
+            }
+        }
+    ]
+}
