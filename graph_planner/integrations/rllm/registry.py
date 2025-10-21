@@ -8,7 +8,7 @@ from typing import Type
 from ...infra.vendor import ensure_rllm_importable
 
 
-@lru_cache(maxsize=1)
+@lru_cache(maxsize=None)
 def register_rllm_components(
     agent_cls: Type[object],
     env_cls: Type[object],
@@ -20,9 +20,12 @@ def register_rllm_components(
     if not ensure_rllm_importable():
         return False
     try:
-        from rllm.trainer import env_agent_mappings as mapping
-    except ImportError:  # pragma: no cover - optional dependency
-        return False
+        from rllm.rllm.trainer import env_agent_mappings as mapping  # type: ignore[attr-defined]
+    except ModuleNotFoundError:
+        try:
+            from rllm.trainer import env_agent_mappings as mapping  # type: ignore[attr-defined]
+        except ModuleNotFoundError:  # pragma: no cover - optional dependency
+            return False
 
     for container in (mapping.AGENT_CLASSES, mapping.AGENT_CLASS_MAPPING):
         if container.get(name) is agent_cls:
