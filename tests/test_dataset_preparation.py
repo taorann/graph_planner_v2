@@ -123,6 +123,7 @@ def test_convert_swebench_entries_requires_docker_image(tmp_dataset_dir: Path):
     result = convert_swebench_entries(entries, output_dir=tmp_dataset_dir, dataset_name="demo/swe", split="test")
 
     assert len(result.records) == 1
+    assert result.skipped == 0
     record = result.records[0]
     rel_path = Path(record["sandbox"]["r2e_ds_json"])
     ds_file = tmp_dataset_dir / rel_path
@@ -131,6 +132,43 @@ def test_convert_swebench_entries_requires_docker_image(tmp_dataset_dir: Path):
     assert payload["instance_id"] == "django__001"
     assert payload["docker_image"] == "swebench/django:latest"
     assert record["issue"]["title"] == "Fix Django bug"
+
+
+def test_convert_swebench_entries_supports_environment_block(tmp_dataset_dir: Path):
+    entries = [
+        {
+            "instance_id": "astropy__astropy-12907",
+            "title": "Fix Astropy",
+            "environment": {"image": "us-docker.pkg.dev/demo/astropy:latest"},
+            "repo": "astropy/astropy",
+        }
+    ]
+
+    result = convert_swebench_entries(entries, output_dir=tmp_dataset_dir, dataset_name="demo/swe", split="test")
+
+    assert len(result.records) == 1
+    record = result.records[0]
+    ds_file = tmp_dataset_dir / record["sandbox"]["r2e_ds_json"]
+    payload = json.loads(ds_file.read_text(encoding="utf-8"))
+    assert payload["docker_image"] == "us-docker.pkg.dev/demo/astropy:latest"
+    assert record["sandbox"]["docker_image"] == "us-docker.pkg.dev/demo/astropy:latest"
+    assert result.skipped == 0
+
+
+def test_convert_swebench_entries_skips_missing_docker(tmp_dataset_dir: Path, caplog: pytest.LogCaptureFixture):
+    entries = [
+        {
+            "instance_id": "missing",
+            "title": "Broken entry",
+        }
+    ]
+
+    caplog.set_level("WARNING")
+    result = convert_swebench_entries(entries, output_dir=tmp_dataset_dir, dataset_name="demo/swe", split="test")
+
+    assert result.records == []
+    assert result.skipped == 1
+    assert "docker image" in caplog.text
 
 
 def test_write_manifest_and_maybe_prepull(tmp_path: Path, monkeypatch):

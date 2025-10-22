@@ -3,7 +3,7 @@
 from importlib import import_module
 from typing import Any
 
-__all__ = ["agents", "core", "env", "integrations", "runtime"]
+__all__ = ["agents", "core", "env", "integrations", "runtime", "infra"]
 
 
 def __getattr__(name: str) -> Any:  # pragma: no cover - trivial lazy import

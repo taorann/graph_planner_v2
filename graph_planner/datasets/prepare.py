@@ -277,94 +277,134 @@ def convert_swebench_entries(
 
     records: List[MutableMapping[str, object]] = []
     ds_paths: List[Path] = []
+    skipped = 0
 
-    for raw in entries:
-        entry = _deepcopy_entry(raw)
-        instance_id = _extract_first(
-            entry,
-            ("instance_id",),
-            ("task_id",),
-            ("id",),
-        )
-        if not isinstance(instance_id, str):
-            raise ValueError("Unable to determine instance identifier from SWE-bench entry")
-        instance_id = instance_id.strip() or "instance"
-        safe_id = sanitize_identifier(instance_id)
+    for index, raw in enumerate(entries):
+        try:
+            entry = _deepcopy_entry(raw)
+            instance_id = _extract_first(
+                entry,
+                ("instance_id",),
+                ("task_id",),
+                ("id",),
+            )
+            if not isinstance(instance_id, str):
+                raise ValueError("Unable to determine instance identifier from SWE-bench entry")
+            instance_id = instance_id.strip() or "instance"
+            safe_id = sanitize_identifier(instance_id)
 
-        docker_image = _extract_first(
-            entry,
-            ("docker_image",),
-            ("image_name",),
-        )
-        if not isinstance(docker_image, str):
-            raise ValueError(f"Entry {instance_id!r} did not contain a docker image")
+            docker_image = _extract_first(
+                entry,
+                ("docker_image",),
+                ("image_name",),
+                ("metadata", "docker_image"),
+                ("metadata", "image_name"),
+            )
+            if not isinstance(docker_image, str) or not docker_image.strip():
+                environment = entry.get("environment")
+                if isinstance(environment, Mapping):
+                    docker_image = _extract_first(
+                        environment,
+                        ("docker_image",),
+                        ("image",),
+                        ("image_name",),
+                    )
+            if not isinstance(docker_image, str) or not docker_image.strip():
+                environment_id = _extract_first(
+                    entry,
+                    ("environment_id",),
+                    ("environment", "id"),
+                    ("environment", "name"),
+                )
+                if isinstance(environment_id, str) and environment_id.strip():
+                    candidate = environment_id.strip()
+                    if "/" in candidate:
+                        docker_image = candidate
+                    else:
+                        repo_segment = candidate.replace("__", "/")
+                        docker_image = f"us-docker.pkg.dev/princeton-nlp/swe-bench/{repo_segment}"
 
-        repo_name = _extract_first(entry, ("repo",), ("repo_name",))
-        if not isinstance(repo_name, str):
-            repo_name = None
+            if not isinstance(docker_image, str) or not docker_image.strip():
+                raise ValueError(f"Entry {instance_id!r} did not contain a docker image")
 
-        swe_ds = {
-            "instance_id": instance_id,
-            "docker_image": docker_image,
-            "repo": repo_name,
-            "base_commit": _extract_first(entry, ("base_commit",), ("commit",)),
-            "test_patch": entry.get("test_patch"),
-            "patch": entry.get("patch"),
-            "tests": entry.get("tests"),
-        }
+            docker_image = docker_image.strip()
 
-        ds_path = instance_dir / f"{safe_id}.json"
-        ds_paths.append(ds_path)
-        ds_path.write_text(json.dumps(swe_ds, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+            repo_name = _extract_first(entry, ("repo",), ("repo_name",))
+            if not isinstance(repo_name, str):
+                repo_name = None
 
-        max_steps = entry.get("max_steps")
-        if isinstance(max_steps, int):
-            steps = max_steps
-        else:
-            try:
-                steps = int(max_steps)  # type: ignore[arg-type]
-            except (TypeError, ValueError):
-                steps = default_max_steps
-        if steps <= 0:
-            steps = default_max_steps
-
-        issue_title = _normalise_issue_text(
-            entry.get("title"),
-            entry.get("problem_statement"),
-            fallback=f"SWE-bench task {instance_id}",
-        )
-        issue_body = _normalise_issue_text(
-            entry.get("problem_statement"),
-            entry.get("description"),
-            fallback=f"Resolve the issue described by {issue_title}.",
-        )
-
-        swe_relative = Path(os_path_relpath(ds_path, output_dir))
-
-        record: MutableMapping[str, object] = {
-            "task_id": instance_id,
-            "max_steps": steps,
-            "issue": {
-                "id": instance_id,
-                "title": issue_title,
-                "body": issue_body,
-            },
-            "sandbox": {
+            swe_ds = {
+                "instance_id": instance_id,
                 "docker_image": docker_image,
-                "workdir": "/repo",
-                "mounts": {},
-                "env": {},
-                "backend": "repoenv",
-                "r2e_ds_json": str(swe_relative),
-            },
-            "data_source": dataset_name,
-            "split": split,
-        }
-        if repo_name:
-            record["repo"] = repo_name
-        records.append(record)
+                "repo": repo_name,
+                "base_commit": _extract_first(entry, ("base_commit",), ("commit",)),
+                "test_patch": entry.get("test_patch"),
+                "patch": entry.get("patch"),
+                "tests": entry.get("tests"),
+            }
 
-    return DatasetConversionResult(records=records, instance_paths=ds_paths)
+            ds_path = instance_dir / f"{safe_id}.json"
+            ds_paths.append(ds_path)
+            ds_path.write_text(json.dumps(swe_ds, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+
+            max_steps = entry.get("max_steps")
+            if isinstance(max_steps, int):
+                steps = max_steps
+            else:
+                try:
+                    steps = int(max_steps)  # type: ignore[arg-type]
+                except (TypeError, ValueError):
+                    steps = default_max_steps
+            if steps <= 0:
+                steps = default_max_steps
+
+            issue_title = _normalise_issue_text(
+                entry.get("title"),
+                entry.get("problem_statement"),
+                fallback=f"SWE-bench task {instance_id}",
+            )
+            issue_body = _normalise_issue_text(
+                entry.get("problem_statement"),
+                entry.get("description"),
+                fallback=f"Resolve the issue described by {issue_title}.",
+            )
+
+            swe_relative = Path(os_path_relpath(ds_path, output_dir))
+
+            record: MutableMapping[str, object] = {
+                "task_id": instance_id,
+                "max_steps": steps,
+                "issue": {
+                    "id": instance_id,
+                    "title": issue_title,
+                    "body": issue_body,
+                },
+                "sandbox": {
+                    "docker_image": docker_image,
+                    "workdir": "/repo",
+                    "mounts": {},
+                    "env": {},
+                    "backend": "repoenv",
+                    "r2e_ds_json": str(swe_relative),
+                },
+                "data_source": dataset_name,
+                "split": split,
+            }
+            if repo_name:
+                record["repo"] = repo_name
+            records.append(record)
+        except Exception as exc:  # noqa: BLE001
+            skipped += 1
+            LOGGER.warning(
+                "Skipping SWE-bench entry %s (%s/%s): %s",
+                index,
+                dataset_name,
+                split,
+                exc,
+            )
+            continue
+
+    return DatasetConversionResult(records=records, instance_paths=ds_paths, skipped=skipped)
 
 
 def os_path_relpath(path: Path, start: Path) -> str:
