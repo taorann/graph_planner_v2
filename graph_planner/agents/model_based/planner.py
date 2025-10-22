@@ -4,23 +4,27 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Protocol
 
-from aci.schema import Plan, PlanTarget
+from ..common import text_protocol
+from ..common.contracts import ProtocolError, parse_action_block, validate_planner_action
 from ..common.chat import (
     FALLBACK_REASON_KEY,
     SYSTEM_PROMPT,
-    action_from_payload,
     action_to_payload,
-    extract_json_payload,
     summarise_observation,
 )
-from ..rule_based import cgm_adapter
 from ..rule_based.planner import PlannerAgent as RulePlannerAgent
-from ...core.actions import RepairAction, SubmitAction
+from ...core.actions import (
+    ActionUnion,
+    ExploreAction,
+    MemoryAction,
+    NoopAction,
+    RepairAction,
+    SubmitAction,
+)
 from ...infra.config import Config, load as load_config
-from ...integrations.local_llm import LocalLLMClient, LocalLLMError
-from ...memory import subgraph_store
+from ...integrations.local_llm import LocalLLMError, build_planner_client
 
 
 @dataclass
@@ -35,13 +39,26 @@ class _AgentState:
     plan_text: str = ""
 
 
+class _ChatClient(Protocol):
+    def chat(
+        self,
+        messages: Iterable[Dict[str, str]],
+        *,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        top_p: Optional[float] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        ...
+
+
 class LocalLLMPlannerAgent:
     """Agent that mirrors the rule-based flow but relies on a local chat model."""
 
     def __init__(
         self,
         *,
-        client: Optional[LocalLLMClient] = None,
+        client: Optional[_ChatClient] = None,
         system_prompt: Optional[str] = None,
         use_rule_fallback: bool = True,
     ) -> None:
@@ -51,7 +68,7 @@ class LocalLLMPlannerAgent:
             if pm_cfg is None:
                 raise RuntimeError("planner_model section missing in configuration")
             try:
-                client = LocalLLMClient.from_config(pm_cfg)
+                client = build_planner_client(pm_cfg)
             except Exception as exc:  # pragma: no cover - configuration error
                 raise RuntimeError(
                     "planner model client could not be initialised; ensure local endpoint is configured"
@@ -131,29 +148,39 @@ class LocalLLMPlannerAgent:
 
     def _parse_model_response(
         self, response: str, obs: Dict[str, Any]
-    ) -> tuple[str, Any, str, Dict[str, Any]]:
-        payload = extract_json_payload(response)
-        if payload is None:
-            return self._fallback_tuple(obs, "no_json", response)
-        thought = str(payload.get("thought") or payload.get("reasoning") or "").strip()
-        raw_action = payload.get("action")
-        if isinstance(raw_action, str):
-            try:
-                raw_action = json.loads(raw_action)
-            except json.JSONDecodeError:
-                raw_action = None
-        action_obj = action_from_payload(raw_action)
-        if action_obj is None:
-            return self._fallback_tuple(obs, "invalid_action", response, raw_action)
+    ) -> tuple[str, ActionUnion, str, Dict[str, Any]]:
+        parsed: Dict[str, Any] | None = None
+        raw_params: Dict[str, Any] = {}
+        try:
+            parsed = parse_action_block(response)
+            raw_params = dict(parsed.get("params") or {})
+            thought = str(raw_params.get("thought", "")).strip()
+            params = dict(raw_params)
+            params.pop("thought", None)
+            action_obj = validate_planner_action(parsed)
+        except ProtocolError as exc:
+            return self._fallback_tuple(
+                obs,
+                exc.code,
+                response,
+                raw_action=parsed,
+                error=exc.detail,
+            )
+        except Exception as exc:
+            return self._fallback_tuple(obs, "invalid-action", response, raw_action=parsed, error=str(exc))
 
-        if isinstance(action_obj, RepairAction):
-            action_obj = self._ensure_patch(action_obj, obs)
+        if isinstance(action_obj, RepairAction) and self.state.issue:
+            action_obj = action_obj.copy(update={"issue": dict(self.state.issue)})
 
         meta = {
             "used_fallback": False,
-            "raw_action": raw_action,
+            "raw_action": parsed or {},
         }
-        return thought, action_obj, response or json.dumps(payload, ensure_ascii=False), meta
+        assistant_msg = response or text_protocol.format_action_block(
+            str(parsed.get("name") if parsed else "noop"),
+            raw_params if parsed else {},
+        )
+        return thought, action_obj, assistant_msg, meta
 
     def _fallback_decision(
         self,
@@ -191,15 +218,12 @@ class LocalLLMPlannerAgent:
         fallback = self._rule_agent.step(obs)
         action = fallback.get("action_obj") or SubmitAction()
         thought = fallback.get("plan", fallback.get("prompt", ""))
-        assistant_msg = json.dumps(
-            {
-                "thought": thought,
-                "action": action_to_payload(action),
-                FALLBACK_REASON_KEY: reason,
-                "error": error,
-            },
-            ensure_ascii=False,
-        )
+        payload = action_to_payload(action)
+        params = {"thought": thought, **{k: v for k, v in payload.items() if k != "type"}}
+        if error:
+            params["error"] = error
+        params[FALLBACK_REASON_KEY] = reason
+        assistant_msg = text_protocol.format_action_block(payload.get("type", "noop"), params)
         meta = {
             "used_fallback": True,
             FALLBACK_REASON_KEY: reason,
@@ -209,133 +233,6 @@ class LocalLLMPlannerAgent:
         if error:
             meta["error"] = error
         return thought, action, assistant_msg, meta
-
-    # ------------------------------------------------------------------
-    # Patch materialisation
-    # ------------------------------------------------------------------
-    def _ensure_patch(self, action: RepairAction, obs: Dict[str, Any]) -> RepairAction:
-        plan_targets = self._normalise_plan_targets(action.plan_targets)
-        if not plan_targets:
-            plan_targets = self._plan_targets_from_snippets(self.state.last_snippets or [])
-        if not plan_targets:
-            return action
-
-        plan_text = action.plan or self._build_plan_text(plan_targets)
-        snippets = self.state.last_snippets or self._fallback_snippets()
-
-        plan_obj = Plan(
-            targets=[
-                PlanTarget(
-                    path=pt["path"],
-                    start=int(pt["start"]),
-                    end=int(pt["end"]),
-                    id=str(pt.get("id") or f"{pt['path']}::{pt['start']}-{pt['end']}"),
-                    why=pt.get("why", "graph_planner-local"),
-                )
-                for pt in plan_targets
-            ],
-            budget={"mode": self.cfg.mode},
-            priority_tests=[],
-        )
-
-        subgraph = subgraph_store.wrap(obs.get("subgraph") or {})
-        linearized = subgraph_store.linearize(subgraph, mode=self.cfg.collate.mode)
-        patch = cgm_adapter.generate(
-            subgraph_linearized=linearized,
-            plan=plan_obj,
-            constraints={"max_edits": max(1, len(plan_targets))},
-            snippets=snippets,
-            plan_text=plan_text,
-            issue=self.state.issue,
-        )
-        patch.setdefault("summary", plan_text)
-
-        action.plan = plan_text
-        action.plan_targets = plan_targets
-        action.patch = patch
-        self.state.plan_targets = plan_targets
-        self.state.plan_text = plan_text
-        return action
-
-    def _normalise_plan_targets(self, raw: Iterable[Any]) -> List[Dict[str, Any]]:
-        targets: List[Dict[str, Any]] = []
-        for entry in raw or []:
-            if not isinstance(entry, dict):
-                continue
-            path = entry.get("path")
-            start = entry.get("start", entry.get("line"))
-            end = entry.get("end", start)
-            if not path or start is None:
-                continue
-            try:
-                start_i = int(start)
-                end_i = int(end if end is not None else start_i)
-            except Exception:
-                continue
-            targets.append(
-                {
-                    "path": str(path),
-                    "start": start_i,
-                    "end": end_i,
-                    "id": entry.get("id"),
-                    "why": entry.get("why", "graph_planner-llm"),
-                }
-            )
-        return targets
-
-    def _plan_targets_from_snippets(self, snippets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        plan_targets: List[Dict[str, Any]] = []
-        for snip in snippets:
-            path = snip.get("path")
-            if not path:
-                continue
-            start = int(snip.get("start", 1))
-            end = int(snip.get("end", start))
-            node_id = snip.get("node_id") or f"{path}::{start}-{end}"
-            plan_targets.append(
-                {
-                    "path": path,
-                    "start": start,
-                    "end": end,
-                    "id": node_id,
-                    "why": "graph_planner-snippet",
-                }
-            )
-        return plan_targets
-
-    def _build_plan_text(self, plan_targets: List[Dict[str, Any]]) -> str:
-        lines = []
-        snippet_index = {snip.get("path"): snip for snip in self.state.last_snippets or []}
-        for target in plan_targets:
-            path = target["path"]
-            start = target["start"]
-            end = target["end"]
-            snippet = snippet_index.get(path) or {}
-            preview = " | ".join(line.split(":", 1)[-1].strip() for line in (snippet.get("snippet") or [])[:3])
-            lines.append(f"- {path} L{start}-{end}: {preview[:160]}")
-        return "Plan to address the following locations:\n" + "\n".join(lines)
-
-    def _fallback_snippets(self) -> List[Dict[str, Any]]:
-        snippets: List[Dict[str, Any]] = []
-        for cand in self.state.last_candidates[:1]:
-            path = cand.get("path")
-            if not path:
-                continue
-            span = cand.get("span") or {}
-            start = int(span.get("start", 1))
-            end = int(span.get("end", start))
-            snippet_line = f"{start:04d}: {cand.get('name', '')}"
-            snippets.append(
-                {
-                    "path": path,
-                    "start": start,
-                    "end": end,
-                    "node_id": cand.get("id"),
-                    "snippet": [snippet_line],
-                }
-            )
-        return snippets
-
 
     def _normalise_metadata(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
         try:
