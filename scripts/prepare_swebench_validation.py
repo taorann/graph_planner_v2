@@ -24,14 +24,53 @@ from graph_planner.runtime.containers import (
 LOGGER = logging.getLogger(__name__)
 
 
-def _load_hf_dataset(name: str, split: str, token: Optional[str] = None) -> Iterable[Mapping[str, Any]]:
+def _load_hf_dataset(
+    name: str, split: str, token: Optional[str] = None
+) -> tuple[Iterable[Mapping[str, Any]], str]:
+    """Return dataset rows for ``split`` (falling back when unavailable).
+
+    Hugging Face only exposes the ``test`` split for SWE-bench Verified, so we
+    eagerly retry with alternative split names when the requested one does not
+    exist.  The returned tuple includes the effective split name so callers can
+    surface accurate logging and file naming.
+    """
+
     from datasets import load_dataset
 
     kwargs: dict[str, Any] = {}
     if token:
         kwargs["token"] = token
-    dataset = load_dataset(name, split=split, **kwargs)
-    return (json.loads(json.dumps(row)) for row in dataset)
+
+    candidates = [split]
+    lowered = split.lower()
+    if lowered in {"validation", "val", "dev"}:
+        candidates.extend(["dev", "validation", "val", "test"])
+    elif lowered == "test":
+        candidates.append("validation")
+
+    last_error: Optional[Exception] = None
+    for candidate in candidates:
+        try:
+            dataset = load_dataset(name, split=candidate, **kwargs)
+        except ValueError as exc:
+            if "Unknown split" not in str(exc):
+                raise
+            last_error = exc
+            continue
+
+        if candidate != split:
+            LOGGER.warning(
+                "Requested split %s not available in %s; falling back to %s",
+                split,
+                name,
+                candidate,
+            )
+        rows = (json.loads(json.dumps(row)) for row in dataset)
+        return rows, candidate
+
+    if last_error is not None:
+        raise last_error
+    raise ValueError(f"Unable to load split {split!r} for dataset {name!r}")
 
 
 def _subset(rows: Iterable[Mapping[str, Any]], limit: Optional[int]) -> List[Mapping[str, Any]]:
@@ -170,6 +209,8 @@ def _prepare_swebench(
     dataset_path: Optional[Path],
 ) -> DatasetConversionResult:
     rows: List[Mapping[str, Any]] = []
+    requested_split = split
+    effective_split = split
     if dataset_path:
         rows = _subset(_load_local_swebench(dataset_path, split), limit)
         if rows:
@@ -181,16 +222,24 @@ def _prepare_swebench(
             )
     if not rows:
         LOGGER.info("Downloading SWE-bench dataset %s (split=%s)", dataset, split)
-        rows = _subset(_load_hf_dataset(dataset, split, token), limit)
+        hf_rows, effective_split = _load_hf_dataset(dataset, split, token)
+        rows = _subset(hf_rows, limit)
+        if effective_split != requested_split:
+            LOGGER.warning(
+                "Using split %s from %s after failing to locate %s",
+                effective_split,
+                dataset,
+                requested_split,
+            )
 
     ensure_directory(output_dir)
     result = convert_swebench_entries(
         rows,
         output_dir=output_dir,
         dataset_name=dataset_path.as_posix() if dataset_path else dataset,
-        split=split,
+        split=effective_split,
     )
-    output_file = output_dir / f"{split}.jsonl"
+    output_file = output_dir / f"{effective_split}.jsonl"
     write_jsonl(output_file, result.records)
     LOGGER.info("Wrote %d SWE-bench records to %s", len(result.records), output_file)
     return result

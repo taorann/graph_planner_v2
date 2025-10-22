@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, Optional
 
 import pytest
 
@@ -297,9 +297,9 @@ def test_prepare_swebench_validation_prefers_local(tmp_path: Path, monkeypatch):
 
     invoked = {"hf": False}
 
-    def fail_hf(*_: object, **__: object) -> Iterable[Mapping[str, Any]]:
+    def fail_hf(*_: object, **__: object) -> tuple[Iterable[Mapping[str, Any]], str]:
         invoked["hf"] = True
-        return []
+        return [], "validation"
 
     monkeypatch.setattr(prepare_swebench_validation, "_load_hf_dataset", fail_hf)
 
@@ -318,3 +318,36 @@ def test_prepare_swebench_validation_prefers_local(tmp_path: Path, monkeypatch):
     assert record["task_id"] == "demo__repo-1"
     ds_path = Path(record["sandbox"]["r2e_ds_json"])
     assert (tmp_path / "out" / ds_path).exists()
+
+
+def test_prepare_swebench_validation_falls_back_to_test_split(tmp_path: Path, monkeypatch):
+    payload = {
+        "instance_id": "demo__repo-2",
+        "title": "Fix issue",
+        "docker_image": "demo/image:latest",
+        "repo": "demo/repo",
+    }
+
+    def fake_local(_: Path, __: str) -> list[Mapping[str, Any]]:
+        return []
+
+    def fake_hf(name: str, split: str, token: Optional[str]):
+        assert split == "validation"
+        return iter([payload]), "test"
+
+    monkeypatch.setattr(prepare_swebench_validation, "_load_local_swebench", fake_local)
+    monkeypatch.setattr(prepare_swebench_validation, "_load_hf_dataset", fake_hf)
+
+    result = prepare_swebench_validation._prepare_swebench(  # pylint: disable=protected-access
+        output_dir=tmp_path / "out",
+        dataset="princeton-nlp/SWE-bench_Verified",
+        split="validation",
+        token=None,
+        limit=None,
+        dataset_path=None,
+    )
+
+    assert len(result.records) == 1
+    record = result.records[0]
+    assert record["split"] == "test"
+    assert (tmp_path / "out" / "test.jsonl").exists()
