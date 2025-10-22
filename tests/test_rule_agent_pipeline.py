@@ -183,20 +183,6 @@ def test_rule_agent_pipeline_happy_path(monkeypatch):
         lambda *args, **kwargs: [candidate],
     )
 
-    def fake_apply_ops(*, ops, subgraph, policy):
-        for op in ops:
-            if op.get("op") == "ADD" and op.get("id"):
-                node = {
-                    "id": op["id"],
-                    "path": op.get("path"),
-                    "kind": op.get("kind"),
-                    "span": op.get("span"),
-                }
-                subgraph.add_nodes([node])
-        return {"applied": True, "ops": ops}
-
-    monkeypatch.setattr("graph_planner.env.planner_env.apply_memory_ops", fake_apply_ops)
-
     cfg = SandboxConfig(
         docker_image="local/test", workdir="/repo", mounts={}, env={}, backend="docker"
     )
@@ -215,18 +201,12 @@ def test_rule_agent_pipeline_happy_path(monkeypatch):
     assert info["candidates"][0]["id"] == candidate["id"]
     assert reward == 0.0 and done is False
 
-    ops = [
-        {
-            "op": "ADD",
-            "id": candidate["id"],
-            "path": candidate["path"],
-            "kind": candidate["kind"],
-            "span": candidate["span"],
-        }
-    ]
-    obs, reward, done, info = env.step(MemoryAction(ops=ops))
+    obs, reward, done, info = env.step(
+        MemoryAction(target="explore", scope="session", intent="commit", selector="latest")
+    )
     assert info["kind"] == "memory"
-    assert info["summary"]["applied"] is True
+    assert info.get("ok") is True
+    assert info.get("applied", {}).get("graph_nodes") == 1
     assert reward == 0.0 and done is False
 
     obs, reward, done, info = env.step(
