@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from difflib import unified_diff
 
 from ..agents.common import text_protocol
+from ..agents.common.contracts import ProtocolError
 from ..core.actions import (
     ActionUnion,
     ExploreAction,
@@ -286,6 +287,12 @@ class PlannerEnv:
         action_payload = {"name": "repair", "params": {"subplan": subplan_text, "focus_ids": focus_ids, "apply": act.apply}}
         try:
             result = text_protocol.handle_planner_repair(action_payload, runtime_state)
+        except ProtocolError as exc:
+            info["applied"] = False
+            info["error"] = f"text-repair-error:{exc.code}"
+            info["fallback_reason"] = exc.code
+            info["msg"] = exc.detail
+            return info
         except Exception as exc:
             info["applied"] = False
             info["error"] = f"text-repair-error:{exc}"
@@ -536,52 +543,43 @@ class PlannerEnv:
             plan_text=plan_text,
             issue=self.issue,
         )
-        candidates = self._patch_to_unified_candidates(patch)
-        return candidates[:k]
-
-    def _patch_to_unified_candidates(self, patch: Dict[str, Any]) -> List[Dict[str, Any]]:
         edits = list(patch.get("edits") or [])
         if not edits:
             return []
         grouped: Dict[str, List[Dict[str, Any]]] = {}
         for edit in edits:
-            path = edit.get("path")
+            path = str(edit.get("path") or "")
             if not path:
                 continue
-            grouped.setdefault(str(path), []).append(edit)
-
-        candidates: List[Dict[str, Any]] = []
-        summary = patch.get("summary", "")
-        for path, group in grouped.items():
-            original = self._read_full_file_text(path)
-            if original == "":
-                continue
-            original_lines = original.splitlines(keepends=True)
-            new_lines = list(original_lines)
-            for edit in sorted(group, key=lambda e: _safe_int(e.get("start"), 1)):
-                start = _safe_int(edit.get("start"), 1)
-                end = max(start, _safe_int(edit.get("end"), start))
-                new_text = str(edit.get("new_text") or "")
-                replacement = new_text.splitlines(keepends=True)
-                if replacement and not replacement[-1].endswith("\n"):
-                    replacement[-1] = replacement[-1] + "\n"
-                new_lines[start - 1 : end] = replacement
-            diff_lines = list(
-                unified_diff(original_lines, new_lines, fromfile=f"a/{path}", tofile=f"b/{path}", lineterm="")
-            )
-            if not diff_lines:
-                continue
-            diff_text = "\n".join(diff_lines) + "\n"
-            candidates.append(
+            start = _safe_int(edit.get("start"), 1)
+            end = max(start, _safe_int(edit.get("end"), start))
+            new_text = str(edit.get("new_text") or "")
+            if new_text and not new_text.endswith("\n"):
+                new_text = new_text + "\n"
+            grouped.setdefault(path, []).append(
                 {
-                    "patch": diff_text,
                     "path": path,
-                    "rationale": summary,
-                    "tests": patch.get("tests", []),
-                    "confidence": float(patch.get("confidence", 0.5)),
+                    "start": start,
+                    "end": end,
+                    "new_text": new_text,
                 }
             )
-        return candidates
+
+        summary = patch.get("summary", "")
+        confidence = float(patch.get("confidence", 0.5))
+        tests = patch.get("tests", [])
+        candidates: List[Dict[str, Any]] = []
+        for path, group in grouped.items():
+            candidates.append(
+                {
+                    "patch": {"edits": group},
+                    "summary": summary,
+                    "confidence": confidence,
+                    "tests": tests,
+                    "path": path,
+                }
+            )
+        return candidates[:k]
 
     def _build_plan(self, targets: List[Dict[str, Any]]) -> Plan:
         plan_targets: List[PlanTarget] = []

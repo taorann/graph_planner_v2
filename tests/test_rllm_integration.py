@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import yaml
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -497,4 +498,213 @@ def test_eval_cli_print_config(tmp_path, monkeypatch, capsys):
     assert "val_only: true" in output
     assert str(verl_path) in output
     assert "Graph Planner rLLM evaluation launch summary:" in output
+
+
+def test_train_cli_config_file_and_resolved_config(tmp_path, monkeypatch, capsys):
+    dataset_file = Path("datasets/r2e_gym/graphplanner_repoenv_train.jsonl")
+    assert dataset_file.exists(), "sample dataset missing"
+
+    verl_path = tmp_path / "train_verl.parquet"
+    dataset_stub = SimpleNamespace(
+        get_verl_data_path=lambda: str(verl_path),
+        get_data_path=lambda: str(tmp_path / "train.raw.parquet"),
+    )
+    val_stub = SimpleNamespace(
+        get_verl_data_path=lambda: str(tmp_path / "val_verl.parquet"),
+        get_data_path=lambda: str(tmp_path / "val.raw.parquet"),
+    )
+
+    def fake_register(*, name, split, path):
+        target = val_stub if ("val" in split or str(name).endswith("_val")) else dataset_stub
+        return target
+
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.ensure_dataset_registered", fake_register)
+
+    yaml_cfg = {
+        "experiment": {"seed": 1234, "name": "yaml-exp"},
+        "paths": {"dataset_train": str(dataset_file)},
+        "training": {"train_batch_size": 8, "grad_accum_steps": 4},
+        "parallel": {"tensor_parallel_planner": 1, "tensor_parallel_cgm": 1, "replicas": 1},
+        "resources": {"num_gpus": 4, "ray_num_gpus": 2, "ray_num_cpus": 16},
+        "logging": {
+            "output_dir": str(tmp_path / "runs"),
+            "wandb": {"enabled": True, "run_name": "yaml-run", "project": "yaml-proj"},
+        },
+    }
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(yaml_cfg), encoding="utf-8")
+
+    metrics = []
+
+    def fake_log_metrics(step, payload):
+        metrics.append((step, payload))
+
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.log_metrics", fake_log_metrics)
+    monkeypatch.setattr(
+        "scripts.train_graphplanner_rllm.make_gpu_snapshot",
+        lambda: (lambda: {"gpu/0/util": 10.0}),
+    )
+    monkeypatch.setattr(
+        "scripts.train_graphplanner_rllm.make_ray_snapshot",
+        lambda: (lambda: {"ray/cpus_avail": 4.0}),
+    )
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.init_wandb", lambda **_: None)
+
+    argv = [
+        "train_graphplanner_rllm.py",
+        "--agent",
+        "planner",
+        "--config-file",
+        str(cfg_path),
+        "--model-path",
+        str(tmp_path / "policy"),
+        "--print-config",
+        "--train-batch-size",
+        "16",
+        "--tensor-parallel",
+        "2",
+        "--parallel-agents",
+        "3",
+        "--rollout-workers",
+        "3",
+        "--workflow-parallel",
+        "3",
+        "--num-gpus",
+        "4",
+        "--ray-num-gpus",
+        "4",
+        "--ray-num-cpus",
+        "16",
+    ]
+    monkeypatch.setenv("WANDB_MODE", "offline")
+    monkeypatch.setattr(sys, "argv", argv, raising=False)
+
+    from scripts import train_graphplanner_rllm as train_mod
+
+    train_mod.main()
+
+    output = capsys.readouterr().out
+    assert "tensor_model_parallel_size: 2" in output
+    assert "train_batch_size: 16" in output
+
+    assert metrics and metrics[0][0] == 0
+    assert metrics[0][1]["parallel/tensor_parallel_planner"] == 2
+
+    resolved_cfg = tmp_path / "runs" / "yaml-run" / "resolved_config.yaml"
+    assert resolved_cfg.is_file()
+    resolved = yaml.safe_load(resolved_cfg.read_text(encoding="utf-8"))
+    assert resolved["training"]["train_batch_size"] == 16
+    assert resolved["parallel"]["tensor_parallel_planner"] == 2
+    assert resolved["logging"]["wandb"]["run_name"] == "yaml-run"
+
+
+def test_train_cli_yaml_only_ignores_overrides(tmp_path, monkeypatch, capsys):
+    dataset_file = Path("datasets/r2e_gym/graphplanner_repoenv_train.jsonl")
+    assert dataset_file.exists(), "sample dataset missing"
+
+    verl_path = tmp_path / "train_verl.parquet"
+
+    val_stub = SimpleNamespace(
+        get_verl_data_path=lambda: str(tmp_path / "val_verl.parquet"),
+        get_data_path=lambda: str(tmp_path / "val.raw.parquet"),
+    )
+
+    def fake_register(*, name, split, path):
+        if "val" in split or str(name).endswith("_val"):
+            return val_stub
+        assert Path(path) == dataset_file
+        return SimpleNamespace(
+            get_verl_data_path=lambda: str(verl_path),
+            get_data_path=lambda: str(tmp_path / "train.raw.parquet"),
+        )
+
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.ensure_dataset_registered", fake_register)
+
+    yaml_cfg = {
+        "training": {"train_batch_size": 5},
+        "parallel": {"tensor_parallel_planner": 1, "tensor_parallel_cgm": 1, "replicas": 1},
+        "resources": {"num_gpus": 2, "ray_num_gpus": 2, "ray_num_cpus": 8},
+        "logging": {"output_dir": str(tmp_path / "runs"), "wandb": {"run_name": "yaml-only"}},
+    }
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(yaml_cfg), encoding="utf-8")
+
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.log_metrics", lambda *_, **__: None)
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.make_gpu_snapshot", lambda: (lambda: {}))
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.make_ray_snapshot", lambda: (lambda: {}))
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.init_wandb", lambda **_: None)
+
+    argv = [
+        "train_graphplanner_rllm.py",
+        "--agent",
+        "planner",
+        "--config-file",
+        str(cfg_path),
+        "--yaml-only",
+        "--model-path",
+        str(tmp_path / "policy"),
+        "--print-config",
+        "--train-batch-size",
+        "16",
+        "--tensor-parallel",
+        "2",
+        "--num-gpus",
+        "4",
+    ]
+    monkeypatch.setattr(sys, "argv", argv, raising=False)
+
+    from scripts import train_graphplanner_rllm as train_mod
+
+    train_mod.main()
+
+    resolved_cfg = tmp_path / "runs" / "yaml-only" / "resolved_config.yaml"
+    saved = yaml.safe_load(resolved_cfg.read_text(encoding="utf-8"))
+    assert saved["training"]["train_batch_size"] == 5
+
+
+def test_train_cli_preflight_failure(tmp_path, monkeypatch):
+    dataset_file = Path("datasets/r2e_gym/graphplanner_repoenv_train.jsonl")
+    assert dataset_file.exists(), "sample dataset missing"
+
+    verl_path = tmp_path / "train_verl.parquet"
+
+    def fake_register(*, name, split, path):
+        assert Path(path) == dataset_file
+        return SimpleNamespace(
+            get_verl_data_path=lambda: str(verl_path),
+            get_data_path=lambda: str(tmp_path / "train.raw.parquet"),
+        )
+
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.ensure_dataset_registered", fake_register)
+
+    yaml_cfg = {
+        "parallel": {"tensor_parallel_planner": 4, "tensor_parallel_cgm": 4, "replicas": 1},
+        "resources": {"num_gpus": 4, "ray_num_gpus": 1, "ray_num_cpus": 4},
+        "logging": {"output_dir": str(tmp_path / "runs"), "wandb": {"run_name": "bad"}},
+    }
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(yaml_cfg), encoding="utf-8")
+
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.log_metrics", lambda *_, **__: None)
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.make_gpu_snapshot", lambda: (lambda: {}))
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.make_ray_snapshot", lambda: (lambda: {}))
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.init_wandb", lambda **_: None)
+
+    argv = [
+        "train_graphplanner_rllm.py",
+        "--agent",
+        "planner",
+        "--config-file",
+        str(cfg_path),
+        "--model-path",
+        str(tmp_path / "policy"),
+        "--print-config",
+    ]
+    monkeypatch.setattr(sys, "argv", argv, raising=False)
+
+    from scripts import train_graphplanner_rllm as train_mod
+
+    with pytest.raises(ValueError) as exc:
+        train_mod.main()
+    assert "Parallel resource configuration invalid" in str(exc.value)
 

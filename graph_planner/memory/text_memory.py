@@ -14,7 +14,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Protocol, Tuple
 
-from ..agents.common.text_protocol import parse_action_block as _parse_action_block
+from ..agents.common.contracts import parse_action_block as _parse_action_block
 
 __all__ = [
     "parse_action_block",
@@ -41,7 +41,7 @@ def parse_action_block(text: str, allowed: Iterable[str]) -> Dict[str, Any]:
     by the system prompt specification without duplicating the parser logic.
     """
 
-    return _parse_action_block(text, allowed)
+    return _parse_action_block(text)
 
 
 def emit_observation(name: str, data: Mapping[str, Any]) -> str:

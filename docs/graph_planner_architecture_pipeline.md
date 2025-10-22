@@ -16,7 +16,7 @@ CLI / Scripts / Tests
 └── tests/ …… FakeSandbox & 集成测试
     └── tests/test_rule_agent_pipeline.py …… 规则代理在 FakeSandbox 上的冒烟回归
     └── tests/test_cgm_adapter.py …… CGM 本地/远端推理覆盖
-    └── tests/test_text_protocol.py …… 文本轨迹修复管线解析与补丁流程
+    └── tests/test_text_protocol_e2e.py …… 文本轨迹修复协议端到端流程
     └── tests/test_text_memory.py …… Memory 动作配额与提交/删除流程
     └── tests/test_rllm_integration.py …… rLLM 适配层与 GRPO 回归
     └── tests/test_toy_mlp.py …… 玩具 MLP 模型的 tokenizer/推理/反向链路
@@ -55,7 +55,10 @@ CLI / Scripts / Tests
 | `integrations/rllm/cgm_agent.py` & `cgm_env.py` | `CGMRLLMAgent`、`CGMRLLMEnv` | 面向 CGM 的 PPO 训练包装，封装唯一 issue id 与上下文采集流程。【F:graph_planner/integrations/rllm/cgm_agent.py†L1-L220】【F:graph_planner/integrations/rllm/cgm_env.py†L11-L197】 |
 | `integrations/rllm/dataset.py` | `ensure_dataset_registered` | 将 JSON/JSONL 任务注册为 rLLM 可识别的数据集，解析路径与挂载信息。【F:graph_planner/integrations/rllm/dataset.py†L28-L109】 |
 | `memory/text_memory.py` | `memory_commit`、`memory_delete`、`TurnState` | 维护 Explore/工具 observation 的记忆提交与删除，执行配额估算与拒绝逻辑，供环境与代理共享最新上下文。【F:graph_planner/memory/text_memory.py†L37-L420】 |
-| `scripts/train_graphplanner_rllm.py` | CLI helpers | 注入模型路径、注册数据集、绑定 Agent/Env，并暴露并行训练开关（`--parallel-agents`、`--rollout-workers`、`--ray-*` 等）后委托 rLLM PPO。【F:scripts/train_graphplanner_rllm.py†L70-L220】 |
+| `infra/config.py` | `load_launch_config`、`merge_launch_config` | 解析内置默认值、YAML 与 CLI 覆写，写入 `resolved_config.yaml`，并返回结构化配置以供训练/评估脚本复用。【F:graph_planner/infra/config.py†L42-L285】 |
+| `infra/parallel.py` | `resolve_parallel`、`preflight_check` | 根据最终配置计算张量并行/副本/并发参数，并在启动前校验 GPU、Ray 资源是否匹配，失败时给出修复建议。【F:graph_planner/infra/parallel.py†L1-L134】 |
+| `infra/metrics.py` | `init_wandb`、`log_metrics`、`make_gpu_snapshot` | 初始化 W&B（支持 offline）、记录 Planner/CGM/环境指标，并定期采集 GPU 与 Ray 资源心跳。【F:graph_planner/infra/metrics.py†L1-L93】 |
+| `scripts/train_graphplanner_rllm.py` | CLI helpers | 注入模型路径、注册数据集、绑定 Agent/Env，并在加载 YAML 后调用并行预检、初始化 W&B，再委托 rLLM PPO。【F:scripts/train_graphplanner_rllm.py†L70-L336】 |
 
 ### 2.1 rLLM 模块导入路径 / rLLM import resolution
 
@@ -69,13 +72,14 @@ CLI / Scripts / Tests
 
 ### 2.2 Planner / CGM Prompt & Response Contracts
 
-- 新增的 `graph_planner.agents.common.contracts` 使用 `PromptContract` 数据类集中记录提示结构、系统指令与响应 JSON schema，目前内置了 Planner 与 CGM 两份协议，并通过 `PLANNER_SYSTEM_PROMPT`、`CGM_SYSTEM_PROMPT`、`CGM_PATCH_INSTRUCTION` 常量暴露给运行时代码复用。【F:graph_planner/agents/common/contracts.py†L1-L128】
+- `graph_planner.agents.common.contracts` 统一维护系统提示、动作枚举、错误码，以及 `parse_action_block`/`validate_planner_action`/`validate_cgm_patch` 等校验函数，成为 Planner 与 CGM 的唯一事实来源（SSOT）。【F:graph_planner/agents/common/contracts.py†L1-L394】
+- `scripts/validate_contracts.py` 提供契约冒烟检查，可在提交前快速验证解析器与补丁校验逻辑，适用于本地或 CI。【F:scripts/validate_contracts.py†L1-L48】
 - Planner 代理的系统提示 (`SYSTEM_PROMPT`) 直接引用合同中的指令，保证模型始终输出带 `thought`/`action` 的 JSON，且各动作字段与解析器保持一致。【F:graph_planner/agents/common/chat.py†L1-L83】
 - CGM 侧的 `ConversationEncoder` 与本地 fallback 亦复用同一份合同，确保子图、片段拼接后的提示文本与补丁输出格式（`patch.edits`）在远端服务、本地生成器与标注文档之间保持一致。【F:graph_planner/integrations/codefuse_cgm/formatting.py†L69-L266】【F:graph_planner/agents/rule_based/cgm_adapter.py†L1-L207】
 
 #### 2.2.1 Planner 动作协议
 
-- **动作枚举**：Planner 模型必须输出单个 `<function=ACTION>` 区块，`ACTION` 取自 `explore`、`memory`、`repair`、`submit` 或 `noop`。`parse_action_block` 会验证标签、参数唯一性与动作合法性，非法格式立即抛错并触发规则兜底。【F:graph_planner/agents/common/text_protocol.py†L59-L133】【F:graph_planner/agents/model_based/planner.py†L150-L210】
+- **动作枚举**：Planner 模型必须输出单个 `<function=ACTION>` 区块，`ACTION` 取自 `explore`、`memory`、`repair`、`submit` 或 `noop`。`parse_action_block` 与 `validate_planner_action` 在合同模块中负责校验标签、参数唯一性与必填项，若检测到异常会抛出带错误码的 `ProtocolError` 并触发规则兜底。【F:graph_planner/agents/common/contracts.py†L193-L343】【F:graph_planner/agents/model_based/planner.py†L149-L205】
 - **Explore**：可携带 `op`（`find|expand|read`）、`anchors`（节点/锚点列表）、`nodes`、`hop` 与 `limit` 参数，解析后映射到 `ExploreAction`，驱动图扩展与代码片段读取。【F:graph_planner/core/actions.py†L1-L26】【F:graph_planner/agents/model_based/planner.py†L212-L225】
 - **Memory**：`target`/`scope`/`intent` 指定是提交最新 `explore` 结果还是其他工具 observation，`MemoryAction` 交由 `text_memory.memory_commit`/`memory_delete` 判断配额并更新子图或文本记忆。【F:graph_planner/core/actions.py†L28-L39】【F:graph_planner/memory/text_memory.py†L151-L319】
 - **Repair**：必须提供 `subplan`（支持 `<![CDATA[...]]>` 多行文本），可选 `focus_ids` 与 `apply`。转换后的 `RepairAction` 仅保留计划文本与关注节点，后续由 `PlannerEnv` 的文本轨迹修复管线拉起 CGM；模型不再直接下发 `patch`。【F:graph_planner/agents/model_based/planner.py†L230-L247】【F:graph_planner/env/planner_env.py†L240-L302】
@@ -90,12 +94,12 @@ CLI / Scripts / Tests
 | `[Instruction]` | 最近一步的环境反馈（失败信息、reward、动作摘要） | 同上，`summarise_observation` 会把 `last_info`、`reward`、`done` 等写入文本，并返回给聊天客户端。 |
 | `[Planner memory]` | 可选的历史上下文：子图统计、plan 摘要等 | `PlannerEnv.render_memory_for_llm()` 将记忆模块内容注入用户提示，缺省时留空。【F:graph_planner/env/planner_env.py†L136-L173】 |
 
-- 系统提示明确要求模型“只输出一个 `<function=...>` 区块”，并提醒多行文本需包裹在 CDATA 中。`parse_action_block` 与 `_action_from_block` 组合完成解析；若模型输出缺失标签或动作非法，将直接走规则 fallback 并在元数据中记录原因。【F:graph_planner/agents/common/contracts.py†L55-L106】【F:graph_planner/agents/model_based/planner.py†L141-L210】
+- 系统提示明确要求模型“只输出一个 `<function=...>` 区块”，并提醒多行文本需包裹在 CDATA 中。`parse_action_block` 与 `validate_planner_action` 会在解析后抛出带错误码的 `ProtocolError`；`LocalLLMPlannerAgent` 捕获该错误并记录 `fallback_reason` 元数据，用于下游遥测。【F:graph_planner/agents/common/contracts.py†L109-L343】【F:graph_planner/agents/model_based/planner.py†L149-L205】
 
 #### 2.2.3 CGM Prompt / Patch Schema
 
 - **Prompt 区块**：Issue → Instruction → Plan → Subgraph → Snippets，分别注入 Planner 请求、结构化计划、`GraphLinearizer` 线性化后的节点文本，以及 `SnippetFormatter` 拼接的候选代码片段。【F:graph_planner/integrations/codefuse_cgm/formatting.py†L69-L199】
-- **系统指令**：要求输出 JSON `{ "patch": { "edits": [...] }, "summary": "..." }`；`CodeFuseCGMGenerator`、`CodeFuseCGMClient` 与 fallback runtime 使用相同 system prompt，保证本地、远端或标注路径一致。【F:graph_planner/agents/common/contracts.py†L60-L126】【F:graph_planner/integrations/codefuse_cgm/inference.py†L18-L152】
+- **系统指令**：要求输出 JSON `{ "patch": { "edits": [...] }, "summary": "..." }`；`CodeFuseCGMGenerator`、`CodeFuseCGMClient` 与 fallback runtime 使用相同 system prompt，保证本地、远端或标注路径一致。【F:graph_planner/agents/common/contracts.py†L145-L170】【F:graph_planner/integrations/codefuse_cgm/inference.py†L18-L152】
 - **补丁结构**：`patch.edits` 中的每个对象必须包含 `path`、`start`、`end`、`new_text`，其中 `new_text` 必须以换行结尾。`CGMPatch` 数据结构与 `SandboxRuntime.apply_patch` 都假定这一 schema，缺项会导致补丁被拒绝。【F:graph_planner/core/patches.py†L1-L96】【F:graph_planner/runtime/sandbox.py†L120-L214】
 - **输出解析**：`CodeFuseCGMGenerator._parse_patch` 会在 Hugging Face 生成结果上调用合同中的 schema 校验，若缺失必需字段则回退到规则补丁，并在日志中标记原因。【F:graph_planner/integrations/codefuse_cgm/inference.py†L94-L150】
 
@@ -105,14 +109,14 @@ CLI / Scripts / Tests
 
 | 层级 | 关键函数 | 作用 | 关联实现 |
 | --- | --- | --- | --- |
-| 解析 | `parse_action_block(text, allowed)` | 严格解析单个 `<function=...>` 区块，提取函数名与参数并确保动作合法；检测到额外文本、重复块或标签缺失时立即抛出 `ValueError`，避免 Planner 输出多段内容。【F:graph_planner/agents/common/text_protocol.py†L42-L128】 |
-| 运行时状态 | `RepairRuntimeState` | 汇集 issue 描述、子图缓存、文本记忆、沙箱路径等上下文字段，统一供上下文构建与补丁应用阶段使用，隔离环境内部实现细节。【F:graph_planner/agents/common/text_protocol.py†L131-L209】 |
-| 上下文抽取 | `build_cgm_payload(state, subplan, focus_ids)` | 读取图节点/边、`focus_ids`、记忆摘要、相关文件全文与 issue 信息，并把 `subplan` 拆成步骤列表；同时执行 Top-K 裁剪和 token 预算控制，确保请求不会超出 CGM 长度限制。【F:graph_planner/agents/common/text_protocol.py†L212-L334】 |
-| CGM 调用 | `call_cgm(payload, k)` / `pick_best_candidate(cands)` | 透传到本地/远端 CGM 客户端生成补丁候选，并依据置信度、测试建议等字段选择最佳补丁；若返回多文件 diff，`handle_planner_repair` 会拆分并逐一尝试。【F:graph_planner/agents/common/text_protocol.py†L337-L447】 |
-| 补丁校验 | `validate_unified_diff(patch, path)` | 检查 diff 头部与目标路径匹配、hunk 语法合法、禁止跨文件编辑；违反约束时抛出 `ValueError`，阻止异常补丁污染仓库。【F:graph_planner/agents/common/text_protocol.py†L450-L522】 |
-| 应用与测试 | `try_apply_and_test(path, patch)` | 在沙箱临时目录应用 diff，并调用构建/测试/静态检查；将是否应用、hunk 数量、测试与 lint 结果封装为 JSON，供 observation 使用。【F:graph_planner/agents/common/text_protocol.py†L525-L642】 |
-| 观察发射 | `emit_observation(name, data)` | 将任意 JSON 编码为 `<observation for="name">…</observation>` 字符串，下一轮直接送回 Planner。【F:graph_planner/agents/common/text_protocol.py†L645-L678】 |
-| 管线入口 | `handle_planner_repair(action, state)` | 统筹整个流程：解析 Planner 的 `repair` 参数（`subplan` 必填、`focus_ids`/`apply` 可选），构建 payload、调用 CGM、按需应用补丁并组装最终 observation；失败时会在 `error` 字段标识 `apply-failed`/`build-failed` 等阶段。【F:graph_planner/agents/common/text_protocol.py†L681-L842】 |
+| 解析 | `parse_action_block(text)` | 严格解析单个 `<function=...>` 区块，校验动作与参数并返回结构化字典；一旦检测到额外文本、重复块或非法参数即抛出带错误码的 `ProtocolError`，避免 Planner 输出多段内容。【F:graph_planner/agents/common/contracts.py†L193-L256】 |
+| 运行时状态 | `RepairRuntimeState` | 汇集 issue 描述、子图缓存、文本记忆、沙箱路径等上下文字段，统一供上下文构建与补丁应用阶段使用，隔离环境内部实现细节。【F:graph_planner/agents/common/text_protocol.py†L72-L129】 |
+| 上下文抽取 | `build_cgm_payload(state, subplan, focus_ids)` | 读取图节点/边、`focus_ids`、记忆摘要、相关文件全文与 issue 信息，并把 `subplan` 拆成步骤列表；同时执行 Top-K 裁剪和 token 预算控制，确保请求不会超出 CGM 长度限制。【F:graph_planner/agents/common/text_protocol.py†L148-L170】 |
+| CGM 调用 | `call_cgm(payload, k)` / `pick_best_candidate(cands)` | 透传到本地/远端 CGM 客户端生成补丁候选，并依据置信度、测试建议等字段选择最佳补丁；若返回多文件 diff，`handle_planner_repair` 会拆分并逐一尝试。【F:graph_planner/agents/common/text_protocol.py†L174-L188】 |
+| 补丁校验 | `validate_unified_diff(patch, path)` | 检查 diff 头部与目标路径匹配、hunk 语法合法、禁止跨文件编辑；违反约束时抛出 `ValueError`，阻止异常补丁污染仓库。【F:graph_planner/agents/common/text_protocol.py†L190-L236】 |
+| 应用与测试 | `try_apply_and_test(path, patch)` | 在沙箱临时目录应用 diff，并调用构建/测试/静态检查；将是否应用、hunk 数量、测试与 lint 结果封装为 JSON，供 observation 使用。【F:graph_planner/agents/common/text_protocol.py†L242-L272】 |
+| 观察发射 | `emit_observation(name, data)` | 将任意 JSON 编码为 `<observation for="name">…</observation>` 字符串，下一轮直接送回 Planner。【F:graph_planner/agents/common/text_protocol.py†L275-L279】 |
+| 管线入口 | `handle_planner_repair(action, state)` | 统筹整个流程：解析 Planner 的 `repair` 参数（`subplan` 必填、`focus_ids`/`apply` 可选），构建 payload、调用 CGM、按需应用补丁并组装最终 observation；失败时会在 `error` 字段标识 `apply-failed`/`build-failed` 等阶段。【F:graph_planner/agents/common/text_protocol.py†L331-L396】 |
 
 - **执行示例 / Worked example**：
   1. Planner 输出：
@@ -138,7 +142,7 @@ CLI / Scripts / Tests
 - **协议对齐 / Contract alignment**：生成的 CGM payload 与回包严格遵循“单文件 unified diff”约束，`constraints.one_file_per_patch=true` 让 CGM 只编辑一个文件。若 CGM 侧仍返回多文件 diff，`handle_planner_repair` 会拆分并串行处理，确保每次只对一个文件运行 `validate_unified_diff` 和 `try_apply_and_test`。
 
 - `PlannerEnv.step()` 在检测到 Planner 动作为 `repair` 且未携带显式 `patch` 时，会实例化 `RepairRuntimeState` 并委托上述管线；若 Planner 请求 `apply=false`，则仅返回候选补丁信息，不会修改仓库。【F:graph_planner/env/planner_env.py†L142-L229】
-- 新增的 `tests/test_text_protocol.py` 覆盖了动作解析、payload 构建、补丁应用成功/失败、observation 编码等场景，确保文本轨迹协议端到端闭环可复现。【F:tests/test_text_protocol.py†L1-L198】
+- 新增的 `tests/test_text_protocol_e2e.py` 覆盖了动作解析、payload 构建、补丁应用成功/失败、observation 编码等场景，确保文本轨迹协议端到端闭环可复现。【F:tests/test_text_protocol_e2e.py†L1-L139】
 
 ## 3. 数据与上下文流 / Data flow
 
@@ -221,6 +225,9 @@ CLI / Scripts / Tests
    ```
    - `ensure_rllm_importable()` 会在脚本开头注入子模块路径，保证 `rllm.rllm.*` 与 `rllm.*` 两层包结构均可被导入。【F:graph_planner/infra/vendor.py†L1-L112】
    - 如果 CGM tokenizer 不在模型目录，附加 `--cgm-tokenizer-path`；若需单独指定 critic 模型，可使用 `--critic-model-path` 与 `--critic-tokenizer-path`。
+   - 启动脚本会调用 `infra.config.load_launch_config` 合并内置默认值、YAML 与 CLI 覆写（若指定 `--yaml-only` 则禁止 CLI 覆写），并把最终配置写入 `resolved_config.yaml` 同步给 W&B。【F:graph_planner/infra/config.py†L42-L285】
+   - `infra.parallel.preflight_check` 会基于最终配置校验张量并行、replica 数与 Ray 资源是否匹配，失败时列出降并行或扩容的三条建议后快速退出。【F:graph_planner/infra/parallel.py†L70-L134】
+   - `infra.metrics.init_wandb` 与 `log_metrics` 在启动阶段登记并行度、GPU/Ray 心跳及补丁链路指标，`wandb.offline` 时自动切换离线模式。【F:graph_planner/infra/metrics.py†L1-L93】
 4. **训练期工作流**
    - `GraphPlannerRLLMEnv` 调用 `PlannerEnv` 在容器内执行真实代码修复流程，并利用 `issue_uid` 保证并发采样互不覆盖，所有 observation/reward 会写入 agent 轨迹。【F:graph_planner/integrations/rllm/env.py†L46-L134】
    - `GraphPlannerRLLMAgent` 根据轨迹构造聊天消息并请求 planner 模型生成 `<function=...>` 区块；遇到 Repair 动作时将参数交给文本轨迹修复管线，由环境统一调用 CGM。【F:graph_planner/integrations/rllm/agent.py†L101-L210】【F:graph_planner/env/planner_env.py†L240-L302】
@@ -236,7 +243,7 @@ CLI / Scripts / Tests
 | --- | --- | --- | --- |
 | Agent 类型 | 使用 rLLM 内置 `ToolAgent`，主要依赖通用工具接口 | 自定义 `GraphPlannerRLLMAgent` / `CGMRLLMAgent`，继承自 `BaseAgent`，封装 planner prompt、CGM fallback 与轨迹字段。【F:graph_planner/integrations/rllm/agent.py†L56-L210】【F:graph_planner/integrations/rllm/cgm_agent.py†L1-L220】 | 为了保证 `<function=...>` 文本协议、补丁调用与本地记忆结构对齐，我们实现了专用 agent，而不是直接复用通用工具 agent。 |
 | Environment | 直接使用 rLLM 的 `ToolEnvironment`，依赖工具抽象 | 自定义 `GraphPlannerRLLMEnv` / `CGMRLLMEnv`，在 `reset/step` 内部驱动 `PlannerEnv` 与 RepoEnv 容器，并注入奖励 shaping。【F:graph_planner/integrations/rllm/env.py†L1-L134】【F:graph_planner/integrations/rllm/cgm_env.py†L70-L214】 | 需要与 RepoEnv/CGM 的数据结构深度耦合，故编写了专用环境包装。 |
-| Prompt & 输出约定 | 由工具解析器决定，通常是标准的思维链 + 工具指令模板 | 通过 `graph_planner.agents.common.contracts` 定义 planner/CGM 的系统提示、section 布局与响应协议；Planner 使用 `<function=...>` 区块，CGM 仍输出 JSON 补丁。【F:graph_planner/agents/common/contracts.py†L1-L147】【F:graph_planner/agents/common/text_protocol.py†L59-L167】 | 该合同是我们仓库新增的约束，确保模型输出与代码解析器完全一致。 |
+| Prompt & 输出约定 | 由工具解析器决定，通常是标准的思维链 + 工具指令模板 | 通过 `graph_planner.agents.common.contracts` 定义 planner/CGM 的系统提示、section 布局与响应协议；Planner 使用 `<function=...>` 区块，CGM 仍输出 JSON 补丁。【F:graph_planner/agents/common/contracts.py†L1-L394】【F:graph_planner/agents/common/text_protocol.py†L37-L396】 | 该合同是我们仓库新增的约束，确保模型输出与代码解析器完全一致。 |
 | 采样/推理引擎 | `AgentExecutionEngine` 可以配置为 `engine_name="openai"` 并指向 HTTP API | 训练脚本使用本地 Hugging Face 模型（或玩具模型）作为 planner/CGM，推理由 `HuggingFaceChatClient` 和 `CodeFuseCGMGenerator` 实现。【F:graph_planner/integrations/local_llm/hf.py†L19-L186】【F:graph_planner/integrations/codefuse_cgm/inference.py†L18-L152】 | 这样能在离线容器中完成训练，无需外部 API。 |
 | 经验采样与更新 | `AgentExecutionEngine` 同时负责 rollout 和工具调用 | 采样由自定义 env/agent 执行，轨迹交给 Verl GRPO / PPO 算法处理；Ray 并发、资源检查、日志等由 `train_graphplanner_rllm.py` 注入配置。【F:scripts/train_graphplanner_rllm.py†L70-L336】 | 虽然同属 rLLM 生态，但我们直接对接 Verl 的训练器，而非 AgentExecutionEngine 的“一站式”接口。 |
 | 配置方式 | 主要靠传入 `agent_args`、`env_args`、`sampling_params` 字典 | 结合 CLI 参数与 OmegaConf 覆写，提供 `--reward-scale`、`--failure-penalty`、`--precision`、`--grad-accum-steps` 等开关，并通过 `_set_if_exists` 写入 Hydra 配置。【F:scripts/train_graphplanner_rllm.py†L180-L336】 | CLI 更贴近项目习惯，也方便与 Ray 资源、dataset 注册流程统一。 |

@@ -1,10 +1,4 @@
-"""Utilities for the text-trajectory protocol shared by planner agents.
-
-The planner-side model responds with a ``<function=...>`` block for each
-decision.  This module provides helpers to parse that block, construct the
-payload consumed by CodeFuse-CGM, and drive the repair execution pipeline
-including diff validation, application, and observation emission.
-"""
+"""Utilities for the text-trajectory protocol shared by planner agents."""
 
 from __future__ import annotations
 
@@ -13,14 +7,26 @@ import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from difflib import unified_diff
+from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional
 
 from ...memory import subgraph_store
+from ...runtime.sandbox import PatchApplier
+from ...core.patches import patch_id
+from .contracts import (
+    CGM_CONTRACT,
+    CGMPatch,
+    CGMPatchErrorCode,
+    ProtocolError,
+    normalize_newlines,
+    parse_action_block,
+    validate_cgm_patch,
+    validate_planner_action,
+)
 
 __all__ = [
-    "ActionParseError",
     "RepairRuntimeState",
-    "parse_action_block",
     "format_action_block",
     "build_cgm_payload",
     "call_cgm",
@@ -30,84 +36,6 @@ __all__ = [
     "emit_observation",
     "handle_planner_repair",
 ]
-
-
-class ActionParseError(ValueError):
-    """Raised when the planner response does not match the protocol."""
-
-
-_ACTION_RE = re.compile(r"^<function\s*=\s*([a-zA-Z0-9_.-]+)\s*>", re.IGNORECASE)
-_END_RE = re.compile(r"</function>\s*$", re.IGNORECASE | re.DOTALL)
-_PARAM_RE = re.compile(r"<param\s+name=\"([^\"]+)\">(.*?)</param>", re.DOTALL | re.IGNORECASE)
-
-
-def _strip_cdata(value: str) -> str:
-    if value.startswith("<![CDATA[") and value.endswith("]]>"):
-        return value[9:-3]
-    return value
-
-
-def _normalise_json_value(raw: str) -> Any:
-    text = raw.strip()
-    if not text:
-        return ""
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return raw.strip("\r\n")
-
-
-def parse_action_block(text: str, allowed: Iterable[str]) -> Dict[str, Any]:
-    """Parse the planner ``<function=...>`` block into a structured dict.
-
-    Parameters
-    ----------
-    text:
-        Raw planner response containing exactly one ``<function=...>`` block.
-    allowed:
-        Iterable of valid function names.  A :class:`ValueError` is raised if
-        the block name is not within this set.
-
-    Returns
-    -------
-    dict
-        Mapping with keys ``name`` and ``params``.
-    """
-
-    if not isinstance(text, str):
-        raise ActionParseError("planner response must be a string")
-    stripped = text.strip()
-    match = _ACTION_RE.match(stripped)
-    if not match:
-        raise ActionParseError("no <function=...> block found in planner output")
-    name = match.group(1).strip().lower()
-
-    allowed_set = {entry.lower() for entry in allowed}
-    if allowed_set and name not in allowed_set:
-        raise ActionParseError(f"action '{name}' is not allowed; expected one of {sorted(allowed_set)}")
-
-    inner = stripped[match.end() :]
-    if not _END_RE.search(inner):
-        raise ActionParseError("planner action block must terminate with </function>")
-    inner = _END_RE.sub("", inner)
-
-    params: Dict[str, Any] = {}
-    last_end = 0
-    for match in _PARAM_RE.finditer(inner):
-        start, end = match.span()
-        gap = inner[last_end:start]
-        if gap.strip():
-            raise ActionParseError("unexpected content between <param> elements")
-        key = match.group(1).strip()
-        raw_value = _strip_cdata(match.group(2).strip())
-        if key in params:
-            raise ActionParseError(f"duplicate parameter '{key}' in planner action")
-        params[key] = _normalise_json_value(raw_value)
-        last_end = end
-    if inner[last_end:].strip():
-        raise ActionParseError("unexpected trailing content after last <param>")
-
-    return {"name": name, "params": params}
 
 
 def format_action_block(name: str, params: Mapping[str, Any]) -> str:
@@ -202,6 +130,16 @@ class RepairRuntimeState:
         return self.cgm_generate(payload, k)
 
 
+@dataclass(frozen=True)
+class DiffAnalysis:
+    """Summary of validated diff statistics for telemetry."""
+
+    new_text: str
+    n_hunks: int
+    added_lines: int
+    removed_lines: int
+
+
 _STATE: ContextVar[Optional[RepairRuntimeState]] = ContextVar("gp_repair_state", default=None)
 
 
@@ -263,89 +201,323 @@ def pick_best_candidate(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
     return max(candidates, key=lambda c: float(c.get("confidence", 0.0)))
 
 
-def validate_unified_diff(patch: str, path: str) -> None:
-    """Best-effort validation of a unified diff for a single file."""
+def _clean_diff_path(diff_path: str) -> str:
+    diff_path = diff_path.strip()
+    if diff_path.startswith("a/") or diff_path.startswith("b/"):
+        return diff_path[2:]
+    return diff_path
 
-    if not patch.strip():
-        raise ValueError("CGM returned an empty diff")
-    lines = patch.splitlines()
-    normalized_path = path.strip()
-    if not normalized_path:
-        raise ValueError("candidate path is empty")
 
-    def _clean(diff_path: str) -> str:
-        diff_path = diff_path.strip()
-        if diff_path.startswith("a/") or diff_path.startswith("b/"):
-            return diff_path[2:]
-        return diff_path
+def _read_original_text(state: RepairRuntimeState, path: str) -> str:
+    if path in state.related_files:
+        return normalize_newlines(state.related_files[path])
 
-    seen_paths: List[str] = []
-    hunk_count = 0
-    current_old: Optional[str] = None
-    current_new: Optional[str] = None
+    base = Path(state.repo_root) if state.repo_root else Path.cwd()
+    target = base.joinpath(path)
+    try:
+        data = target.read_bytes()
+    except FileNotFoundError as exc:
+        raise ProtocolError(
+            CGMPatchErrorCode.PATH_MISSING.value,
+            f"original file '{path}' not found for patch application",
+        ) from exc
+    except Exception as exc:  # pragma: no cover - defensive
+        raise ProtocolError(
+            CGMPatchErrorCode.INVALID_PATCH_SCHEMA.value,
+            f"unable to read '{path}': {exc}",
+        ) from exc
+
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        error = ProtocolError(
+            CGMPatchErrorCode.ENCODING_UNSUPPORTED.value,
+            f"file '{path}' is not UTF-8 encoded: {exc}",
+        )
+        error.__cause__ = exc
+        raise error
+    return normalize_newlines(text)
+
+
+def _apply_patch_edits(original_text: str, edits: List[Mapping[str, Any]], path: str) -> str:
+    if not edits:
+        raise ProtocolError(CGMPatchErrorCode.INVALID_PATCH_SCHEMA.value, "no edits supplied")
+
+    original_lines = original_text.splitlines(keepends=True)
+    new_lines = list(original_lines)
+
+    for edit in sorted(edits, key=lambda e: (int(e.get("start", 1)), int(e.get("end", 1)))):
+        try:
+            start = int(edit["start"])
+            end = int(edit["end"])
+        except Exception as exc:  # pragma: no cover - validated upstream
+            raise ProtocolError(CGMPatchErrorCode.RANGE_INVALID.value, f"invalid range in edit for {path}") from exc
+        if start < 1:
+            raise ProtocolError(CGMPatchErrorCode.RANGE_INVALID.value, f"edit start must be >=1 for {path}")
+        if end < start:
+            raise ProtocolError(CGMPatchErrorCode.RANGE_INVALID.value, f"edit end must be >= start for {path}")
+        if start - 1 > len(new_lines):
+            raise ProtocolError(CGMPatchErrorCode.RANGE_INVALID.value, f"edit start {start} exceeds file length for {path}")
+        if end > len(new_lines) + 1:
+            raise ProtocolError(CGMPatchErrorCode.RANGE_INVALID.value, f"edit end {end} exceeds file length for {path}")
+        replacement = normalize_newlines(str(edit["new_text"]))
+        replacement_lines = replacement.splitlines(keepends=True)
+        new_lines[start - 1 : end] = replacement_lines
+
+    new_text = "".join(new_lines)
+    if CGM_CONTRACT.constraints.get("newline_required") and not new_text.endswith("\n"):
+        raise ProtocolError(CGMPatchErrorCode.NEWLINE_MISSING.value, f"resulting file '{path}' must end with newline")
+    return new_text
+
+
+def _build_unified_diff(original_text: str, new_text: str, path: str) -> str:
+    original_lines = original_text.splitlines(keepends=True)
+    new_lines = new_text.splitlines(keepends=True)
+    diff_lines = list(
+        unified_diff(
+            original_lines,
+            new_lines,
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+            lineterm="",
+        )
+    )
+    if not diff_lines:
+        raise ProtocolError(
+            CGMPatchErrorCode.INVALID_PATCH_SCHEMA.value,
+            "CGM patch produced no diff",
+        )
+    return "\n".join(diff_lines) + "\n"
+
+
+def _analyse_unified_diff(original_text: str, diff_text: str, path: str) -> DiffAnalysis:
+    diff_text = normalize_newlines(diff_text)
+    if not diff_text.strip():
+        raise ProtocolError(CGMPatchErrorCode.INVALID_UNIFIED_DIFF.value, "diff content is empty")
+
+    lines = diff_text.splitlines()
+    header_old: Optional[str] = None
+    header_new: Optional[str] = None
+    seen_paths: set[str] = set()
+
     for line in lines:
         if line.startswith("diff --git"):
             parts = line.split()
             if len(parts) >= 4:
-                seen_paths.append(_clean(parts[2]))
-                seen_paths.append(_clean(parts[3]))
+                seen_paths.add(_clean_diff_path(parts[2]))
+                seen_paths.add(_clean_diff_path(parts[3]))
         elif line.startswith("--- "):
-            current_old = _clean(line[4:])
-            seen_paths.append(current_old)
+            header_old = _clean_diff_path(line[4:])
+            seen_paths.add(header_old)
         elif line.startswith("+++ "):
-            current_new = _clean(line[4:])
-            seen_paths.append(current_new)
-            if current_old and current_new and current_old != current_new:
-                raise ValueError("unified diff changes multiple files")
-        elif line.startswith("@@"):
-            hunk_count += 1
+            header_new = _clean_diff_path(line[4:])
+            seen_paths.add(header_new)
 
-    unique_paths = {p for p in seen_paths if p}
-    if not unique_paths:
-        raise ValueError("unable to determine the target file in diff")
-    if len(unique_paths) > 1:
-        raise ValueError("diff spans multiple files; expected a single target")
-    if _clean(normalized_path) not in unique_paths:
-        raise ValueError(f"diff targets {unique_paths.pop()} but planner requested {normalized_path}")
-    if hunk_count == 0:
-        raise ValueError("diff does not contain any hunks")
+    seen_paths.discard("/dev/null")
+    if not seen_paths:
+        raise ProtocolError(CGMPatchErrorCode.INVALID_UNIFIED_DIFF.value, "unable to determine target file from diff header")
+    if len(seen_paths) > 1:
+        raise ProtocolError(CGMPatchErrorCode.MULTI_FILE_DIFF.value, "diff spans multiple files")
+
+    target = _clean_diff_path(path)
+    header_target = header_new or header_old or next(iter(seen_paths))
+    if target != header_target:
+        raise ProtocolError(
+            CGMPatchErrorCode.INVALID_UNIFIED_DIFF.value,
+            f"diff header references '{header_target}' but repair target is '{target}'",
+        )
+
+    original_lines = normalize_newlines(original_text).splitlines()
+    new_lines: List[str] = []
+    current_orig = 0
+    n_hunks = 0
+    added = 0
+    removed = 0
+    idx = 0
+    line_count = len(lines)
+
+    while idx < line_count:
+        line = lines[idx]
+        if not line.strip():
+            idx += 1
+            continue
+        if line.startswith("@@ "):
+            n_hunks += 1
+            hunk_header = line
+            try:
+                header_parts = line.split()
+                old_range = header_parts[1]
+                new_range = header_parts[2]
+                old_start, old_len = old_range[1:].split(",") if "," in old_range else (old_range[1:], "1")
+                new_start, new_len = new_range[1:].split(",") if "," in new_range else (new_range[1:], "1")
+                old_start_i = int(old_start)
+                old_len_i = int(old_len)
+                new_start_i = int(new_start)
+                new_len_i = int(new_len)
+            except Exception as exc:
+                raise ProtocolError(CGMPatchErrorCode.INVALID_UNIFIED_DIFF.value, f"invalid hunk header '{hunk_header}'") from exc
+
+            if old_start_i < 1 or new_start_i < 1 or old_len_i < 0 or new_len_i < 0:
+                raise ProtocolError(CGMPatchErrorCode.RANGE_INVALID.value, f"invalid ranges in hunk '{hunk_header}'")
+            if old_start_i - 1 < current_orig:
+                raise ProtocolError(CGMPatchErrorCode.RANGE_INVALID.value, "overlapping hunks detected")
+            if old_start_i - 1 > len(original_lines):
+                raise ProtocolError(CGMPatchErrorCode.RANGE_INVALID.value, "hunk starts beyond file length")
+
+            # Append unchanged lines preceding the hunk
+            while current_orig < old_start_i - 1 and current_orig < len(original_lines):
+                new_lines.append(original_lines[current_orig])
+                current_orig += 1
+
+            idx += 1
+            consumed_old = 0
+            produced_new = 0
+            while idx < line_count:
+                segment = lines[idx]
+                if segment.startswith("@@ ") or segment.startswith("diff --git") or segment.startswith("--- ") or segment.startswith("+++ "):
+                    break
+                if not segment.strip():
+                    idx += 1
+                    continue
+                if segment.startswith(" "):
+                    if current_orig >= len(original_lines):
+                        raise ProtocolError(CGMPatchErrorCode.RANGE_INVALID.value, "context extends beyond original file")
+                    expected = original_lines[current_orig]
+                    if expected != segment[1:]:
+                        raise ProtocolError(
+                            CGMPatchErrorCode.HUNK_MISMATCH.value,
+                            f"context mismatch at line {current_orig + 1}",
+                        )
+                    new_lines.append(expected)
+                    current_orig += 1
+                    consumed_old += 1
+                    produced_new += 1
+                elif segment.startswith("-"):
+                    if current_orig >= len(original_lines):
+                        raise ProtocolError(CGMPatchErrorCode.RANGE_INVALID.value, "deletion exceeds original file length")
+                    expected = original_lines[current_orig]
+                    if expected != segment[1:]:
+                        raise ProtocolError(
+                            CGMPatchErrorCode.HUNK_MISMATCH.value,
+                            f"deletion mismatch at line {current_orig + 1}",
+                        )
+                    current_orig += 1
+                    consumed_old += 1
+                    removed += 1
+                elif segment.startswith("+"):
+                    new_lines.append(segment[1:])
+                    produced_new += 1
+                    added += 1
+                elif segment.startswith("\\"):
+                    # "\ No newline at end of file" -- ignore
+                    pass
+                else:
+                    raise ProtocolError(CGMPatchErrorCode.INVALID_UNIFIED_DIFF.value, f"unexpected diff line '{segment}'")
+                idx += 1
+
+            if consumed_old != old_len_i:
+                raise ProtocolError(
+                    CGMPatchErrorCode.RANGE_INVALID.value,
+                    f"hunk removed {consumed_old} lines but header expected {old_len_i}",
+                )
+            if produced_new != new_len_i:
+                raise ProtocolError(
+                    CGMPatchErrorCode.RANGE_INVALID.value,
+                    f"hunk added {produced_new} lines but header expected {new_len_i}",
+                )
+            continue
+        idx += 1
+
+    # Append trailing lines untouched by hunks
+    new_lines.extend(original_lines[current_orig:])
+    new_text = "\n".join(new_lines) + "\n"
+    if CGM_CONTRACT.constraints.get("newline_required") and not new_text.endswith("\n"):
+        raise ProtocolError(CGMPatchErrorCode.NEWLINE_MISSING.value, f"resulting file '{path}' must end with newline")
+
+    return DiffAnalysis(new_text=new_text, n_hunks=n_hunks, added_lines=added, removed_lines=removed)
 
 
-def _count_hunks(patch: str) -> int:
-    return sum(1 for line in patch.splitlines() if line.startswith("@@"))
-
-
-def try_apply_and_test(path: str, patch: str) -> Dict[str, Any]:
-    """Apply the diff, run lint/tests, and summarise the outcome."""
+def validate_unified_diff(patch_text: str, path: str) -> DiffAnalysis:
+    """Validate a unified diff against the current working tree."""
 
     state = _require_state()
-    sandbox = state.sandbox
-    applied = sandbox.apply_patch(patch)
-    if not applied:
-        sandbox.reset_soft()
-        return {"ok": False, "error": "apply-failed", "msg": f"failed to apply diff for {path}"}
+    original_text = _read_original_text(state, path)
+    return _analyse_unified_diff(original_text, patch_text, path)
 
-    lint_ok = bool(sandbox.lint())
-    if not lint_ok:
-        sandbox.reset_soft()
-        return {"ok": False, "error": "lint-failed", "msg": "lint checks failed"}
 
-    tests = sandbox.test()
-    tests_passed = bool(tests.get("passed"))
-    if not tests_passed:
-        sandbox.reset_soft()
-        msg = tests.get("stdout") or "tests failed"
-        return {"ok": False, "error": "tests-failed", "msg": msg, "tests": tests}
+def _wrap_runner(obj: Any, attr: str) -> Optional[Callable[[Path], Any]]:
+    fn = getattr(obj, attr, None)
+    if not callable(fn):
+        return None
 
-    return {
-        "ok": True,
-        "applied": True,
-        "path": path,
-        "hunks": _count_hunks(patch),
-        "tests_passed": tests_passed,
-        "lint_ok": lint_ok,
-        "tests": tests,
-    }
+    def _runner(temp_dir: Path) -> Any:
+        try:
+            return fn(temp_dir=temp_dir)
+        except TypeError:
+            try:
+                return fn(temp_dir)
+            except TypeError:
+                return fn()
+
+    return _runner
+
+
+def _normalise_tests(result: Any) -> Dict[str, Any]:
+    if isinstance(result, Mapping):
+        data = dict(result)
+        data.setdefault("passed", bool(data.get("passed") or data.get("ok")))
+        return data
+    return {"passed": bool(result), "stdout": ""}
+
+
+def _normalise_lint(result: Any) -> Dict[str, Any]:
+    if isinstance(result, Mapping):
+        data = dict(result)
+        data.setdefault("ok", bool(data.get("ok") or data.get("passed")))
+        return data
+    return {"ok": bool(result), "stdout": ""}
+
+
+def try_apply_and_test(
+    path: str,
+    patch: str,
+    *,
+    new_content: Optional[str] = None,
+    stats: Optional[Mapping[str, int]] = None,
+    patch_hash: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Apply a validated diff via :class:`PatchApplier` and execute checks."""
+
+    state = _require_state()
+    repo_root = Path(state.repo_root or ".").resolve()
+    if not getattr(state, "_patch_applier", None):
+        state._patch_applier = PatchApplier()  # type: ignore[attr-defined]
+    applier: PatchApplier = state._patch_applier  # type: ignore[attr-defined]
+
+    run_tests = _wrap_runner(state.sandbox, "test")
+    run_lint = _wrap_runner(state.sandbox, "lint")
+
+    def _tests(temp_dir: Path) -> Dict[str, Any]:
+        if run_tests is None:
+            return {"passed": True, "stdout": ""}
+        return _normalise_tests(run_tests(temp_dir))
+
+    def _lint(temp_dir: Path) -> Dict[str, Any]:
+        if run_lint is None:
+            return {"ok": True, "stdout": ""}
+        return _normalise_lint(run_lint(temp_dir))
+
+    result = applier.apply_in_temp_then_commit(
+        repo_root,
+        patch,
+        path,
+        run_tests=_tests,
+        run_lint=_lint,
+        patch_id=patch_hash,
+        new_content=new_content,
+        stats=stats,
+    )
+    return result
 
 
 def emit_observation(name: str, data: Mapping[str, Any]) -> str:
@@ -355,53 +527,140 @@ def emit_observation(name: str, data: Mapping[str, Any]) -> str:
     return f'<observation for="{name}">{serialised}</observation>'
 
 
-def handle_planner_repair(action: Mapping[str, Any], state: RepairRuntimeState) -> Dict[str, Any]:
+def _focus_ids_from_params(params: Mapping[str, Any] | None) -> List[str]:
+    if not isinstance(params, Mapping):
+        return []
+    focus = params.get("focus_ids")
+    if isinstance(focus, list):
+        return [str(item) for item in focus if str(item)]
+    if isinstance(focus, (str, int, float)):
+        text = str(focus)
+        return [text] if text else []
+    return []
+
+
+def _prepare_patch(state: RepairRuntimeState, patch: CGMPatch) -> tuple[str, DiffAnalysis, str]:
+    original_text = _read_original_text(state, patch.path)
+    new_text = _apply_patch_edits(original_text, patch.edits, patch.path)
+    diff_text = _build_unified_diff(original_text, new_text, patch.path)
+    analysis = _analyse_unified_diff(original_text, diff_text, patch.path)
+    return diff_text, analysis, new_text
+
+
+def handle_planner_repair(action: Mapping[str, Any] | str, state: RepairRuntimeState) -> Dict[str, Any]:
     """Execute a repair cycle given planner parameters and runtime state."""
 
-    params = action.get("params") if "params" in action else action
-    name = action.get("name") if isinstance(action, Mapping) else None
-    if name and str(name).lower() != "repair":
-        raise ValueError("handle_planner_repair expects a repair action")
+    if isinstance(action, str):
+        raw_block = action
+        raw_params: Mapping[str, Any] = {}
+    else:
+        if "raw" in action:
+            raw_block = str(action.get("raw") or "")
+        else:
+            params_obj = action.get("params") if isinstance(action, Mapping) else action
+            raw_params = params_obj if isinstance(params_obj, Mapping) else {}
+            raw_block = format_action_block("repair", raw_params)
+        raw_params = action.get("params") if isinstance(action, Mapping) and isinstance(action.get("params"), Mapping) else {}
+    parsed = parse_action_block(raw_block)
+    repair_action = validate_planner_action(parsed)
+    if repair_action.type != "repair":
+        raise ProtocolError("unknown-action", "handle_planner_repair expected a repair action")
 
-    subplan = params.get("subplan") if isinstance(params, Mapping) else None
-    if not isinstance(subplan, str) or not subplan.strip():
-        raise ValueError("repair action requires a non-empty 'subplan'")
-    focus_ids = params.get("focus_ids") if isinstance(params, Mapping) else None
-    if not isinstance(focus_ids, list):
-        focus_ids = []
-    apply_flag = params.get("apply", True) if isinstance(params, Mapping) else True
-    apply_bool = bool(apply_flag)
+    subplan_text = (repair_action.plan or "").strip()
+    focus_ids = _focus_ids_from_params(parsed.get("params"))
+    if not focus_ids:
+        focus_ids = [str(t.get("id")) for t in repair_action.plan_targets or [] if t.get("id")]
 
-    payload = build_cgm_payload(state, subplan, focus_ids)
+    payload = build_cgm_payload(state, subplan_text, focus_ids)
     with _bind_state(state):
         candidates = call_cgm(payload, k=state.cgm_top_k)
     if not candidates:
         return {"ok": False, "error": "cgm-empty", "msg": "CGM returned no candidates"}
+
     candidate = pick_best_candidate(candidates)
-    patch = str(candidate.get("patch") or "")
-    patch_path = str(candidate.get("path") or "")
     confidence = float(candidate.get("confidence", 0.0))
 
     try:
-        validate_unified_diff(patch, patch_path)
-    except ValueError as exc:
-        return {"ok": False, "error": "invalid-diff", "msg": str(exc), "confidence": confidence}
+        patch = validate_cgm_patch(candidate)
+    except ProtocolError as exc:
+        return {"ok": False, "error": exc.code, "msg": exc.detail, "confidence": confidence, "fallback_reason": exc.code}
 
-    if not apply_bool:
+    analysis: Optional[DiffAnalysis] = None
+    diff_text = ""
+    new_text = ""
+    try:
+        diff_text, analysis, new_text = _prepare_patch(state, patch)
+    except ProtocolError as exc:
+        return {
+            "ok": False,
+            "error": exc.code,
+            "msg": exc.detail,
+            "confidence": confidence,
+            "fallback_reason": exc.code,
+            "patch_id": patch_id(candidate),
+            "n_hunks": analysis.n_hunks if analysis else 0,
+            "added_lines": analysis.added_lines if analysis else 0,
+            "removed_lines": analysis.removed_lines if analysis else 0,
+        }
+
+    patch_hash = patch_id(candidate)
+    telemetry = {
+        "patch_id": patch_hash,
+        "n_hunks": analysis.n_hunks,
+        "added_lines": analysis.added_lines,
+        "removed_lines": analysis.removed_lines,
+    }
+
+    enhanced_candidate = dict(candidate)
+    enhanced_candidate.setdefault("patch", {"edits": patch.edits, "summary": patch.summary})
+    enhanced_candidate["diff"] = diff_text
+    enhanced_candidate.setdefault("path", patch.path)
+
+    if not repair_action.apply:
         return {
             "ok": True,
             "applied": False,
-            "candidate": candidate,
+            "candidate": enhanced_candidate,
             "confidence": confidence,
+            **telemetry,
         }
 
-    with _bind_state(state):
-        result = try_apply_and_test(patch_path, patch)
-    result.setdefault("confidence", confidence)
-    if result.get("ok"):
-        result.setdefault("msg", candidate.get("rationale", ""))
-        result.setdefault("candidate", candidate)
-    else:
-        result.setdefault("candidate", candidate)
-    return result
+    try:
+        with _bind_state(state):
+            result = try_apply_and_test(
+                patch.path,
+                diff_text,
+                new_content=new_text,
+                stats={
+                    "n_hunks": analysis.n_hunks,
+                    "added_lines": analysis.added_lines,
+                    "removed_lines": analysis.removed_lines,
+                },
+                patch_hash=patch_hash,
+            )
+    except ProtocolError as exc:
+        failure = {
+            "ok": False,
+            "error": exc.code,
+            "msg": exc.detail,
+            "confidence": confidence,
+            "fallback_reason": exc.code,
+            **telemetry,
+        }
+        if hasattr(state.sandbox, "reset_soft"):
+            try:
+                state.sandbox.reset_soft()
+            except Exception:  # pragma: no cover - defensive
+                pass
+        temp_path = getattr(exc, "temp_path", "")
+        if temp_path:
+            failure["temp_path"] = temp_path
+        return failure
 
+    result.setdefault("confidence", confidence)
+    result.setdefault("candidate", enhanced_candidate)
+    result.setdefault("msg", candidate.get("rationale", ""))
+    result.update({k: v for k, v in telemetry.items() if k not in result})
+    result.setdefault("temp_path", result.get("temp_path", ""))
+    result["applied"] = bool(result.get("applied"))
+    return result

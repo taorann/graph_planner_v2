@@ -12,6 +12,7 @@ import logging
 import os
 import random
 import warnings
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, Tuple
 
@@ -24,6 +25,21 @@ try:  # pragma: no cover - torch is an optional dependency for docs CI
 except Exception:  # pragma: no cover - torch missing on docs builds
     torch = None  # type: ignore[assignment]
 
+from graph_planner.infra.config import (
+    build_cli_overrides,
+    default_training_run_config,
+    load_run_config_file,
+    merge_run_config,
+    serialise_resolved_config,
+    update_args_from_config,
+)
+from graph_planner.infra.metrics import (
+    init_wandb,
+    log_metrics,
+    make_gpu_snapshot,
+    make_ray_snapshot,
+)
+from graph_planner.infra.parallel import preflight_check, resolve_parallel
 from graph_planner.infra.vendor import ensure_rllm_importable, find_in_rllm
 
 ensure_rllm_importable()
@@ -68,6 +84,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-split", default="train")
     parser.add_argument("--val-dataset", type=Path, default=None)
     parser.add_argument("--val-split", default="val")
+    parser.add_argument("--config-file", type=Path, default=None, help="High-level YAML configuration file.")
+    parser.add_argument(
+        "--yaml-only",
+        action="store_true",
+        help="Use YAML configuration exclusively (no CLI overrides besides path flags).",
+    )
     parser.add_argument(
         "--model-path",
         type=Path,
@@ -527,12 +549,47 @@ def main() -> None:
 
     args = _parse_args()
 
+    defaults = default_training_run_config(args.agent)
+    yaml_cfg = load_run_config_file(getattr(args, "config_file", None))
+    cli_overrides = build_cli_overrides(args, mode="train")
+    if args.yaml_only and cli_overrides:
+        LOGGER.info("--yaml-only enabled; ignoring CLI overrides: %s", sorted(cli_overrides.keys()))
+        cli_overrides = {}
+
+    final_run_cfg = merge_run_config(defaults, yaml_cfg, cli_overrides, yaml_only=args.yaml_only)
+    wandb_cfg = final_run_cfg.setdefault("logging", {}).setdefault("wandb", {})
+    if not wandb_cfg.get("run_name"):
+        wandb_cfg["run_name"] = f"{args.agent}-run"
+    run_name = wandb_cfg["run_name"]
+
+    update_args_from_config(args, final_run_cfg)
+
     if args.model_path is None:
         default_model = DEFAULT_PLANNER_MODEL_PATH if args.agent == "planner" else DEFAULT_CGM_MODEL_PATH
         args.model_path = default_model
+        key = "planner_model" if args.agent == "planner" else "cgm_model"
+        final_run_cfg.setdefault("paths", {})[key] = str(default_model)
+
+    output_base = Path(
+        final_run_cfg.get("logging", {}).get("output_dir")
+        or getattr(args, "output_dir", None)
+        or args.model_path
+    )
+    if not run_name:
+        run_name = f"{args.agent}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        wandb_cfg["run_name"] = run_name
+    run_dir = output_base / run_name
+    final_run_cfg.setdefault("logging", {})["resolved_run_dir"] = str(run_dir)
+    resolved_cfg_path = run_dir / "resolved_config.yaml"
+    final_run_cfg["logging"]["resolved_config_path"] = str(resolved_cfg_path)
+    serialise_resolved_config(final_run_cfg, resolved_cfg_path)
+    args.output_dir = run_dir
+
+    pcfg = resolve_parallel(final_run_cfg)
+    preflight_check(pcfg)
 
     logging.basicConfig(level=logging.INFO)
-    _seed_everything(args.seed)
+    _seed_everything(getattr(args, "seed", None))
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     os.environ.setdefault("OMP_NUM_THREADS", "1")
 
@@ -596,6 +653,29 @@ def main() -> None:
         output_dir=output_dir,
     )
 
+    wandb_run = init_wandb(
+        enabled=bool(wandb_cfg.get("enabled", False)),
+        offline=bool(wandb_cfg.get("offline", False)),
+        project=wandb_cfg.get("project") or "graph_planner",
+        entity=wandb_cfg.get("entity"),
+        run_name=wandb_cfg.get("run_name", run_name),
+        config=final_run_cfg,
+    )
+    parallel_metrics = {
+        "parallel/tensor_parallel_planner": pcfg.tensor_parallel_planner,
+        "parallel/tensor_parallel_cgm": pcfg.tensor_parallel_cgm,
+        "parallel/replicas": pcfg.replicas,
+        "parallel/agents": pcfg.parallel_agents,
+        "parallel/workers": pcfg.rollout_workers,
+        "parallel/workflow_parallel": pcfg.workflow_parallel,
+        "resources/num_gpus": pcfg.num_gpus,
+        "resources/ray_gpus": pcfg.ray_num_gpus,
+        "resources/ray_cpus": pcfg.ray_num_cpus,
+    }
+    gpu_snapshot = make_gpu_snapshot()
+    ray_snapshot = make_ray_snapshot()
+    log_metrics(0, {**parallel_metrics, **gpu_snapshot(), **ray_snapshot()})
+
     if args.print_config:
         print(OmegaConf.to_yaml(cfg))
         return
@@ -618,6 +698,12 @@ def main() -> None:
         os.environ.setdefault("RAY_ADDRESS", args.ray_address)
 
     trainer.train()
+
+    if wandb_run is not None:  # pragma: no cover - network side effect
+        try:
+            wandb_run.finish()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Protocol
 
 from ..common import text_protocol
+from ..common.contracts import ProtocolError, parse_action_block, validate_planner_action
 from ..common.chat import (
     FALLBACK_REASON_KEY,
     SYSTEM_PROMPT,
@@ -24,21 +25,6 @@ from ...core.actions import (
 )
 from ...infra.config import Config, load as load_config
 from ...integrations.local_llm import LocalLLMError, build_planner_client
-ALLOWED_ACTIONS = {"explore", "memory", "repair", "submit", "noop"}
-
-
-def _safe_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"false", "0", "no", "off"}:
-            return False
-        if lowered in {"true", "1", "yes", "on"}:
-            return True
-    return bool(value)
 
 
 @dataclass
@@ -163,25 +149,36 @@ class LocalLLMPlannerAgent:
     def _parse_model_response(
         self, response: str, obs: Dict[str, Any]
     ) -> tuple[str, ActionUnion, str, Dict[str, Any]]:
+        parsed: Dict[str, Any] | None = None
+        raw_params: Dict[str, Any] = {}
         try:
-            block = text_protocol.parse_action_block(response, ALLOWED_ACTIONS)
-        except text_protocol.ActionParseError as exc:
-            return self._fallback_tuple(obs, "parse_error", response, error=str(exc))
+            parsed = parse_action_block(response)
+            raw_params = dict(parsed.get("params") or {})
+            thought = str(raw_params.get("thought", "")).strip()
+            params = dict(raw_params)
+            params.pop("thought", None)
+            action_obj = validate_planner_action(parsed)
+        except ProtocolError as exc:
+            return self._fallback_tuple(
+                obs,
+                exc.code,
+                response,
+                raw_action=parsed,
+                error=exc.detail,
+            )
+        except Exception as exc:
+            return self._fallback_tuple(obs, "invalid-action", response, raw_action=parsed, error=str(exc))
 
-        params = dict(block.get("params") or {})
-        thought = str(params.pop("thought", "")).strip()
-        try:
-            action_obj = self._action_from_block(block.get("name"), params)
-        except ValueError as exc:
-            return self._fallback_tuple(obs, "invalid_action", response, raw_action=params, error=str(exc))
+        if isinstance(action_obj, RepairAction) and self.state.issue:
+            action_obj = action_obj.copy(update={"issue": dict(self.state.issue)})
 
         meta = {
             "used_fallback": False,
-            "raw_action": {"name": block.get("name"), "params": params},
+            "raw_action": parsed or {},
         }
         assistant_msg = response or text_protocol.format_action_block(
-            str(block.get("name") or "noop"),
-            {"thought": thought, **params},
+            str(parsed.get("name") if parsed else "noop"),
+            raw_params if parsed else {},
         )
         return thought, action_obj, assistant_msg, meta
 
@@ -236,82 +233,6 @@ class LocalLLMPlannerAgent:
         if error:
             meta["error"] = error
         return thought, action, assistant_msg, meta
-
-    def _action_from_block(self, name: Any, params: Dict[str, Any]) -> ActionUnion:
-        action_name = str(name or "").lower()
-        if action_name == "explore":
-            op = str(params.get("op") or "expand").lower()
-            anchors = self._ensure_dict_list(params.get("anchors"))
-            nodes = self._ensure_str_list(params.get("nodes"))
-            hop = self._safe_int(params.get("hop"), 1)
-            limit = self._safe_int(params.get("limit"), 50)
-            return ExploreAction(op=op, anchors=anchors, nodes=nodes, hop=hop, limit=limit)
-        if action_name == "memory":
-            target = str(params.get("target", "explore"))
-            scope = str(params.get("scope", "turn"))
-            intent = str(params.get("intent", "commit"))
-            selector = params.get("selector")
-            if isinstance(selector, (list, dict)):
-                selector = json.dumps(selector, ensure_ascii=False)
-            return MemoryAction(target=target, scope=scope, intent=intent, selector=selector)
-        if action_name == "repair":
-            subplan = params.get("subplan")
-            if not isinstance(subplan, str) or not subplan.strip():
-                raise ValueError("repair action requires non-empty subplan")
-            focus_ids = self._ensure_str_list(params.get("focus_ids"))
-            apply_flag = _safe_bool(params.get("apply", True))
-            plan_targets = [
-                {"id": fid, "why": "planner-focus"}
-                for fid in focus_ids
-                if fid
-            ]
-            return RepairAction(
-                apply=apply_flag,
-                issue=dict(self.state.issue or {}),
-                plan=subplan.strip(),
-                plan_targets=plan_targets,
-                patch=None,
-            )
-        if action_name == "submit":
-            return SubmitAction()
-        if action_name == "noop":
-            return NoopAction()
-        raise ValueError(f"unsupported action '{action_name}'")
-
-    def _ensure_str_list(self, value: Any) -> List[str]:
-        if value is None:
-            return []
-        if isinstance(value, str):
-            return [value] if value else []
-        if isinstance(value, Iterable):
-            result: List[str] = []
-            for item in value:
-                if isinstance(item, str):
-                    if item:
-                        result.append(item)
-                elif isinstance(item, (int, float)):
-                    result.append(str(item))
-            return result
-        return []
-
-    def _ensure_dict_list(self, value: Any) -> List[Dict[str, Any]]:
-        if value is None:
-            return []
-        if isinstance(value, dict):
-            return [dict(value)]
-        if isinstance(value, Iterable):
-            result: List[Dict[str, Any]] = []
-            for item in value:
-                if isinstance(item, dict):
-                    result.append(dict(item))
-            return result
-        return []
-
-    def _safe_int(self, value: Any, default: int) -> int:
-        try:
-            return int(value)
-        except Exception:
-            return default
 
     def _normalise_metadata(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
         try:

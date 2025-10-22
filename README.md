@@ -52,18 +52,25 @@ tests/             # FakeSandbox 测试与 CGM 适配器回归
 
 3. **启动强化学习训练（需要 rLLM + Docker 环境）**
    ```bash
-  PYTHONPATH=. python scripts/train_graphplanner_rllm.py \
-    --agent planner \
-    --dataset datasets/r2e_gym/graphplanner_repoenv_train.jsonl \
-    --model-path models/qwen3-14b-instruct \
-    --cgm-model-path models/codefuse-cgm \
-    --print-config
+   PYTHONPATH=. python scripts/train_graphplanner_rllm.py \
+     --config-file configs/experiments/planner_debug.yaml \
+     --dataset datasets/r2e_gym/graphplanner_repoenv_train.jsonl \
+     --model-path models/qwen3-14b-instruct \
+     --cgm-model-path models/codefuse-cgm \
+     --print-config
    ```
-   如需联动 CGM，可额外传入 `--cgm-model-path`；命令会在真正启动前打印最终 Hydra 配置，便于核对 `trainer.*` 覆写。详细准备步骤见 `docs/graph_planner_architecture_pipeline.md` 的“4.3 Planner / CGM 强化学习”章节。
+   命令会按“内置默认 < YAML < CLI”优先级合并配置，并在 `outputs/<run_name>/resolved_config.yaml` 中保存最终参数。更多示例（单卡/8 卡/16 卡）与 W&B 监控说明见 [`docs/runbook.md`](docs/runbook.md)。
+
+4. **合同冒烟检查**
+   ```bash
+   PYTHONPATH=. python scripts/validate_contracts.py
+   ```
+   该脚本会调用解析器与补丁校验器，以确保 Planner/CGM 的协议未发生漂移。
 
 ## 文档索引
 
 - [`docs/graph_planner_architecture_pipeline.md`](docs/graph_planner_architecture_pipeline.md)：端到端架构、RepoEnv 冒烟指引与训练命令速查。
+- [`docs/runbook.md`](docs/runbook.md)：rLLM 训练/评估配置、YAML-only 模式、并行预检与 W&B 监控指南。
 
 若需进一步了解 ACI 工具链与 Git 封装的使用方式，请参见 `docs/scripts_and_tests_guide.md` 中的“ACI / Git / Lint / Test 的实现来源”章节。
 
