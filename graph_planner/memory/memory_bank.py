@@ -1,3 +1,4 @@
+# 2025-10-22 memory hardening
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 """
@@ -26,7 +27,7 @@ import json
 import time
 
 from aci._utils import repo_root
-from memory import subgraph_store
+from . import subgraph_store
 
 __all__ = ["MemoryItem", "MemoryBank", "ApplyPolicy", "apply_ops"]
 
@@ -159,7 +160,7 @@ class ApplyPolicy:
 
     # 安全策略
     forbid_delete_tfile: bool = True
-    forbid_pure_delete_epoch: bool = True
+    forbid_pure_delete: bool = True
 
 
 def _dirname(path: Optional[str]) -> str:
@@ -218,7 +219,15 @@ def apply_ops(
     # 按优先级去重：UPDATE > ADD > DELETE > KEEP > NOOP
     prio = {"UPDATE": 3, "ADD": 2, "DELETE": 1, "KEEP": 0, "NOOP": -1}
     by_id: Dict[str, Dict[str, Any]] = {}
-    for o in sorted(ops or [], key=lambda x: (prio.get(x.get("op"), -1), float(x.get("confidence") or 0.0)), reverse=True):
+    for o in sorted(
+        ops or [],
+        key=lambda x: (
+            prio.get(x.get("op"), -1),
+            float(x.get("score") or 0.0),
+            float(x.get("confidence") or 0.0),
+        ),
+        reverse=True,
+    ):
         nid = o.get("id")
         if not nid:
             continue
@@ -236,6 +245,21 @@ def apply_ops(
     updates = [o for o in updates if o.get("id") in current_ids]
     deletes = [o for o in deletes if o.get("id") in current_ids]
 
+    updates.sort(
+        key=lambda o: (
+            float(o.get("score") or 0.0),
+            float(o.get("confidence") or 0.0),
+        ),
+        reverse=True,
+    )
+    deletes.sort(
+        key=lambda o: (
+            float(o.get("score") or 0.0),
+            float(o.get("confidence") or 0.0),
+        ),
+        reverse=True,
+    )
+
     # 安全：禁止删除 t-file（可通过 policy 放开）
     if policy.forbid_delete_tfile:
         deletes = [o for o in deletes if not _is_tfile(o)]
@@ -248,7 +272,8 @@ def apply_ops(
 
     # 目录多样性 + t-file 轻度偏好：选择 ADD
     for a in adds:
-        base = float(a.get("confidence") or 0.6) + float(a.get("score") or 0.0) * 0.1
+        base = float(a.get("confidence") or 0.6)
+        base += float(a.get("score") or 0.0)
         if policy.prefer_test_files and _is_tfile(a):
             base += 0.12
         a["__sel_score"] = base
@@ -308,10 +333,11 @@ def apply_ops(
     selected_adds = tmp
 
     # 不允许“纯删除回合”（更稳健）
-    if policy.forbid_pure_delete_epoch and (not selected_adds) and (not updates) and deletes:
+    if policy.forbid_pure_delete and (not selected_adds) and (not updates) and deletes:
         deletes = []
 
     # 执行写操作
+    before_stats = dict(current_stats)
     applied = {"ADD": [], "UPDATE": [], "DELETE": [], "SKIPPED": []}
 
     # ADD：把 MemOp 映射为最小 Node 字段
@@ -375,8 +401,8 @@ def apply_ops(
             "prefer_test_files": policy.prefer_test_files,
             "max_tfile_fraction": policy.max_tfile_fraction,
             "forbid_delete_tfile": policy.forbid_delete_tfile,
-            "forbid_pure_delete_epoch": policy.forbid_pure_delete_epoch,
+            "forbid_pure_delete": policy.forbid_pure_delete,
         },
-        "before": subgraph_store.stats(subgraph) or {},
+        "before": before_stats,
         "after": final_stats,
     }

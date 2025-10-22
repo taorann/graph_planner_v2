@@ -14,9 +14,10 @@ class ExploreAction(BaseModel):
 # B) Memory（记忆维护，外部只给策略信号）
 class MemoryAction(BaseModel):
     type: Literal["memory"] = "memory"
-    ops: List[Dict[str, Any]] = Field(default_factory=list)
-    budget: int = 30
-    diversify_by_dir: int = 3
+    target: Literal["explore", "observation"] = "explore"
+    scope: Literal["turn", "session"] = "turn"
+    intent: Literal["commit", "delete"] = "commit"
+    selector: Optional[str] = None
 
 # C) Repair（是否打补丁；仅 apply=True 需要 plan）
 class RepairAction(BaseModel):
@@ -31,4 +32,8 @@ class RepairAction(BaseModel):
 class SubmitAction(BaseModel):
     type: Literal["submit"] = "submit"
 
-ActionUnion = Union[ExploreAction, MemoryAction, RepairAction, SubmitAction]
+class NoopAction(BaseModel):
+    type: Literal["noop"] = "noop"
+
+
+ActionUnion = Union[ExploreAction, MemoryAction, RepairAction, SubmitAction, NoopAction]

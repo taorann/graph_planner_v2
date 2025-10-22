@@ -49,7 +49,9 @@ class PlannerAgent:
         if self.state.phase == "expand":
             return self._act_expand(obs)
         if self.state.phase == "memory":
-            return self._wrap_action(MemoryAction())
+            return self._wrap_action(
+                MemoryAction(target="explore", scope="session", intent="commit", selector="latest")
+            )
         if self.state.phase == "read":
             return self._act_read()
         if self.state.phase == "plan":

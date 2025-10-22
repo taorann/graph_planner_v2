@@ -1,9 +1,12 @@
 # graph_planner/runtime/sandbox.py
-import os, json, random, string, time
+import os, json, random, string, time, shutil, tempfile
 from dataclasses import dataclass
-from typing import Optional, Dict, List, Tuple, Any
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 import docker
+
+from ..agents.common.contracts import CGM_CONTRACT, CGMPatchErrorCode, ProtocolError, normalize_newlines
 
 # 遥测
 from ..infra import telemetry as telemetry_mod
@@ -334,3 +337,205 @@ class SandboxRuntime:
             except Exception: pass
             try: self.container.remove(force=True)
             except Exception: pass
+
+
+class PatchApplier:
+    """Apply unified diffs in a temporary workspace before committing changes."""
+
+    def __init__(self) -> None:
+        self._applied: Dict[str, set[str]] = {}
+
+    def apply_in_temp_then_commit(
+        self,
+        repo_root: Path,
+        patch_text: str,
+        path: str,
+        run_tests: Callable[[Path], Mapping[str, Any]],
+        run_lint: Optional[Callable[[Path], Mapping[str, Any]]] = None,
+        patch_id: Optional[str] = None,
+        *,
+        new_content: Optional[str] = None,
+        stats: Optional[Mapping[str, int]] = None,
+    ) -> Dict[str, Any]:
+        """Validate, trial, and commit a patch atomically.
+
+        Parameters
+        ----------
+        repo_root:
+            Root directory of the working repository on the host filesystem.
+        patch_text:
+            Unified diff text generated from the CGM candidate.
+        path:
+            Relative file path within ``repo_root`` touched by the patch.
+        run_tests / run_lint:
+            Callbacks executed inside the temporary copy. They must accept a
+            ``Path`` argument pointing to the trial workspace and return a
+            mapping containing status flags (``passed``/``ok``) and optional
+            logs. ``run_lint`` is optional.
+        patch_id:
+            Optional deterministic identifier used to detect duplicate
+            applications.
+        new_content:
+            Optional fully materialised file contents. When omitted the diff is
+            applied to the current workspace to derive the new text.
+        stats:
+            Optional telemetry dictionary with ``n_hunks``/``added_lines``/
+            ``removed_lines`` counters.
+        """
+
+        repo_root = Path(repo_root)
+        if not repo_root.exists():
+            raise ProtocolError(CGMPatchErrorCode.PATH_MISSING.value, f"repo root '{repo_root}' does not exist")
+
+        normalized_path = path.strip()
+        if not normalized_path:
+            raise ProtocolError(CGMPatchErrorCode.PATH_MISSING.value, "patch path is empty")
+
+        if patch_id:
+            applied = self._applied.setdefault(normalized_path, set())
+            if patch_id in applied:
+                raise ProtocolError(CGMPatchErrorCode.DUPLICATE_PATCH.value, f"patch {patch_id} already applied to {normalized_path}")
+
+        source_file = repo_root.joinpath(normalized_path)
+        if not source_file.exists():
+            raise ProtocolError(CGMPatchErrorCode.PATH_MISSING.value, f"target file '{normalized_path}' not found")
+
+        try:
+            original_text = normalize_newlines(source_file.read_text(encoding="utf-8"))
+        except UnicodeDecodeError as exc:
+            error = ProtocolError(
+                CGMPatchErrorCode.ENCODING_UNSUPPORTED.value,
+                f"file '{normalized_path}' is not UTF-8 encoded: {exc}",
+            )
+            error.__cause__ = exc
+            raise error
+
+        if new_content is None:
+            analysis = _analyse_diff_fallback(original_text, patch_text, normalized_path)
+            new_text = analysis.new_text
+            computed_stats = {
+                "n_hunks": analysis.n_hunks,
+                "added_lines": analysis.added_lines,
+                "removed_lines": analysis.removed_lines,
+            }
+        else:
+            new_text = normalize_newlines(new_content)
+            computed_stats = {
+                "n_hunks": int((stats or {}).get("n_hunks", 0)),
+                "added_lines": int((stats or {}).get("added_lines", 0)),
+                "removed_lines": int((stats or {}).get("removed_lines", 0)),
+            }
+
+        if CGM_CONTRACT.constraints.get("newline_required") and not new_text.endswith("\n"):
+            raise ProtocolError(CGMPatchErrorCode.NEWLINE_MISSING.value, f"resulting file '{normalized_path}' must end with newline")
+
+        temp_dir = Path(tempfile.mkdtemp(prefix="gp-patch-", dir=str(repo_root.parent)))
+        try:
+            trial_root = temp_dir
+            shutil.copytree(repo_root, trial_root, dirs_exist_ok=True)
+            trial_file = trial_root.joinpath(normalized_path)
+            trial_file.parent.mkdir(parents=True, exist_ok=True)
+            trial_file.write_text(new_text, encoding="utf-8")
+
+            lint_result = run_lint(trial_root) if run_lint else {"ok": True, "stdout": ""}
+            lint_ok = bool(lint_result.get("ok"))
+            if not lint_ok:
+                error = ProtocolError("lint-failed", lint_result.get("stdout", "lint failed"))
+                error.temp_path = temp_dir.name  # type: ignore[attr-defined]
+                error.n_hunks = computed_stats["n_hunks"]  # type: ignore[attr-defined]
+                error.added_lines = computed_stats["added_lines"]  # type: ignore[attr-defined]
+                error.removed_lines = computed_stats["removed_lines"]  # type: ignore[attr-defined]
+                raise error
+
+            tests_result = run_tests(trial_root)
+            tests_passed = bool(tests_result.get("passed"))
+            if not tests_passed:
+                error = ProtocolError("build-failed", tests_result.get("stdout", "tests failed"))
+                error.temp_path = temp_dir.name  # type: ignore[attr-defined]
+                error.n_hunks = computed_stats["n_hunks"]  # type: ignore[attr-defined]
+                error.added_lines = computed_stats["added_lines"]  # type: ignore[attr-defined]
+                error.removed_lines = computed_stats["removed_lines"]  # type: ignore[attr-defined]
+                raise error
+
+            temp_target = trial_file
+            final_path = source_file
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_file = final_path.parent.joinpath(f".{final_path.name}.gp_tmp")
+            tmp_file.write_text(new_text, encoding="utf-8")
+            with tmp_file.open("rb") as fh:
+                os.fsync(fh.fileno())
+            os.replace(tmp_file, final_path)
+            if patch_id:
+                self._applied.setdefault(normalized_path, set()).add(patch_id)
+            return {
+                "ok": True,
+                "applied": True,
+                "path": normalized_path,
+                "tests_passed": tests_passed,
+                "lint_ok": lint_ok,
+                "tests": tests_result,
+                "lint": lint_result,
+                "n_hunks": computed_stats["n_hunks"],
+                "added_lines": computed_stats["added_lines"],
+                "removed_lines": computed_stats["removed_lines"],
+                "temp_path": temp_dir.name,
+            }
+        except ProtocolError as exc:
+            if not hasattr(exc, "temp_path"):
+                exc.temp_path = temp_dir.name  # type: ignore[attr-defined]
+                exc.n_hunks = computed_stats["n_hunks"]  # type: ignore[attr-defined]
+                exc.added_lines = computed_stats["added_lines"]  # type: ignore[attr-defined]
+                exc.removed_lines = computed_stats["removed_lines"]  # type: ignore[attr-defined]
+            raise
+        except Exception as exc:  # pragma: no cover - defensive
+            error = ProtocolError(CGMPatchErrorCode.DIRTY_WORKSPACE.value, str(exc))
+            error.temp_path = temp_dir.name  # type: ignore[attr-defined]
+            error.n_hunks = computed_stats["n_hunks"]  # type: ignore[attr-defined]
+            error.added_lines = computed_stats["added_lines"]  # type: ignore[attr-defined]
+            error.removed_lines = computed_stats["removed_lines"]  # type: ignore[attr-defined]
+            raise error
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _analyse_diff_fallback(original_text: str, diff_text: str, path: str) -> "DiffAnalysis":
+    """Fallback diff analysis shared with :class:`PatchApplier`."""
+
+    diff_text = normalize_newlines(diff_text)
+    lines = diff_text.splitlines()
+    added = removed = n_hunks = 0
+    new_lines: List[str] = []
+    original_lines = original_text.splitlines()
+    idx = 0
+    current_orig = 0
+    while idx < len(lines):
+        line = lines[idx]
+        if line.startswith("@@ "):
+            n_hunks += 1
+            idx += 1
+            while idx < len(lines):
+                segment = lines[idx]
+                if segment.startswith("@@ ") or segment.startswith("diff --git") or segment.startswith("--- ") or segment.startswith("+++ "):
+                    break
+                if segment.startswith(" "):
+                    if current_orig < len(original_lines):
+                        new_lines.append(original_lines[current_orig])
+                        current_orig += 1
+                elif segment.startswith("-"):
+                    removed += 1
+                    current_orig += 1
+                elif segment.startswith("+"):
+                    added += 1
+                    new_lines.append(segment[1:])
+                idx += 1
+            continue
+        idx += 1
+    new_lines.extend(original_lines[current_orig:])
+    new_text = "\n".join(new_lines) + "\n"
+    class DiffAnalysis:  # local alias to avoid importing from agents
+        def __init__(self, new_text: str, n_hunks: int, added_lines: int, removed_lines: int) -> None:
+            self.new_text = new_text
+            self.n_hunks = n_hunks
+            self.added_lines = added_lines
+            self.removed_lines = removed_lines
+    return DiffAnalysis(new_text, n_hunks, added, removed)
