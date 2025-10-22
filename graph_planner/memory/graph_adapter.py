@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
+# 2025-10-22 memory hardening
 """
 memory/graph_adapter.py  —— 完整版
 
@@ -34,6 +35,10 @@ from aci._utils import repo_root, list_text_files, safe_read_text
 from .types import Node, Edge, Anchor, DocChunk
 
 
+def _norm_posix(path: str | None) -> str:
+    return (path or "").replace("\\", "/")
+
+
 # ---------------- Graph Handle ----------------
 
 class GraphHandle:
@@ -44,6 +49,9 @@ class GraphHandle:
         self.rev: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
 
     def add_node(self, node: Node):
+        if "path" in node:
+            node = dict(node)
+            node["path"] = _norm_posix(node.get("path"))
         self.nodes[node["id"]] = node
 
     def add_edge(self, src: str, dst: str, etype: str):
@@ -162,6 +170,7 @@ def _find_nodes_by_anchor(graph: GraphHandle, anchor: Anchor) -> List[Node]:
 
     kind = (anchor.get("kind") or "symbol").lower()
     text = (anchor.get("text") or "").strip()
+    text_lower = text.lower()
     if not text:
         return []
 
@@ -169,7 +178,10 @@ def _find_nodes_by_anchor(graph: GraphHandle, anchor: Anchor) -> List[Node]:
     out: List[Node] = []
     if kind == "file":
         for n in graph.nodes.values():
-            if n["kind"] == "file" and text in n.get("path", ""):
+            if n["kind"] != "file":
+                continue
+            path = _norm_posix(n.get("path"))
+            if text_lower in path.lower():
                 out.append(n)
         out.sort(key=lambda n: len(n.get("path", "")))  # 路径短优先
         return out[:50]
@@ -177,16 +189,16 @@ def _find_nodes_by_anchor(graph: GraphHandle, anchor: Anchor) -> List[Node]:
     # function/class/symbol：按 name 匹配
     def score(n: Node) -> Tuple[int, int]:
         name = n.get("name") or ""
-        if name == text:
+        if name.lower() == text_lower:
             return (0, len(name))
-        if text in name:
+        if text_lower in name.lower():
             return (1, len(name))
         return (9, len(name))
 
     for n in graph.nodes.values():
         if n["kind"] in ("function", "class", "symbol"):
             nm = (n.get("name") or "")
-            if nm == text or text in nm:
+            if nm.lower() == text_lower or text_lower in nm.lower():
                 out.append(n)
 
     if out:
@@ -195,7 +207,10 @@ def _find_nodes_by_anchor(graph: GraphHandle, anchor: Anchor) -> List[Node]:
 
     # 回退：按文件基名匹配
     for n in graph.nodes.values():
-        if n["kind"] == "file" and text in os.path.basename(n.get("path", "")):
+        if n["kind"] != "file":
+            continue
+        path = _norm_posix(n.get("path"))
+        if text_lower in os.path.basename(path).lower():
             out.append(n)
     out.sort(key=lambda n: len(n.get("path", "")))
     return out[:50]
@@ -236,7 +251,7 @@ def _one_hop_expand(graph: GraphHandle,
 
     # 2) 同文件兄弟节点
     for n in anchor_nodes:
-        path = n.get("path")
+        path = _norm_posix(n.get("path"))
         if not path:
             continue
         file_node_id = _file_node_id(path)
@@ -255,12 +270,12 @@ def _one_hop_expand(graph: GraphHandle,
 
     # 3) 同目录下其它文件（轻度）
     for n in anchor_nodes:
-        path = n.get("path")
+        path = _norm_posix(n.get("path"))
         if not path:
             continue
         d = os.path.dirname(path)
         for nn in graph.nodes.values():
-            if nn["kind"] == "file" and os.path.dirname(nn.get("path", "")) == d:
+            if nn["kind"] == "file" and os.path.dirname(_norm_posix(nn.get("path"))) == d:
                 if nn["id"] in seen:
                     continue
                 results.append(nn)
@@ -311,30 +326,28 @@ def _build_light_graph(gh: GraphHandle) -> None:
     """
     root = gh.root
     # add file nodes
-    files = list_text_files(root, include_exts=None)
+    files = list_text_files(root, include_exts=[".py"])
     for f in files:
-        rel = os.path.relpath(f, root)
+        rel = _norm_posix(os.path.relpath(f, root))
         nid = _file_node_id(rel)
         gh.add_node({"id": nid, "kind": "file", "path": rel, "name": "", "degree": 0})
     # python-specific enrich
     for f in files:
-        if not f.endswith(".py"):
-            continue
-        rel = os.path.relpath(f, root)
+        rel = _norm_posix(os.path.relpath(f, root))
         _add_python_contains(gh, rel)
         _add_python_imports(gh, rel)
 
 
 def _file_node_id(rel_path: str) -> str:
-    return f"file:{rel_path}"
+    return f"file:{_norm_posix(rel_path)}"
 
 
 def _func_node_id(rel_path: str, name: str, lineno: int) -> str:
-    return f"func:{rel_path}#{name}@{lineno}"
+    return f"func:{_norm_posix(rel_path)}#{name}@{lineno}"
 
 
 def _class_node_id(rel_path: str, name: str, lineno: int) -> str:
-    return f"class:{rel_path}#{name}@{lineno}"
+    return f"class:{_norm_posix(rel_path)}#{name}@{lineno}"
 
 
 def _normalize_node(data: Dict[str, Any], root: str) -> Node:
@@ -356,6 +369,7 @@ def _normalize_node(data: Dict[str, Any], root: str) -> Node:
     path = data.get("path") or ""
     if path and os.path.isabs(path):
         path = os.path.relpath(path, root)
+    path = _norm_posix(path)
 
     node: Node = {
         "id": nid,
@@ -432,7 +446,7 @@ def _add_python_imports(gh: GraphHandle, rel_path: str) -> None:
 def _mod_to_path(mod: str) -> Optional[str]:
     # naive: a.b.c -> a/b/c.py
     p = mod.replace(".", "/") + ".py"
-    return p
+    return _norm_posix(p)
 
 
 def _resolve_from(pkg_dir: str, mod: str, level: int) -> Optional[str]:
@@ -445,14 +459,14 @@ def _resolve_from(pkg_dir: str, mod: str, level: int) -> Optional[str]:
     else:
         p = os.path.join(base, "__init__.py")
     norm = os.path.normpath(p)
-    return norm
+    return _norm_posix(norm)
 
 
 def _link_if_exists(gh: GraphHandle, src_nid: str, target_rel: str, etype: str):
-    target_rel = os.path.normpath(target_rel)
+    target_rel = _norm_posix(os.path.normpath(target_rel))
     candidate_files = [target_rel]
     if target_rel.endswith(".py"):
-        candidate_files.append(os.path.join(target_rel[:-3], "__init__.py"))
+        candidate_files.append(_norm_posix(os.path.join(target_rel[:-3], "__init__.py")))
     for rel in candidate_files:
         nid = _file_node_id(rel)
         if nid in gh.nodes:
