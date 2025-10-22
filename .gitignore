@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+datasets/r2e_gym/instances/
+datasets/swebench/instances/
+datasets/swebench/*.jsonl
