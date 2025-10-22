@@ -1,3 +1,4 @@
+# 2025-10-22 memory hardening
 """Text-trajectory memory helpers for planner environments.
 
 This module implements the lightweight memory layer described in the
@@ -14,7 +15,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Protocol, Tuple
 
-from ..agents.common.contracts import parse_action_block as _parse_action_block
+from ..agents.common.contracts import ProtocolError, parse_action_block as _parse_action_block
 
 __all__ = [
     "parse_action_block",
@@ -34,14 +35,17 @@ __all__ = [
 ]
 
 
+_CHANNEL = "memory"
+
+
 def parse_action_block(text: str, allowed: Iterable[str]) -> Dict[str, Any]:
-    """Delegate to the shared parser used by the planner agents.
+    """Parse a planner block and enforce an allowed-action whitelist."""
 
-    The wrapper is provided so the memory layer exposes the exact API required
-    by the system prompt specification without duplicating the parser logic.
-    """
-
-    return _parse_action_block(text)
+    result = _parse_action_block(text)
+    allowed_set = set(allowed or [])
+    if allowed_set and result.get("name") not in allowed_set:
+        raise ProtocolError("unknown-action", f"action '{result.get('name')}' not allowed")
+    return result
 
 
 def emit_observation(name: str, data: Mapping[str, Any]) -> str:
@@ -114,6 +118,7 @@ class TurnState:
     size: Size = field(default_factory=Size)
     version: int = 0
     note_tokens: MutableMapping[Tuple[str, int], int] = field(default_factory=dict)
+    frontier_history: List[Tuple[str, int]] = field(default_factory=list)
 
     def next_version(self) -> int:
         self.version += 1
@@ -198,8 +203,8 @@ def _note_from_explore(obs: Mapping[str, Any]) -> str:
             continue
         path = cand.get("path") or cand.get("file") or "?"
         span = cand.get("span") or {}
-        start = span.get("start")
-        end = span.get("end")
+        start = int(span.get("start") or 0) if isinstance(span, Mapping) else 0
+        end = int(span.get("end") or 0) if isinstance(span, Mapping) else 0
         score = cand.get("score")
         rows.append(f"{path}:{start}-{end} (score={score})")
     return "Explore committed:\n" + "\n".join(rows)
@@ -238,6 +243,54 @@ def _caps_dict(caps: Mapping[str, int]) -> Dict[str, int]:
     return {str(k): int(v) for k, v in (caps or {}).items()}
 
 
+def _clone_size(size: Size) -> Size:
+    return Size(
+        nodes=size.nodes,
+        edges=size.edges,
+        frontier=size.frontier,
+        planner_tokens_est=size.planner_tokens_est,
+        cgm_tokens_est=size.cgm_tokens_est,
+    )
+
+
+def _normalize_explore_selector(selector: Any) -> Optional[str]:
+    if selector is None:
+        return None
+    if isinstance(selector, str):
+        value = selector.strip()
+        return value or None
+    if isinstance(selector, Mapping):
+        tag = selector.get("tag")
+        if isinstance(tag, str):
+            value = tag.strip()
+            return value or None
+    return None
+
+
+def _normalize_observation_selector(selector: Any) -> Tuple[Optional[str], bool]:
+    if selector is None:
+        return (None, True)
+    if isinstance(selector, str):
+        value = selector.strip()
+        if not value:
+            return (None, True)
+        if value.lower() == "latest":
+            return ("latest", True)
+        try:
+            num = int(value)
+        except ValueError:
+            return (value, False)
+        return (str(num), True)
+    if isinstance(selector, Mapping):
+        for key in ("id", "note_id"):
+            if key in selector:
+                return _normalize_observation_selector(selector[key])
+        return (None, False)
+    if isinstance(selector, (int, float)):
+        return (str(int(selector)), True)
+    return (None, False)
+
+
 def memory_commit(
     state: TurnState,
     target: str,
@@ -247,7 +300,7 @@ def memory_commit(
 ) -> Dict[str, Any]:
     """Commit the latest explore or observation payload into memory."""
 
-    base_size = estimate_costs(state)
+    base_size = _clone_size(state.size)
     selector = selector or "latest"
 
     if target == "explore":
@@ -278,7 +331,8 @@ def memory_commit(
         unique_nodes = [n for n in nodes if n.get("id") and n.get("id") not in existing_nodes]
         note = _note_from_explore(obs)
         note_tokens = _estimate_tokens(note)
-        projected = _project_size(base_size, len(unique_nodes), len(edges), note_tokens, len(nodes))
+        frontier_value = int(obs.get("frontier") or len(nodes))
+        projected = _project_size(base_size, len(unique_nodes), len(edges), note_tokens, frontier_value)
         over, exceeded = is_over_budget(projected, caps)
         if over:
             return {
@@ -290,18 +344,23 @@ def memory_commit(
                 "size_before": base_size.to_dict(),
                 "size_after": projected.to_dict(),
             }
-        stats = state.graph_store.apply_delta(scope, {"nodes": nodes, "edges": edges})
+        stats = state.graph_store.apply_delta(scope, {"nodes": nodes, "edges": edges, "frontier": frontier_value})
         tag = stats.tag
         text_chunks = 0
         if note:
             note_id = state.text_store.append(scope, note)
             state.note_tokens[(scope, note_id)] = note_tokens
             text_chunks = 1
-            state.size.planner_tokens_est += note_tokens
-            state.size.cgm_tokens_est = max(state.size.cgm_tokens_est + note_tokens, state.size.planner_tokens_est)
-        state.size.nodes += stats.nodes
-        state.size.edges += stats.edges
-        state.size.frontier = len(nodes)
+            state.size.planner_tokens_est = base_size.planner_tokens_est + note_tokens
+            state.size.cgm_tokens_est = max(base_size.cgm_tokens_est + note_tokens, state.size.planner_tokens_est)
+        else:
+            state.size.planner_tokens_est = base_size.planner_tokens_est
+            state.size.cgm_tokens_est = base_size.cgm_tokens_est
+        state.size.nodes = max(0, base_size.nodes + stats.nodes)
+        state.size.edges = max(0, base_size.edges + stats.edges)
+        state.size.frontier = frontier_value
+        if tag:
+            state.frontier_history.append((tag, frontier_value))
         version = state.next_version()
         return {
             "ok": True,
@@ -352,8 +411,11 @@ def memory_commit(
             }
         note_id = state.text_store.append(scope, note)
         state.note_tokens[(scope, note_id)] = note_tokens
-        state.size.planner_tokens_est += note_tokens
-        state.size.cgm_tokens_est = max(state.size.cgm_tokens_est + note_tokens, state.size.planner_tokens_est)
+        state.size.planner_tokens_est = base_size.planner_tokens_est + note_tokens
+        state.size.cgm_tokens_est = max(base_size.cgm_tokens_est + note_tokens, state.size.planner_tokens_est)
+        state.size.nodes = base_size.nodes
+        state.size.edges = base_size.edges
+        state.size.frontier = base_size.frontier
         version = state.next_version()
         return {
             "ok": True,
@@ -388,9 +450,10 @@ def memory_delete(
     """Delete the latest committed unit for ``target``."""
 
     selector = selector or "latest"
-    base_size = estimate_costs(state)
+    base_size = _clone_size(state.size)
     if target == "explore":
-        stats = state.graph_store.revert_last(scope, tag=selector if selector not in (None, "latest") else None)
+        tag = selector if selector not in (None, "latest", "") else None
+        stats = state.graph_store.revert_last(scope, tag=tag)
         if stats.nodes == 0 and stats.edges == 0:
             return {
                 "ok": False,
@@ -398,9 +461,20 @@ def memory_delete(
                 "error": "nothing-to-delete",
                 "msg": "no explore delta to delete",
             }
-        state.size.nodes = max(0, state.size.nodes + stats.nodes)
-        state.size.edges = max(0, state.size.edges + stats.edges)
-        state.size.frontier = max(0, base_size.frontier - 1)
+        state.size.nodes = max(0, base_size.nodes + stats.nodes)
+        state.size.edges = max(0, base_size.edges + stats.edges)
+        history = state.frontier_history
+        idx: Optional[int] = None
+        if tag:
+            for i in range(len(history) - 1, -1, -1):
+                if history[i][0] == tag:
+                    idx = i
+                    break
+        if idx is None and history:
+            idx = len(history) - 1
+        if idx is not None and 0 <= idx < len(history):
+            history.pop(idx)
+        state.size.frontier = history[-1][1] if history else 0
         version = state.next_version()
         return {
             "ok": True,
@@ -428,8 +502,11 @@ def memory_delete(
                 "msg": "no observation note to delete",
             }
         tokens = state.note_tokens.pop((scope, removed_id), 0)
-        state.size.planner_tokens_est = max(0, state.size.planner_tokens_est - tokens)
-        state.size.cgm_tokens_est = max(state.size.cgm_tokens_est - tokens, state.size.planner_tokens_est)
+        state.size.planner_tokens_est = max(0, base_size.planner_tokens_est - tokens)
+        state.size.cgm_tokens_est = max(state.size.planner_tokens_est, max(0, base_size.cgm_tokens_est - tokens))
+        state.size.nodes = base_size.nodes
+        state.size.edges = base_size.edges
+        state.size.frontier = base_size.frontier
         version = state.next_version()
         return {
             "ok": True,
@@ -462,12 +539,27 @@ def handle_memory(action_params: Mapping[str, Any], state: TurnState, caps: Mapp
     scope = str(action_params.get("scope") or "turn").lower()
     intent = str(action_params.get("intent") or "commit").lower()
     selector = action_params.get("selector")
-    if isinstance(selector, str):
-        selector_value = selector
-    elif selector is None:
-        selector_value = None
+    selector_value: Optional[str]
+    if intent == "delete":
+        if target == "explore":
+            selector_value = _normalize_explore_selector(selector)
+        elif target == "observation":
+            selector_value, selector_ok = _normalize_observation_selector(selector)
+            if not selector_ok:
+                data = {
+                    "ok": False,
+                    "rejected": False,
+                    "error": "nothing-to-delete",
+                    "msg": "no observation note to delete",
+                }
+                return emit_observation(_CHANNEL, data)
+        else:
+            selector_value = None
     else:
-        selector_value = json.dumps(selector, ensure_ascii=False)
+        if isinstance(selector, str):
+            selector_value = selector.strip() or None
+        else:
+            selector_value = None
 
     if intent == "commit":
         data = memory_commit(state, target, scope, selector_value, caps)
@@ -480,7 +572,7 @@ def handle_memory(action_params: Mapping[str, Any], state: TurnState, caps: Mapp
             "error": "unsupported-intent",
             "msg": f"unsupported intent: {intent}",
         }
-    return emit_observation("memory", data)
+    return emit_observation(_CHANNEL, data)
 
 
 # ---------------------------------------------------------------------------
@@ -493,6 +585,7 @@ class _GraphRecord:
     tag: str
     nodes: List[str]
     edges: List[Dict[str, Any]]
+    frontier: int
 
 
 class WorkingGraphStore(GraphStore):
@@ -527,11 +620,31 @@ class WorkingGraphStore(GraphStore):
                 self.subgraph.node_ids.add(node_id)
                 added_ids.append(node_id)
         if edges:
-            self.subgraph.edges.extend(dict(edge) for edge in edges)
+            existing = {
+                (
+                    edge.get("src"),
+                    edge.get("dst"),
+                    edge.get("etype") or edge.get("type")
+                )
+                for edge in self.subgraph.edges
+            }
+            for edge in edges:
+                key = (edge.get("src"), edge.get("dst"), edge.get("etype") or edge.get("type"))
+                if key in existing:
+                    continue
+                existing.add(key)
+                self.subgraph.edges.append(dict(edge))
         after_nodes = len(self.subgraph.nodes)
         after_edges = len(self.subgraph.edges)
         tag = f"{scope_key}:{len(history)+1}"
-        history.append(_GraphRecord(tag=tag, nodes=added_ids, edges=[dict(e) for e in edges]))
+        history.append(
+            _GraphRecord(
+                tag=tag,
+                nodes=added_ids,
+                edges=[dict(e) for e in edges],
+                frontier=int(delta.get("frontier") or len(nodes)),
+            )
+        )
         return ApplyStats(nodes=after_nodes - before_nodes, edges=after_edges - before_edges, tag=tag)
 
     def revert_last(self, scope: str, tag: Optional[str] = None) -> ApplyStats:
@@ -593,11 +706,16 @@ class NoteTextStore(TextStore):
         if not notes:
             return -1
         target_id: Optional[int] = None
-        if selector and selector not in ("latest", ""):
-            try:
-                target_id = int(selector)
-            except ValueError:
-                target_id = None
+        if selector is not None:
+            value = selector.strip() if isinstance(selector, str) else str(selector)
+            value = value.strip()
+            if not value:
+                value = "latest"
+            if value.lower() != "latest":
+                try:
+                    target_id = int(value)
+                except ValueError:
+                    return -1
         record: Optional[_NoteRecord] = None
         if target_id is not None:
             for idx in range(len(notes) - 1, -1, -1):

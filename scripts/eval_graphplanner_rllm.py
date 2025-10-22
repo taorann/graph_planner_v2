@@ -54,6 +54,7 @@ from scripts.train_graphplanner_rllm import (  # noqa: E402
     _sanity_checks,
     _seed_everything,
     _set,
+    _prepare_container_images,
     _validate_parallel_config,
 )
 
@@ -74,6 +75,21 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dataset-name", default=None)
     parser.add_argument("--dataset-split", default="eval")
+    parser.add_argument(
+        "--docker-manifest",
+        type=Path,
+        default=None,
+        help="Optional docker manifest path (defaults to <dataset dir>/docker_images.txt).",
+    )
+    parser.add_argument(
+        "--prepull-containers",
+        action="store_true",
+        help="Pre-pull docker images before evaluation.",
+    )
+    parser.add_argument("--prepull-max-workers", type=int, default=None)
+    parser.add_argument("--prepull-retries", type=int, default=None)
+    parser.add_argument("--prepull-delay", type=int, default=None)
+    parser.add_argument("--prepull-timeout", type=int, default=None)
     parser.add_argument("--config-file", type=Path, default=None, help="High-level YAML configuration file.")
     parser.add_argument(
         "--yaml-only",
@@ -204,6 +220,8 @@ def main() -> None:
         split=args.dataset_split,
     )
 
+    container_images = _prepare_container_images(args, final_run_cfg)
+
     cfg = _load_config(args.config)
 
     _set(cfg, "data.train_files", str(eval_path))
@@ -244,6 +262,9 @@ def main() -> None:
         output_dir=output_dir,
         header="Graph Planner rLLM evaluation launch summary:",
     )
+
+    if container_images:
+        LOGGER.info("Container manifest includes %d images", len(container_images))
 
     wandb_run = init_wandb(
         enabled=bool(wandb_cfg.get("enabled", False)),

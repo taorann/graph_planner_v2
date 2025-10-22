@@ -16,6 +16,11 @@ from graph_planner.datasets import (
     ensure_directory,
     write_jsonl,
 )
+from graph_planner.runtime.containers import (
+    collect_docker_images,
+    prepull_docker_images,
+    write_docker_manifest,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -37,6 +42,45 @@ def _subset(rows: Iterable[Mapping[str, Any]], limit: Optional[int]) -> List[Map
         if limit is not None and len(out) >= limit:
             break
     return out
+
+
+def _write_manifest_and_maybe_prepull(
+    *,
+    output_dir: Path,
+    result: DatasetConversionResult,
+    manifest_name: str,
+    prepull: bool,
+    max_workers: Optional[int],
+    retries: Optional[int],
+    delay: Optional[int],
+    pull_timeout: Optional[int],
+) -> Path:
+    collection = collect_docker_images(
+        records=result.records,
+        instance_paths=result.instance_paths,
+    )
+    manifest_path = output_dir / manifest_name
+    write_docker_manifest(manifest_path, collection.images)
+    LOGGER.info(
+        "Docker manifest written to %s (%d images, %d missing metadata)",
+        manifest_path,
+        len(collection.images),
+        collection.missing,
+    )
+    if prepull and collection.images:
+        LOGGER.info(
+            "Pre-pulling %d docker images using R2E helpers", len(collection.images)
+        )
+        prepull_docker_images(
+            collection.images,
+            max_workers=max_workers,
+            retries=retries,
+            delay=delay,
+            pull_timeout=pull_timeout,
+        )
+    elif prepull:
+        LOGGER.warning("Pre-pull requested but no docker images detected in dataset")
+    return manifest_path
 
 
 def _prepare_r2e(
@@ -65,15 +109,32 @@ def _prepare_r2e(
         val_rows = []
 
     ensure_directory(output_dir)
-    train_result = convert_r2e_entries(train_rows, output_dir=output_dir, dataset_name=dataset, split=train_split)
+    train_result = convert_r2e_entries(
+        train_rows,
+        output_dir=output_dir,
+        dataset_name=dataset,
+        split=train_split,
+    )
     write_jsonl(output_dir / "train.jsonl", train_result.records)
 
+    combined_records = list(train_result.records)
+    combined_instances = list(train_result.instance_paths)
+
     if val_rows:
-        val_result = convert_r2e_entries(val_rows, output_dir=output_dir, dataset_name=dataset, split=val_split or "val")
+        val_result = convert_r2e_entries(
+            val_rows,
+            output_dir=output_dir,
+            dataset_name=dataset,
+            split=val_split or "val",
+        )
         write_jsonl(output_dir / "val.jsonl", val_result.records)
-        instance_paths = train_result.instance_paths + val_result.instance_paths
-        records = train_result.records + val_result.records
-        return DatasetConversionResult(records=records, instance_paths=instance_paths)
+        combined_records.extend(val_result.records)
+        combined_instances.extend(val_result.instance_paths)
+        train_result = DatasetConversionResult(
+            records=combined_records,
+            instance_paths=combined_instances,
+            skipped=train_result.skipped + val_result.skipped,
+        )
 
     return train_result
 
@@ -89,7 +150,12 @@ def _prepare_swebench(
     LOGGER.info("Downloading SWE-bench dataset %s (split=%s)", dataset, split)
     rows = _subset(_load_dataset(dataset, split, token), limit)
     ensure_directory(output_dir)
-    result = convert_swebench_entries(rows, output_dir=output_dir, dataset_name=dataset, split=split)
+    result = convert_swebench_entries(
+        rows,
+        output_dir=output_dir,
+        dataset_name=dataset,
+        split=split,
+    )
     write_jsonl(output_dir / f"{split}.jsonl", result.records)
     return result
 
@@ -110,6 +176,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--swebench-limit", type=int, default=None)
     parser.add_argument("--swebench-output", type=Path, default=Path("datasets/swebench"))
     parser.add_argument("--skip-swebench", action="store_true")
+
+    parser.add_argument("--prepull-containers", action="store_true")
+    parser.add_argument("--prepull-max-workers", type=int, default=None)
+    parser.add_argument("--prepull-retries", type=int, default=None)
+    parser.add_argument("--prepull-delay", type=int, default=None)
+    parser.add_argument("--prepull-timeout", type=int, default=None)
 
     parser.add_argument("--hf-token", default=os.environ.get("HF_TOKEN"))
     parser.add_argument("--log-level", default="INFO")
@@ -133,7 +205,22 @@ def main() -> None:
             train_limit=args.r2e_train_limit,
             val_limit=args.r2e_val_limit,
         )
-        LOGGER.info("R2E tasks written: %d (instance files: %d)", len(r2e_result.records), len(r2e_result.instance_paths))
+        LOGGER.info(
+            "R2E tasks written: %d (instances: %d, skipped: %d)",
+            len(r2e_result.records),
+            len(r2e_result.instance_paths),
+            r2e_result.skipped,
+        )
+        _write_manifest_and_maybe_prepull(
+            output_dir=args.r2e_output,
+            result=r2e_result,
+            manifest_name="docker_images.txt",
+            prepull=args.prepull_containers,
+            max_workers=args.prepull_max_workers,
+            retries=args.prepull_retries,
+            delay=args.prepull_delay,
+            pull_timeout=args.prepull_timeout,
+        )
 
     if not args.skip_swebench:
         swe_result = _prepare_swebench(
@@ -144,9 +231,20 @@ def main() -> None:
             limit=args.swebench_limit,
         )
         LOGGER.info(
-            "SWE-bench tasks written: %d (instance files: %d)",
+            "SWE-bench tasks written: %d (instances: %d, skipped: %d)",
             len(swe_result.records),
             len(swe_result.instance_paths),
+            swe_result.skipped,
+        )
+        _write_manifest_and_maybe_prepull(
+            output_dir=args.swebench_output,
+            result=swe_result,
+            manifest_name=f"docker_images_{args.swebench_split}.txt",
+            prepull=args.prepull_containers,
+            max_workers=args.prepull_max_workers,
+            retries=args.prepull_retries,
+            delay=args.prepull_delay,
+            pull_timeout=args.prepull_timeout,
         )
 
 

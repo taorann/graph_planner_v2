@@ -337,6 +337,12 @@ class EnvSection:
     repo_op_limit: Optional[int] = None
     disable_cgm_synthesis: bool = False
     apply_patches: bool = True
+    docker_manifest: Optional[str] = None
+    prepull_containers: bool = False
+    prepull_max_workers: Optional[int] = None
+    prepull_retries: Optional[int] = None
+    prepull_delay: Optional[int] = None
+    prepull_timeout: Optional[int] = None
 
 
 @dataclass
@@ -624,8 +630,16 @@ def build_cli_overrides(args: Any, *, mode: str) -> Dict[str, Any]:
         "step_penalty": _cli_override_entry(args, "step_penalty"),
         "timeout_penalty": _cli_override_entry(args, "timeout_penalty"),
         "repo_op_limit": _cli_override_entry(args, "repo_op_limit"),
+        "docker_manifest": _cli_override_entry(args, "docker_manifest"),
+        "prepull_max_workers": _cli_override_entry(args, "prepull_max_workers"),
+        "prepull_retries": _cli_override_entry(args, "prepull_retries"),
+        "prepull_delay": _cli_override_entry(args, "prepull_delay"),
+        "prepull_timeout": _cli_override_entry(args, "prepull_timeout"),
     }
     env_overrides = {k: v for k, v in env_fields.items() if v is not None}
+    for key in ("prepull_max_workers", "prepull_retries", "prepull_delay", "prepull_timeout", "repo_op_limit"):
+        if key in env_overrides and env_overrides[key] is not None:
+            env_overrides[key] = int(env_overrides[key])
     if env_overrides:
         overrides.setdefault("env", {}).update(env_overrides)
 
@@ -634,6 +648,9 @@ def build_cli_overrides(args: Any, *, mode: str) -> Dict[str, Any]:
 
     if getattr(args, "apply_patches", None) is not None:
         overrides.setdefault("env", {})["apply_patches"] = bool(args.apply_patches)
+
+    if getattr(args, "prepull_containers", False):
+        overrides.setdefault("env", {})["prepull_containers"] = True
 
     return overrides
 
@@ -760,6 +777,13 @@ def update_args_from_config(args: Any, config: Mapping[str, Any]) -> None:
         setattr(args, "disable_cgm_synthesis", bool(env_cfg["disable_cgm_synthesis"]))
     if env_cfg.get("apply_patches") is not None:
         setattr(args, "apply_patches", bool(env_cfg["apply_patches"]))
+    if env_cfg.get("docker_manifest"):
+        setattr(args, "docker_manifest", Path(env_cfg["docker_manifest"]))
+    if env_cfg.get("prepull_containers") is not None:
+        setattr(args, "prepull_containers", bool(env_cfg["prepull_containers"]))
+    for field in ("prepull_max_workers", "prepull_retries", "prepull_delay", "prepull_timeout"):
+        if env_cfg.get(field) is not None:
+            setattr(args, field, int(env_cfg[field]))
 
     logging_cfg = config.get("logging", {})
     wandb_cfg = logging_cfg.get("wandb", {})

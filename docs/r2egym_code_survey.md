@@ -62,4 +62,18 @@ AgentHub 目录是我们与 R2E-Gym 对接的核心。下表列出各子模块�
 2. **潜在扩展**：如果未来希望重放官方 Agent 或使用 R2E 提供的工具链，可引入 `agenthub/action`、`agenthub/tools`、`agenthub/trajectory` 等模块。
 3. **数据管线复现**：`repo_analysis` 与 `install_utils` 负责构建/清洗 R2E 任务数据，若要扩充数据集，可直接执行这些脚本，并把结果写入仓库的 `datasets/r2e_gym/` 目录。
 
+## 5. 可复用的数据集与容器准备模块
+
+为了进一步对齐 Graph Planner 与上游流程，下面列出 R2E-Gym 中与数据集构建、容器准备紧密相关且具备复用价值的模块：
+
+| 领域 | 关键文件/函数 | 主要职责 | 复用建议 |
+| --- | --- | --- | --- |
+| 数据集构建 | `repo_analysis/repo_testextract.py` 中的 `test_extractor`、`create_tests` 等函数在克隆仓库后注入测试、执行安装脚本并收集执行结果，生成可供合成任务使用的 JSON 记录。【F:R2E-Gym/src/r2egym/repo_analysis/repo_testextract.py†L27-L190】 | 负责从原始仓库提取测试补丁和执行日志，是合成 issue 与构造训练样本的核心入口。 | 当需要重跑官方的合成流程或增量扩容训练集时，可直接调用这些函数并将结果写入我们自带的 JSONL 结构。 |
+| 数据集构建 | `repo_analysis/build_syn_issue.py` 结合解析到的提交与执行结果生成符合 R2E 规范的 issue 文本与摘要，补全任务描述。【F:R2E-Gym/src/r2egym/repo_analysis/build_syn_issue.py†L1-L160】 | 将执行日志、测试补丁、LLM 输出融合成最终的 issue 字段，保证任务样本自洽。 | 可在需要生成新问题描述或重新格式化 issue 时复用，避免重复实现模板逻辑。 |
+| 数据集构建 | `repo_analysis/validate_docker_and_hf.py` 负责批量枚举仓库镜像、预拉取 Docker、汇总 `docker_image` 元数据并输出 JSONL，保障数据行含有可运行的容器信息。【F:R2E-Gym/src/r2egym/repo_analysis/validate_docker_and_hf.py†L625-L667】 | 提供数据行与镜像的一致性校验及镜像采集，是准备 RepoEnv 所需字段的来源。 | 当我们需要补齐缺失的 `docker_image` 或同步最新镜像列表时，可借助该脚本避免手工维护映射。 |
+| 容器准备 | `agenthub/run/edit.py` 中的 `prepull_docker_images`、`runagent_multiple` 负责在批处理任务前预拉取镜像、按数据集条目并行调度环境与代理。【F:R2E-Gym/src/r2egym/agenthub/run/edit.py†L79-L118】【F:R2E-Gym/src/r2egym/agenthub/run/edit.py†L325-L420】 | 在启动大规模实验前分派容器、过滤已有结果，是容器资源管理的参考实现。 | Graph Planner 若需批量执行 RepoEnv 任务，可复用其中的预拉取与调度逻辑，或改写为我们自有 CLI 的后台任务。 |
+| 容器准备 | `agenthub/runtime/docker.py` 的 `DockerRuntime` 类封装了从数据行推导镜像、启动 Docker/Kubernetes、同步测试规格等完整容器生命周期管理。【F:R2E-Gym/src/r2egym/agenthub/runtime/docker.py†L75-L183】 | 负责真实容器的启动、上下文初始化和日志采集，是 RepoEnv 的执行后端。 | 我们目前已通过 `SandboxRuntime` 间接复用该类，后续可在需要扩展 Kubernetes 支持或镜像匹配策略时继续参考其实现。 |
+
+上述模块覆盖了从数据生成、镜像校验到批量容器拉起的关键流程，可作为 Graph Planner 扩展数据与运行时能力时的现成蓝本。
+
 以上调研覆盖了 AgentHub 中的所有子模块及非 AgentHub 支撑代码，为后续定制或裁剪提供依据。

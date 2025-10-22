@@ -27,6 +27,7 @@ from graph_planner.integrations.rllm.agent import GraphPlannerRLLMAgent
 from graph_planner.integrations.rllm.cgm_env import CGMRLLMEnv
 from graph_planner.integrations.rllm import dataset as dataset_mod
 from graph_planner.infra.config import DEFAULT_TRAIN_DATASET
+from graph_planner.runtime.containers import DockerImageCollection
 from graph_planner.models.toy_lm import create_toy_checkpoint
 
 
@@ -295,6 +296,8 @@ def test_train_cli_print_config_planner(tmp_path, monkeypatch, capsys):
     assert dataset_file.exists(), "sample dataset missing"
 
     verl_path = tmp_path / "train_verl.parquet"
+    verl_path.write_text("", encoding="utf-8")
+    (tmp_path / "val_verl.parquet").write_text("", encoding="utf-8")
     dataset_stub = SimpleNamespace(
         get_verl_data_path=lambda: str(verl_path),
         get_data_path=lambda: str(tmp_path / "train.parquet"),
@@ -606,21 +609,21 @@ def test_train_cli_yaml_only_ignores_overrides(tmp_path, monkeypatch, capsys):
     dataset_file = DATASET_FILE
     assert dataset_file.exists(), "sample dataset missing"
 
-    verl_path = tmp_path / "train_verl.parquet"
-
+    train_stub = SimpleNamespace(
+        get_verl_data_path=lambda: str(dataset_file),
+        get_data_path=lambda: str(dataset_file),
+    )
+    val_dataset = Path("datasets/r2e_gym/val.jsonl")
     val_stub = SimpleNamespace(
-        get_verl_data_path=lambda: str(tmp_path / "val_verl.parquet"),
-        get_data_path=lambda: str(tmp_path / "val.raw.parquet"),
+        get_verl_data_path=lambda: str(val_dataset),
+        get_data_path=lambda: str(val_dataset),
     )
 
     def fake_register(*, name, split, path):
         if "val" in split or str(name).endswith("_val"):
             return val_stub
         assert Path(path) == dataset_file
-        return SimpleNamespace(
-            get_verl_data_path=lambda: str(verl_path),
-            get_data_path=lambda: str(tmp_path / "train.raw.parquet"),
-        )
+        return train_stub
 
     monkeypatch.setattr("scripts.train_graphplanner_rllm.ensure_dataset_registered", fake_register)
 
@@ -658,12 +661,109 @@ def test_train_cli_yaml_only_ignores_overrides(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", argv, raising=False)
 
     from scripts import train_graphplanner_rllm as train_mod
+    train_mod._sanity_checks = lambda *_, **__: None
 
     train_mod.main()
 
     resolved_cfg = tmp_path / "runs" / "yaml-only" / "resolved_config.yaml"
     saved = yaml.safe_load(resolved_cfg.read_text(encoding="utf-8"))
     assert saved["training"]["train_batch_size"] == 5
+
+
+def test_train_cli_prepull_containers(tmp_path, monkeypatch, capsys):
+    dataset_file = DATASET_FILE
+    assert dataset_file.exists(), "sample dataset missing"
+
+    verl_path = tmp_path / "train_verl.parquet"
+    val_path = tmp_path / "val_verl.parquet"
+    verl_path.touch()
+    val_path.touch()
+
+    val_stub = SimpleNamespace(
+        get_verl_data_path=lambda: str(val_path),
+        get_data_path=lambda: str(tmp_path / "val.raw.parquet"),
+    )
+
+    def fake_register(*, name, split, path):
+        if "val" in split or str(name).endswith("_val"):
+            return val_stub
+        assert Path(path) == dataset_file
+        return SimpleNamespace(
+            get_verl_data_path=lambda: str(verl_path),
+            get_data_path=lambda: str(tmp_path / "train.raw.parquet"),
+        )
+
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.ensure_dataset_registered", fake_register)
+
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.log_metrics", lambda *_, **__: None)
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.make_gpu_snapshot", lambda: (lambda: {}))
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.make_ray_snapshot", lambda: (lambda: {}))
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.init_wandb", lambda **_: None)
+
+    manifest_calls: list[tuple[Path, list[str]]] = []
+    prepull_calls: list[tuple[list[str], dict[str, object]]] = []
+
+    monkeypatch.setattr(
+        "scripts.train_graphplanner_rllm.collect_docker_images",
+        lambda **_: DockerImageCollection(images=["img:one"], missing=0, inspected=1),
+    )
+
+    def fake_write(path, images):
+        manifest_calls.append((Path(path), list(images)))
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(images), encoding="utf-8")
+        return path
+
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.write_docker_manifest", fake_write)
+
+    def fake_prepull(images, **kwargs):
+        prepull_calls.append((list(images), kwargs))
+
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.prepull_docker_images", fake_prepull)
+
+    argv = [
+        "train_graphplanner_rllm.py",
+        "--agent",
+        "planner",
+        "--dataset",
+        str(dataset_file),
+        "--model-path",
+        str(tmp_path / "policy"),
+        "--tensor-parallel",
+        "1",
+        "--num-gpus",
+        "2",
+        "--ray-num-gpus",
+        "2",
+        "--ray-num-cpus",
+        "4",
+        "--train-batch-size",
+        "2",
+        "--parallel-agents",
+        "1",
+        "--rollout-workers",
+        "1",
+        "--workflow-parallel",
+        "1",
+        "--prepull-containers",
+        "--docker-manifest",
+        str(tmp_path / "docker_manifest.txt"),
+        "--print-config",
+    ]
+
+    monkeypatch.setenv("WANDB_MODE", "offline")
+    monkeypatch.setattr(sys, "argv", argv, raising=False)
+
+    from scripts import train_graphplanner_rllm as train_mod
+
+    train_mod.main()
+
+    assert manifest_calls
+    manifest_path, images = manifest_calls[0]
+    assert manifest_path.read_text(encoding="utf-8").strip() == "img:one"
+    assert images == ["img:one"]
+    assert prepull_calls == [(["img:one"], {"max_workers": None, "retries": None, "delay": None, "pull_timeout": None})]
 
 
 def test_train_cli_preflight_failure(tmp_path, monkeypatch):

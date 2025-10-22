@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import json
 import re
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Mapping, MutableMapping, Sequence
 
 SANITISE_PATTERN = re.compile(r"[^a-zA-Z0-9_.-]+")
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def sanitize_identifier(value: str) -> str:
@@ -42,6 +46,7 @@ class DatasetConversionResult:
 
     records: List[MutableMapping[str, object]]
     instance_paths: List[Path]
+    skipped: int = 0
 
 
 def _deepcopy_entry(entry: Mapping[str, object]) -> MutableMapping[str, object]:
@@ -69,6 +74,54 @@ def _extract_first(entry: Mapping[str, object], *paths: Sequence[str]) -> object
     return None
 
 
+def _coalesce_identifier(
+    entry: Mapping[str, object],
+    *,
+    fallback: str,
+    extra_sources: Sequence[Mapping[str, object]],
+) -> str:
+    """Return the best-effort identifier string for a dataset entry."""
+
+    candidate = _extract_first(
+        entry,
+        ("task_id",),
+        ("instance_id",),
+        ("id",),
+        ("task", "task_id"),
+        ("task", "instance_id"),
+        ("task", "id"),
+        ("gym_config", "task_id"),
+        ("gym_config", "instance_id"),
+        ("metadata", "task_id"),
+        ("metadata", "instance_id"),
+        ("metadata", "id"),
+        ("issue", "id"),
+        ("issue", "issue_id"),
+        ("problem", "id"),
+        ("problem", "task_id"),
+        ("ds", "task", "task_id"),
+        ("ds", "task", "id"),
+        ("task", "metadata", "task_id"),
+        ("config", "task_id"),
+    )
+    if isinstance(candidate, str) and candidate.strip():
+        return candidate.strip()
+
+    for source in extra_sources:
+        candidate = _extract_first(
+            source,
+            ("task_id",),
+            ("instance_id",),
+            ("id",),
+        )
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+
+    return fallback
+
+
+
+
 def convert_r2e_entries(
     entries: Iterable[Mapping[str, object]],
     *,
@@ -85,106 +138,128 @@ def convert_r2e_entries(
 
     records: List[MutableMapping[str, object]] = []
     ds_paths: List[Path] = []
+    skipped = 0
 
-    for raw in entries:
-        entry = _deepcopy_entry(raw)
-        gym_config = entry.get("gym_config")
-        if not isinstance(gym_config, Mapping):
-            gym_config = entry.get("ds") if isinstance(entry.get("ds"), Mapping) else entry
-        gym_config = _deepcopy_entry(gym_config)  # type: ignore[arg-type]
+    dataset_prefix = sanitize_identifier(f"{dataset_name}_{split or 'split'}") or "dataset"
 
-        task_id = _extract_first(
-            entry,
-            ("task_id",),
-            ("instance_id",),
-            ("id",),
-            ("task", "task_id"),
-            ("task", "instance_id"),
-            ("gym_config", "task_id"),
-        )
-        if not isinstance(task_id, str):
-            raise ValueError("Unable to determine task identifier from R2E entry")
-        task_id = task_id.strip() or "task"
-        safe_id = sanitize_identifier(task_id)
+    for index, raw in enumerate(entries):
+        try:
+            entry = _deepcopy_entry(raw)
+            gym_config = entry.get("gym_config")
+            if not isinstance(gym_config, Mapping):
+                gym_config = entry.get("ds") if isinstance(entry.get("ds"), Mapping) else entry
+            gym_config = _deepcopy_entry(gym_config)  # type: ignore[arg-type]
 
-        docker_image = _extract_first(
-            gym_config,
-            ("docker_image",),
-            ("image_name",),
-        )
-        if not isinstance(docker_image, str):
-            raise ValueError(f"Entry {task_id!r} did not contain a docker image")
+            fallback_task_id = f"{dataset_name}:{split}:{index:05d}"
+            task_id = _coalesce_identifier(
+                entry,
+                fallback=fallback_task_id,
+                extra_sources=[
+                    gym_config,
+                    entry.get("ds") if isinstance(entry.get("ds"), Mapping) else {},
+                ],
+            )
+            if not task_id:
+                task_id = fallback_task_id
+            safe_id = sanitize_identifier(task_id)
+            if not safe_id:
+                safe_id = f"{dataset_prefix}_{index:05d}"
 
-        repo_name = _extract_first(
-            gym_config,
-            ("repo_name",),
-            ("repo",),
-        )
-        if not isinstance(repo_name, str):
-            repo_name = None
+            docker_image = _extract_first(
+                gym_config,
+                ("docker_image",),
+                ("image_name",),
+                ("docker", "image"),
+            )
+            if not isinstance(docker_image, str):
+                docker_image = _extract_first(
+                    entry,
+                    ("docker_image",),
+                    ("image_name",),
+                    ("ds", "docker_image"),
+                )
+            if not isinstance(docker_image, str) or not docker_image.strip():
+                raise ValueError("missing docker_image")
 
-        max_steps = _extract_first(
-            entry,
-            ("max_steps",),
-            ("task", "max_steps"),
-            ("gym_config", "max_steps"),
-        )
-        if isinstance(max_steps, int):
-            steps = max_steps
-        else:
-            try:
-                steps = int(max_steps)  # type: ignore[arg-type]
-            except (TypeError, ValueError):
+            repo_name = _extract_first(
+                gym_config,
+                ("repo_name",),
+                ("repo",),
+                ("repository",),
+            )
+            if not isinstance(repo_name, str):
+                repo_name = _extract_first(entry, ("repo",), ("repo_name",), ("ds", "repo"))
+            if not isinstance(repo_name, str):
+                repo_name = None
+
+            max_steps = _extract_first(
+                entry,
+                ("max_steps",),
+                ("task", "max_steps"),
+                ("gym_config", "max_steps"),
+            )
+            if isinstance(max_steps, int):
+                steps = max_steps
+            else:
+                try:
+                    steps = int(max_steps)  # type: ignore[arg-type]
+                except (TypeError, ValueError):
+                    steps = default_max_steps
+            if steps <= 0:
                 steps = default_max_steps
-        if steps <= 0:
-            steps = default_max_steps
 
-        issue_title = _normalise_issue_text(
-            entry.get("issue_title"),
-            _extract_first(entry, ("task", "title")),
-            _extract_first(entry, ("task", "problem_statement_title")),
-            fallback=f"R2E task {task_id}",
-        )
-        issue_body = _normalise_issue_text(
-            entry.get("issue_body"),
-            entry.get("problem_statement"),
-            _extract_first(entry, ("task", "problem_statement")),
-            _extract_first(entry, ("task", "description")),
-            fallback=f"Resolve the issue described by {issue_title}.",
-        )
+            issue_title = _normalise_issue_text(
+                entry.get("issue_title"),
+                _extract_first(entry, ("task", "title")),
+                _extract_first(entry, ("issue", "title")),
+                fallback="Fix reported issue",
+            )
+            issue_body = _normalise_issue_text(
+                entry.get("problem_statement"),
+                entry.get("description"),
+                _extract_first(entry, ("task", "description")),
+                _extract_first(entry, ("issue", "body")),
+                fallback="Investigate and repair the reported failure.",
+            )
 
-        ds_path = instance_dir / f"{safe_id}.json"
-        ds_paths.append(ds_path)
-        ensure_directory(ds_path.parent)
-        ds_path.write_text(json.dumps(gym_config, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+            ds_payload = {
+                "task_id": task_id,
+                "docker_image": docker_image.strip(),
+                "repo": repo_name,
+                "raw": entry,
+                "gym_config": gym_config,
+            }
+            rel_path = Path("instances") / f"{safe_id}.json"
+            abs_path = instance_dir / rel_path.name
+            ensure_directory(abs_path.parent)
+            with abs_path.open("w", encoding="utf-8") as handle:
+                json.dump(ds_payload, handle, ensure_ascii=False, indent=2)
 
-        r2e_relative = Path(os_path_relpath(ds_path, output_dir))
+            ds_paths.append(abs_path)
+            record: MutableMapping[str, object] = {
+                "task_id": task_id,
+                "data_source": dataset_name,
+                "split": split,
+                "max_steps": int(steps),
+                "issue": {
+                    "title": issue_title,
+                    "body": issue_body,
+                },
+                "sandbox": {
+                    "backend": "repoenv",
+                    "docker_image": docker_image.strip(),
+                    "r2e_ds_json": str(rel_path),
+                },
+            }
+            if repo_name:
+                record["repo"] = repo_name
+            records.append(record)
+        except Exception as exc:  # noqa: BLE001
+            skipped += 1
+            LOGGER.warning("Skipping R2E entry %s (%s/%s): %s", index, dataset_name, split, exc)
+            continue
 
-        record: MutableMapping[str, object] = {
-            "task_id": task_id,
-            "max_steps": steps,
-            "issue": {
-                "id": task_id,
-                "title": issue_title,
-                "body": issue_body,
-            },
-            "sandbox": {
-                "docker_image": docker_image,
-                "workdir": str(gym_config.get("repo_path", "/repo")),
-                "mounts": {},
-                "env": {},
-                "backend": "repoenv",
-                "r2e_ds_json": str(r2e_relative),
-            },
-            "data_source": dataset_name,
-            "split": split,
-        }
-        if repo_name:
-            record["repo"] = repo_name
-        records.append(record)
-
-    return DatasetConversionResult(records=records, instance_paths=ds_paths)
-
+    return DatasetConversionResult(records=records, instance_paths=ds_paths, skipped=skipped)
 
 def convert_swebench_entries(
     entries: Iterable[Mapping[str, object]],

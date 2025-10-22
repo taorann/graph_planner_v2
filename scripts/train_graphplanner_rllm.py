@@ -14,7 +14,7 @@ import random
 import warnings
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 
 import numpy as np
 from omegaconf import OmegaConf
@@ -54,6 +54,12 @@ from graph_planner.integrations.rllm import (  # noqa: E402
     ensure_dataset_registered,
     load_task_entries,
 )
+from graph_planner.runtime.containers import (  # noqa: E402
+    collect_docker_images,
+    load_docker_manifest,
+    prepull_docker_images,
+    write_docker_manifest,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -84,6 +90,21 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-split", default="train")
     parser.add_argument("--val-dataset", type=Path, default=None)
     parser.add_argument("--val-split", default="val")
+    parser.add_argument(
+        "--docker-manifest",
+        type=Path,
+        default=None,
+        help="Optional docker manifest path (defaults to <dataset dir>/docker_images.txt).",
+    )
+    parser.add_argument(
+        "--prepull-containers",
+        action="store_true",
+        help="Pre-pull docker images referenced by the dataset before training.",
+    )
+    parser.add_argument("--prepull-max-workers", type=int, default=None)
+    parser.add_argument("--prepull-retries", type=int, default=None)
+    parser.add_argument("--prepull-delay", type=int, default=None)
+    parser.add_argument("--prepull-timeout", type=int, default=None)
     parser.add_argument("--config-file", type=Path, default=None, help="High-level YAML configuration file.")
     parser.add_argument(
         "--yaml-only",
@@ -544,6 +565,49 @@ def _sanity_checks(train_path: str, val_path: str | None, args: argparse.Namespa
         raise FileNotFoundError(f"Validation parquet not found: {val_path}")
     if args.precision in {"bf16", "fp16"} and torch is None:
         raise RuntimeError("Requested mixed precision but PyTorch is unavailable")
+
+
+def _prepare_container_images(args: argparse.Namespace, final_run_cfg: Dict[str, Any]) -> List[str]:
+    """Ensure docker manifest exists and optionally pre-pull containers."""
+
+    env_cfg = final_run_cfg.setdefault("env", {})
+    manifest_path = getattr(args, "docker_manifest", None) or env_cfg.get("docker_manifest")
+    if manifest_path:
+        manifest = Path(manifest_path)
+    else:
+        manifest = args.dataset.parent / "docker_images.txt"
+    env_cfg["docker_manifest"] = str(manifest)
+
+    if manifest.exists():
+        images = load_docker_manifest(manifest)
+        LOGGER.info("Loaded %d docker images from manifest %s", len(images), manifest)
+    else:
+        records = load_task_entries(args.dataset)
+        if args.val_dataset:
+            records.extend(load_task_entries(args.val_dataset))
+        collection = collect_docker_images(records=records)
+        write_docker_manifest(manifest, collection.images)
+        LOGGER.info(
+            "Docker manifest written to %s (%d images, %d missing metadata)",
+            manifest,
+            len(collection.images),
+            collection.missing,
+        )
+        images = collection.images
+
+    if args.prepull_containers and images:
+        LOGGER.info("Pre-pulling %d docker images prior to training", len(images))
+        prepull_docker_images(
+            images,
+            max_workers=args.prepull_max_workers,
+            retries=args.prepull_retries,
+            delay=args.prepull_delay,
+            pull_timeout=args.prepull_timeout,
+        )
+    elif args.prepull_containers:
+        LOGGER.warning("Pre-pull requested but no docker images discovered for %s", args.dataset)
+
+    return images
 def main() -> None:
     """脚本入口：解析参数、准备数据集并触发 rLLM 训练。"""
 
@@ -607,6 +671,8 @@ def main() -> None:
         val_split=args.val_split,
     )
 
+    container_images = _prepare_container_images(args, final_run_cfg)
+
     cfg = _load_config(args.config)
 
     _set(cfg, "data.train_files", str(train_path))
@@ -652,6 +718,9 @@ def main() -> None:
         val_rows=val_rows,
         output_dir=output_dir,
     )
+
+    if container_images:
+        LOGGER.info("Container manifest includes %d images", len(container_images))
 
     wandb_run = init_wandb(
         enabled=bool(wandb_cfg.get("enabled", False)),

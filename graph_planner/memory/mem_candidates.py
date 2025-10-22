@@ -1,3 +1,4 @@
+# 2025-10-22 memory hardening
 # -*- coding: utf-8 -*-
 """
 MemCandidates builder for Step 3.1
@@ -46,16 +47,20 @@ class CandidateSelectionBudget:
     prefer_test_files: bool = True    # 轻度偏好 t-file（单测上下文）
 
 
+def _norm_posix(path: str | None) -> str:
+    return (path or "").replace("\\", "/")
+
+
 def _is_test_file(node: Node) -> bool:
     kind = (node.get("kind") or "").lower()
-    path = (node.get("path") or "").lower()
+    path = _norm_posix(node.get("path") or "").lower()
     if kind == "t-file":
         return True
     return "test" in path or "/tests/" in path or path.endswith("_test.py") or path.endswith("test.py")
 
 
 def _dirname(node: Node) -> str:
-    path = node.get("path") or ""
+    path = _norm_posix(node.get("path") or "")
     try:
         return str(PurePosixPath(path).parent)
     except Exception:
@@ -63,7 +68,7 @@ def _dirname(node: Node) -> str:
 
 
 def _filename(node: Node) -> str:
-    return (node.get("path") or "").split("/")[-1]
+    return _norm_posix(node.get("path") or "").split("/")[-1]
 
 
 def _score_node(
@@ -88,7 +93,7 @@ def _score_node(
         reasons.append(f"degree={degree}")
 
     # 同文件
-    path = node.get("path") or ""
+    path = _norm_posix(node.get("path") or "")
     if path and path in anchor_paths:
         score += weights.w_same_file
         reasons.append("same_file")
@@ -115,10 +120,11 @@ def _score_node(
 
 
 def _to_candidate(node: Node, score: float, reasons: List[str], from_anchor: bool) -> Candidate:
+    path = _norm_posix(node.get("path")) or None
     return {
         "id": node.get("id"),
         "kind": (node.get("kind") or "").lower(),
-        "path": node.get("path"),
+        "path": path,
         "span": node.get("span"),
         "degree": int(node.get("degree") or 0),
         "from_anchor": bool(from_anchor),
@@ -171,7 +177,11 @@ def build_mem_candidates(
             # Anchor ←→ Node 解析由 adapter 负责
             resolved = graph_adapter.find_nodes_by_anchor(a)  # type: ignore
             anchor_nodes.extend(resolved)
-    anchor_paths: Set[str] = {n.get("path") for n in anchor_nodes if n.get("path")}
+    anchor_paths: Set[str] = {
+        _norm_posix(n.get("path"))
+        for n in anchor_nodes
+        if n.get("path")
+    }
 
     # 2) 获取现有子图节点 id 集（避免重复）
     in_subgraph_ids: Set[str] = set(subgraph.iter_node_ids())  # type: ignore

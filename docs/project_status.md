@@ -75,8 +75,8 @@ Graph Planner 致力于复现 CGM + Planner 的双智能体代码修复流程：
    - 通过 `scripts/run_rule_agent.py --agent llm` 进行冒烟测试，确认模型输出合法的 `<function=...>` 块，补丁流程可走通。
 
 4. **训练启动**
-   - 将基础 checkpoint 拷贝至 `models/qwen3-14b-instruct/`（以及需要的 `models/codefuse-cgm/`），脚本会自动使用这些路径作为 `--model-path` 与 `--cgm-model-path` 的默认值。
-   - 根据实验计划调整 `--max-steps`、`--trainer-epochs` 等参数，运行 `scripts/train_graphplanner_rllm.py` 启动 PPO 训练。
+   - 将基础 checkpoint 拷贝至 `models/qwen3-14b-instruct/`（以及需要的 `models/codefuse-cgm/`），脚本会自动使用这些路径作为默认模型目录。
+   - 根据实验计划编辑 `configs/experiments/*.yaml`（或使用 `--config-file` 指向自定义 YAML），再运行 `scripts/train_graphplanner_rllm.py`；需要临时覆写时可继续使用 CLI（例如 `--dataset`、`--total-epochs`），若希望完全依赖 YAML 则追加 `--yaml-only`。
    - 在训练过程中关注 `logs/` 与 Ray dashboard，确保奖励、轨迹记录符合预期。
 
 ## 缺失信息登记

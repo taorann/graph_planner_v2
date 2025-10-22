@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from pathlib import Path
 from types import SimpleNamespace
 
 import yaml
@@ -67,6 +68,12 @@ def _make_args(**overrides):
         repo_op_limit=10,
         disable_cgm_synthesis=True,
         apply_patches=True,
+        docker_manifest=Path("cli-manifest.txt"),
+        prepull_containers=True,
+        prepull_max_workers=8,
+        prepull_retries=3,
+        prepull_delay=5,
+        prepull_timeout=300,
         cgm_synthesis_strategy=None,
         ray_address=None,
         cgm_instruction=None,
@@ -113,6 +120,12 @@ def test_merge_run_config_priority(tmp_path):
     assert merged["parallel"]["parallel_agents"] == 3
     assert merged["logging"]["wandb"]["enabled"] is True
     assert merged["logging"]["wandb"]["offline"] is True
+    assert merged["env"]["docker_manifest"].endswith("cli-manifest.txt")
+    assert merged["env"]["prepull_containers"] is True
+    assert merged["env"]["prepull_max_workers"] == 8
+    assert merged["env"]["prepull_retries"] == 3
+    assert merged["env"]["prepull_delay"] == 5
+    assert merged["env"]["prepull_timeout"] == 300
 
     update_args_from_config(args, merged)
     assert args.train_batch_size == 16
@@ -124,6 +137,12 @@ def test_merge_run_config_priority(tmp_path):
     assert args.output_dir == Path("cli-output")
     assert args.project_name == "cli-project"
     assert args.disable_cgm_synthesis is True
+    assert args.docker_manifest == Path("cli-manifest.txt")
+    assert args.prepull_containers is True
+    assert args.prepull_max_workers == 8
+    assert args.prepull_retries == 3
+    assert args.prepull_delay == 5
+    assert args.prepull_timeout == 300
 
     resolved = tmp_path / "resolved.yaml"
     serialise_resolved_config(merged, resolved)

@@ -5,7 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from graph_planner.datasets import convert_r2e_entries, convert_swebench_entries
+from graph_planner.datasets import (
+    DatasetConversionResult,
+    convert_r2e_entries,
+    convert_swebench_entries,
+)
+from scripts import prepare_datasets
 
 
 @pytest.fixture()
@@ -31,6 +36,7 @@ def test_convert_r2e_entries_creates_json_and_jsonl(tmp_dataset_dir: Path):
     result = convert_r2e_entries(entries, output_dir=tmp_dataset_dir, dataset_name="demo/r2e", split="train")
 
     assert len(result.records) == 1
+    assert result.skipped == 0
     record = result.records[0]
     assert record["task_id"] == "numpy#123"
     assert record["sandbox"]["backend"] == "repoenv"
@@ -39,6 +45,69 @@ def test_convert_r2e_entries_creates_json_and_jsonl(tmp_dataset_dir: Path):
     with (tmp_dataset_dir / rel_path).open("r", encoding="utf-8") as handle:
         saved = json.load(handle)
     assert saved["docker_image"] == "r2e/numpy:latest"
+    assert saved["task_id"] == "numpy#123"
+
+
+def test_convert_r2e_entries_uses_nested_ds_identifier(tmp_dataset_dir: Path):
+    entries = [
+        {
+            "ds": {
+                "instance_id": "pytorch__issue-42",
+                "docker_image": "pytorch:latest",
+                "repo": "pytorch/pytorch",
+                "repo_path": "/repo",
+            },
+            "problem_statement": "Investigate bug",
+        }
+    ]
+
+    result = convert_r2e_entries(entries, output_dir=tmp_dataset_dir, dataset_name="demo/r2e", split="dev")
+
+    assert [record["task_id"] for record in result.records] == ["pytorch__issue-42"]
+    assert result.skipped == 0
+    rel_path = Path(result.records[0]["sandbox"]["r2e_ds_json"])
+    assert rel_path.suffix == ".json"
+
+
+def test_convert_r2e_entries_generates_fallback_identifier(tmp_dataset_dir: Path):
+    entries = [
+        {
+            "gym_config": {
+                "docker_image": "fallback:latest",
+            },
+        },
+        {
+            "docker_image": "fallback:2",
+        },
+    ]
+
+    result = convert_r2e_entries(entries, output_dir=tmp_dataset_dir, dataset_name="demo/r2e", split="train")
+
+    assert len(result.records) == 2
+    assert result.skipped == 0
+    for record in result.records:
+        assert record["task_id"].startswith("demo/r2e:train:")
+        rel_path = Path(record["sandbox"]["r2e_ds_json"])
+        assert rel_path.is_relative_to(Path("."))
+        assert rel_path.name.endswith(".json")
+
+
+def test_convert_r2e_entries_skips_missing_metadata(tmp_dataset_dir: Path):
+    entries = [
+        {
+            "task_id": "missing-docker",
+        },
+        {
+            "ds": {"docker_image": "demo:image"},
+        },
+    ]
+
+    result = convert_r2e_entries(entries, output_dir=tmp_dataset_dir, dataset_name="demo/r2e", split="train")
+
+    assert len(result.records) == 1
+    assert result.skipped == 1
+    record = result.records[0]
+    assert record["sandbox"]["docker_image"] == "demo:image"
 
 
 def test_convert_swebench_entries_requires_docker_image(tmp_dataset_dir: Path):
@@ -62,3 +131,35 @@ def test_convert_swebench_entries_requires_docker_image(tmp_dataset_dir: Path):
     assert payload["instance_id"] == "django__001"
     assert payload["docker_image"] == "swebench/django:latest"
     assert record["issue"]["title"] == "Fix Django bug"
+
+
+def test_write_manifest_and_maybe_prepull(tmp_path: Path, monkeypatch):
+    result = DatasetConversionResult(
+        records=[
+            {"sandbox": {"docker_image": "img:one"}},
+            {"sandbox": {"docker_image": "img:two"}},
+        ],
+        instance_paths=[],
+    )
+    calls = []
+
+    def fake_prepull(images, **kwargs):
+        calls.append((list(images), kwargs))
+
+    monkeypatch.setattr(prepare_datasets, "prepull_docker_images", fake_prepull)
+
+    manifest = prepare_datasets._write_manifest_and_maybe_prepull(  # pylint: disable=protected-access
+        output_dir=tmp_path,
+        result=result,
+        manifest_name="docker.txt",
+        prepull=True,
+        max_workers=4,
+        retries=2,
+        delay=1,
+        pull_timeout=60,
+    )
+
+    assert manifest.read_text(encoding="utf-8").splitlines() == ["img:one", "img:two"]
+    assert calls == [
+        (["img:one", "img:two"], {"max_workers": 4, "retries": 2, "delay": 1, "pull_timeout": 60})
+    ]

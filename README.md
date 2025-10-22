@@ -46,7 +46,7 @@ tests/             # FakeSandbox 测试与 CGM 适配器回归
      --r2e-dataset R2E-Gym/R2E-Gym-Lite \
      --swebench-dataset princeton-nlp/SWE-bench_Verified
    ```
-   该脚本会下载 Hugging Face 上的 R2E-Gym 训练集与 SWE-bench 测试集，分别写入 `datasets/r2e_gym/train.jsonl`、`datasets/r2e_gym/val.jsonl` 和 `datasets/swebench/test.jsonl`，并在 `instances/` 子目录生成每个任务的 `r2e_ds_json`。
+  该脚本会下载 Hugging Face 上的 R2E-Gym 训练集与 SWE-bench 测试集，分别写入 `datasets/r2e_gym/train.jsonl`、`datasets/r2e_gym/val.jsonl` 和 `datasets/swebench/test.jsonl`，并在 `instances/` 子目录生成每个任务的 `r2e_ds_json`。同时会生成 `docker_images.txt` manifest；若带 `--prepull-containers` 会复用 R2E-Gym 的工具并行预拉取容器（可用 `--prepull-max-workers/--prepull-retries/--prepull-delay/--prepull-timeout` 调整）。
 
 3. **运行规则代理冒烟**
    ```bash
@@ -67,7 +67,7 @@ tests/             # FakeSandbox 测试与 CGM 适配器回归
      --cgm-model-path models/codefuse-cgm \
      --print-config
    ```
-   仓库在 `configs/experiments/` 下提供了可直接运行的示例 YAML（单卡调试、8 卡/16 卡配方等）。命令会按“内置默认 < YAML < CLI”优先级合并配置，并在 `outputs/<run_name>/resolved_config.yaml` 中保存最终参数。更多示例与 W&B 监控说明见 [`docs/runbook.md`](docs/runbook.md)。
+  仓库在 `configs/experiments/` 下提供了可直接运行的示例 YAML（单卡调试、8 卡/16 卡配方等）。命令会按“内置默认 < YAML < CLI”优先级合并配置，并在 `outputs/<run_name>/resolved_config.yaml` 中保存最终参数。若 manifest 存在会自动载入；也可通过 `--prepull-containers` 在训练前统一预拉容器。更多示例与 W&B 监控说明见 [`docs/runbook.md`](docs/runbook.md)。
 
 5. **合同冒烟检查**
    ```bash

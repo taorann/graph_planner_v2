@@ -15,8 +15,9 @@ PYTHONPATH=. python scripts/prepare_datasets.py \
 ```
 
 - 默认会读取 Hugging Face token（环境变量 `HF_TOKEN`），必要时可通过 `--hf-token` 显式指定。
-- `train.jsonl` 与 `val.jsonl` 会写入 `datasets/r2e_gym/`，实例配置（`r2e_ds_json`）位于 `datasets/r2e_gym/instances/`。
-- SWE-bench 评测集会保存为 `datasets/swebench/test.jsonl`，实例配置写入 `datasets/swebench/instances/`。
+- `train.jsonl` 与 `val.jsonl` 会写入 `datasets/r2e_gym/`，实例配置（`r2e_ds_json`）位于 `datasets/r2e_gym/instances/`。脚本在内部先落 parquet 缓存，再输出 JSON/JSONL，并会对缺失 `task_id`/`docker_image` 的条目打印 warning 并跳过，以免整个批次失败。
+- 每次转换会同时生成 `docker_images.txt`（SWE-bench 为 `docker_images_<split>.txt`）罗列所有唯一容器；若带 `--prepull-containers` 会复用 R2E-Gym 的 `pre_pull_docker_images` 并行拉取镜像，支持 `--prepull-max-workers/--prepull-retries/--prepull-delay/--prepull-timeout` 调优。
+- SWE-bench 评测集会保存为 `datasets/swebench/test.jsonl`，实例配置写入 `datasets/swebench/instances/`，并同样生成容器 manifest。
 - 若只想刷新其中一种数据，可带 `--skip-r2e` 或 `--skip-swebench`。
 
 脚本带 `--r2e-val-size` 时会从训练集合中划分验证集；也可通过 `--r2e-val-split` 直接指定官方 split。所有路径均可按需覆盖。
@@ -45,7 +46,7 @@ YAML 顶层字段与含义如下，所有路径均默认为仓库相对路径：
 | `planner_sampling` | `temperature`, `top_p`, `top_k`, `max_input_tokens`, `max_new_tokens`, `stop`, `stop_ids`, `repetition_penalty`, `do_sample`, `stop_on_invalid_json` | Planner 采样策略 |
 | `cgm_generation` | `temperature`, `top_p`, `top_k`, `max_new_tokens`, `num_return_sequences`, `do_sample` | CGM 生成策略 |
 | `training` | `total_epochs`, `train_batch_size`, `grad_accum_steps`, `precision`, `lr`, `weight_decay`, `warmup_steps`, `clip_grad_norm`, `kl_coef`, `entropy_coef`, `value_coef`, `clip_coef`, `target_kl`, `total_steps`, `resume_from`, `gradient_checkpointing` | 训练超参与 Verl/GRPO 相关系数 |
-| `env` | `max_steps`, `reward_scale`, `failure_penalty`, `step_penalty`, `timeout_penalty`, `repo_op_limit`, `disable_cgm_synthesis`, `apply_patches` | 环境奖励与工具开关 |
+| `env` | `max_steps`, `reward_scale`, `failure_penalty`, `step_penalty`, `timeout_penalty`, `repo_op_limit`, `disable_cgm_synthesis`, `apply_patches`, `docker_manifest`, `prepull_containers`, `prepull_max_workers`, `prepull_retries`, `prepull_delay`, `prepull_timeout` | 环境奖励、工具开关与容器预拉取设置 |
 | `parallel` | `tensor_parallel_planner`, `tensor_parallel_cgm`, `replicas`, `parallel_agents`, `rollout_workers`, `workflow_parallel` | 模型并行与 rollout 并发 |
 | `resources` | `num_gpus`, `num_nodes`, `ray_num_gpus`, `ray_num_cpus`, `ray_memory`, `ray_object_store_memory` | 物理/ Ray 资源预算 |
 | `logging` | `wandb.*`, `log_backend`, `output_dir`, `save_interval`, `eval_interval` | 日志与输出目录；`wandb.watch` 支持 `{enabled, log, log_freq}` |
