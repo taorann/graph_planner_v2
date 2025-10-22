@@ -134,10 +134,10 @@ def test_merge_run_config_priority(tmp_path):
     assert args.parallel_agents == 3
     assert args.rollout_workers == 5
     assert args.save_interval == 10
-    assert args.output_dir == Path("cli-output")
+    assert args.output_dir == Path("cli-output").resolve()
     assert args.project_name == "cli-project"
     assert args.disable_cgm_synthesis is True
-    assert args.docker_manifest == Path("cli-manifest.txt")
+    assert args.docker_manifest == Path("cli-manifest.txt").resolve()
     assert args.prepull_containers is True
     assert args.prepull_max_workers == 8
     assert args.prepull_retries == 3

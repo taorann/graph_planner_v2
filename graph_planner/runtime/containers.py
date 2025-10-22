@@ -146,6 +146,7 @@ def collect_docker_images(
 def write_docker_manifest(path: Path, images: Sequence[str]) -> Path:
     """Persist ``images`` to ``path`` in a newline-separated manifest."""
 
+    path = path.expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         for image in images:
@@ -157,6 +158,7 @@ def write_docker_manifest(path: Path, images: Sequence[str]) -> Path:
 def load_docker_manifest(path: Path) -> List[str]:
     """Load a newline-separated manifest of docker images."""
 
+    path = path.expanduser().resolve()
     if not path.exists():
         return []
     with path.open("r", encoding="utf-8") as handle:

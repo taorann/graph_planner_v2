@@ -613,7 +613,7 @@ def test_train_cli_yaml_only_ignores_overrides(tmp_path, monkeypatch, capsys):
         get_verl_data_path=lambda: str(dataset_file),
         get_data_path=lambda: str(dataset_file),
     )
-    val_dataset = Path("datasets/r2e_gym/val.jsonl")
+    val_dataset = Path("datasets/r2e_gym/val.jsonl").resolve()
     val_stub = SimpleNamespace(
         get_verl_data_path=lambda: str(val_dataset),
         get_data_path=lambda: str(val_dataset),

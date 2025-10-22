@@ -25,7 +25,7 @@ class _CLISandbox:
 
 
 def _load_patch(payload: str) -> dict[str, Any]:
-    candidate_path = Path(payload)
+    candidate_path = Path(payload).expanduser().resolve()
     if candidate_path.exists():
         return json.loads(candidate_path.read_text(encoding="utf-8"))
     return json.loads(payload)

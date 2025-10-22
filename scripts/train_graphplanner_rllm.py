@@ -64,8 +64,41 @@ from graph_planner.runtime.containers import (  # noqa: E402
 
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_PLANNER_MODEL_PATH = Path("models/qwen3-14b-instruct")
-DEFAULT_CGM_MODEL_PATH = Path("models/codefuse-cgm")
+REPO_ROOT = Path(
+    os.environ.get("GRAPH_PLANNER_ROOT") or Path(__file__).resolve().parent.parent
+).expanduser().resolve()
+
+DEFAULT_PLANNER_MODEL_PATH = (REPO_ROOT / "models" / "qwen3-14b-instruct").resolve()
+DEFAULT_CGM_MODEL_PATH = (REPO_ROOT / "models" / "codefuse-cgm").resolve()
+DEFAULT_TRAIN_DATASET_PATH = (REPO_ROOT / "datasets" / "r2e_gym" / "train.jsonl").resolve()
+
+
+def _resolve_optional_path(value: Path | str | None) -> Path | None:
+    if value is None:
+        return None
+    return Path(value).expanduser().resolve()
+
+
+def _absolutise_args(args: argparse.Namespace) -> None:
+    for field in [
+        "dataset",
+        "val_dataset",
+        "docker_manifest",
+        "model_path",
+        "tokenizer_path",
+        "critic_model_path",
+        "critic_tokenizer_path",
+        "cgm_model_path",
+        "cgm_tokenizer_path",
+        "output_dir",
+        "resume",
+        "config_file",
+        "config",
+    ]:
+        if hasattr(args, field):
+            resolved = _resolve_optional_path(getattr(args, field))
+            if resolved is not None:
+                setattr(args, field, resolved)
 
 
 def _default_config_path() -> Path:
@@ -83,7 +116,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset",
         type=Path,
-        default=Path("datasets/r2e_gym/train.jsonl"),
+        default=DEFAULT_TRAIN_DATASET_PATH,
         help="Training dataset in JSON/JSONL format.",
     )
     parser.add_argument("--dataset-name", default=None, help="Override dataset registry name.")
@@ -463,9 +496,9 @@ def _configure_agent_env(cfg: OmegaConf, args: argparse.Namespace) -> Tuple[type
 def _apply_training_overrides(cfg: OmegaConf, args: argparse.Namespace) -> Path:
     """应用训练相关参数覆写并返回输出目录。"""
 
-    output_dir = Path(args.output_dir or args.model_path)
-    _set(cfg, "trainer.output_dir", output_dir)
-    _set(cfg, "trainer.default_local_dir", output_dir)
+    output_dir = Path(args.output_dir or args.model_path).expanduser().resolve()
+    _set(cfg, "trainer.output_dir", str(output_dir))
+    _set(cfg, "trainer.default_local_dir", str(output_dir))
 
     if args.save_interval is not None:
         _set(cfg, "trainer.save_interval", int(args.save_interval))
@@ -473,9 +506,9 @@ def _apply_training_overrides(cfg: OmegaConf, args: argparse.Namespace) -> Path:
     if args.eval_interval is not None:
         _set(cfg, "trainer.test_freq", int(args.eval_interval))
     if args.resume is not None:
-        resume_path = Path(args.resume)
-        _set(cfg, "trainer.resume_from", resume_path)
-        _set(cfg, "trainer.resume_from_path", resume_path)
+        resume_path = Path(args.resume).expanduser().resolve()
+        _set(cfg, "trainer.resume_from", str(resume_path))
+        _set(cfg, "trainer.resume_from_path", str(resume_path))
         _set(cfg, "trainer.resume_mode", "manual")
 
     if args.precision is not None:
@@ -573,9 +606,9 @@ def _prepare_container_images(args: argparse.Namespace, final_run_cfg: Dict[str,
     env_cfg = final_run_cfg.setdefault("env", {})
     manifest_path = getattr(args, "docker_manifest", None) or env_cfg.get("docker_manifest")
     if manifest_path:
-        manifest = Path(manifest_path)
+        manifest = Path(manifest_path).expanduser().resolve()
     else:
-        manifest = args.dataset.parent / "docker_images.txt"
+        manifest = (args.dataset.parent / "docker_images.txt").resolve()
     env_cfg["docker_manifest"] = str(manifest)
 
     if manifest.exists():
@@ -612,6 +645,7 @@ def main() -> None:
     """脚本入口：解析参数、准备数据集并触发 rLLM 训练。"""
 
     args = _parse_args()
+    _absolutise_args(args)
 
     defaults = default_training_run_config(args.agent)
     yaml_cfg = load_run_config_file(getattr(args, "config_file", None))
@@ -627,22 +661,26 @@ def main() -> None:
     run_name = wandb_cfg["run_name"]
 
     update_args_from_config(args, final_run_cfg)
+    _absolutise_args(args)
 
     if args.model_path is None:
         default_model = DEFAULT_PLANNER_MODEL_PATH if args.agent == "planner" else DEFAULT_CGM_MODEL_PATH
         args.model_path = default_model
         key = "planner_model" if args.agent == "planner" else "cgm_model"
         final_run_cfg.setdefault("paths", {})[key] = str(default_model)
+    else:
+        args.model_path = _resolve_optional_path(args.model_path)
 
     output_base = Path(
         final_run_cfg.get("logging", {}).get("output_dir")
         or getattr(args, "output_dir", None)
         or args.model_path
     )
+    output_base = output_base.expanduser().resolve()
     if not run_name:
         run_name = f"{args.agent}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
         wandb_cfg["run_name"] = run_name
-    run_dir = output_base / run_name
+    run_dir = (output_base / run_name).resolve()
     final_run_cfg.setdefault("logging", {})["resolved_run_dir"] = str(run_dir)
     resolved_cfg_path = run_dir / "resolved_config.yaml"
     final_run_cfg["logging"]["resolved_config_path"] = str(resolved_cfg_path)

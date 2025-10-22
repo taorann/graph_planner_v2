@@ -24,6 +24,15 @@ from graph_planner.runtime.containers import (
 LOGGER = logging.getLogger(__name__)
 
 
+REPO_ROOT = Path(
+    os.environ.get("GRAPH_PLANNER_ROOT") or Path(__file__).resolve().parent.parent
+).expanduser().resolve()
+
+
+def _resolve_path(path: Path | str) -> Path:
+    return Path(path).expanduser().resolve()
+
+
 def _load_dataset(name: str, split: str, token: Optional[str] = None) -> Iterable[Mapping[str, Any]]:
     from datasets import load_dataset
 
@@ -58,7 +67,8 @@ def _write_manifest_and_maybe_prepull(
         records=result.records,
         instance_paths=result.instance_paths,
     )
-    manifest_path = output_dir / manifest_name
+    output_dir = _resolve_path(output_dir)
+    manifest_path = (output_dir / manifest_name).resolve()
     write_docker_manifest(manifest_path, collection.images)
     missing = getattr(collection, "missing", 0)
     build_only = getattr(collection, "build_only", 0)
@@ -101,6 +111,8 @@ def _prepare_r2e(
     train_limit: Optional[int],
     val_limit: Optional[int],
 ) -> DatasetConversionResult:
+    output_dir = _resolve_path(output_dir)
+
     LOGGER.info("Downloading R2E dataset %s (split=%s)", dataset, train_split)
     train_rows = _subset(_load_dataset(dataset, train_split, token), train_limit)
 
@@ -156,7 +168,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--r2e-val-size", type=int, default=512)
     parser.add_argument("--r2e-train-limit", type=int, default=None)
     parser.add_argument("--r2e-val-limit", type=int, default=None)
-    parser.add_argument("--r2e-output", type=Path, default=Path("datasets/r2e_gym"))
+    parser.add_argument(
+        "--r2e-output",
+        type=Path,
+        default=(REPO_ROOT / "datasets" / "r2e_gym").resolve(),
+    )
     parser.add_argument("--skip-r2e", action="store_true")
 
     parser.add_argument("--prepull-containers", action="store_true")
@@ -172,6 +188,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    args.r2e_output = _resolve_path(args.r2e_output)
     logging.basicConfig(level=getattr(logging, str(args.log_level).upper(), logging.INFO))
 
     token = args.hf_token

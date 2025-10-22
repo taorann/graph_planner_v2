@@ -19,13 +19,41 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional
 import os
 import json
+import sys
 from copy import deepcopy
 
 import yaml
 
 
-PLANNER_MODEL_DIR = os.path.join("models", "qwen3-14b-instruct")
-CGM_MODEL_DIR = os.path.join("models", "codefuse-cgm")
+def _detect_repo_root() -> Path:
+    """Best-effort detection of the repository root for absolute paths."""
+
+    env_root = os.environ.get("GRAPH_PLANNER_ROOT")
+    if env_root:
+        candidate = Path(env_root).expanduser()
+        try:
+            return candidate.resolve()
+        except FileNotFoundError:
+            pass
+
+    for entry in list(sys.path):
+        if not entry:
+            continue
+        candidate = Path(entry).expanduser()
+        try:
+            resolved = candidate.resolve()
+        except FileNotFoundError:
+            continue
+        if (resolved / "graph_planner").exists():
+            return resolved
+
+    return Path(__file__).resolve().parents[2]
+
+
+REPO_ROOT = _detect_repo_root()
+
+PLANNER_MODEL_DIR = (REPO_ROOT / "models" / "qwen3-14b-instruct").resolve()
+CGM_MODEL_DIR = (REPO_ROOT / "models" / "codefuse-cgm").resolve()
 
 
 # ---------------- dataclasses ----------------
@@ -39,8 +67,8 @@ class LintCfg:
 
 @dataclass
 class TelemetryCfg:
-    events_path: str = os.path.join("logs", "events.jsonl")
-    test_runs_path: str = os.path.join("logs", "test_runs.jsonl")
+    events_path: str = str(REPO_ROOT / "logs" / "events.jsonl")
+    test_runs_path: str = str(REPO_ROOT / "logs" / "test_runs.jsonl")
 
 
 @dataclass
@@ -253,8 +281,8 @@ def _apply_env_overrides(raw: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-DEFAULT_TRAIN_DATASET = "datasets/r2e_gym/train.jsonl"
-DEFAULT_VAL_DATASET = "datasets/r2e_gym/val.jsonl"
+DEFAULT_TRAIN_DATASET = str((REPO_ROOT / "datasets" / "r2e_gym" / "train.jsonl").resolve())
+DEFAULT_VAL_DATASET = str((REPO_ROOT / "datasets" / "r2e_gym" / "val.jsonl").resolve())
 
 
 @dataclass
@@ -268,9 +296,9 @@ class ExperimentSection:
 class PathsSection:
     dataset_train: str = DEFAULT_TRAIN_DATASET
     dataset_val: Optional[str] = DEFAULT_VAL_DATASET
-    planner_model: str = PLANNER_MODEL_DIR
+    planner_model: str = str(PLANNER_MODEL_DIR)
     planner_tokenizer: Optional[str] = None
-    cgm_model: str = CGM_MODEL_DIR
+    cgm_model: str = str(CGM_MODEL_DIR)
     cgm_tokenizer: Optional[str] = None
 
 
@@ -433,12 +461,12 @@ def _ensure_run_name(config: Dict[str, Any], agent: str) -> None:
 def default_training_run_config(agent: str) -> Dict[str, Any]:
     base = TrainingRunConfig().to_dict()
     if agent == "planner":
-        base["logging"]["output_dir"] = str(Path(PLANNER_MODEL_DIR))
-        base["paths"]["planner_model"] = str(Path(PLANNER_MODEL_DIR))
+        base["logging"]["output_dir"] = str(PLANNER_MODEL_DIR)
+        base["paths"]["planner_model"] = str(PLANNER_MODEL_DIR)
     else:
-        base["logging"]["output_dir"] = str(Path(CGM_MODEL_DIR))
-        base["paths"]["planner_model"] = str(Path(PLANNER_MODEL_DIR))
-        base["paths"]["cgm_model"] = str(Path(CGM_MODEL_DIR))
+        base["logging"]["output_dir"] = str(CGM_MODEL_DIR)
+        base["paths"]["planner_model"] = str(PLANNER_MODEL_DIR)
+        base["paths"]["cgm_model"] = str(CGM_MODEL_DIR)
     _ensure_run_name(base, agent)
     return base
 
@@ -446,9 +474,10 @@ def default_training_run_config(agent: str) -> Dict[str, Any]:
 def _load_yaml_dict(path: Optional[Path]) -> Dict[str, Any]:
     if path is None:
         return {}
-    if not Path(path).is_file():
-        raise FileNotFoundError(f"Config file {path} does not exist")
-    with open(path, "r", encoding="utf-8") as handle:
+    resolved = _resolve_pathlike(path)
+    if not resolved.is_file():
+        raise FileNotFoundError(f"Config file {resolved} does not exist")
+    with open(resolved, "r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle) or {}
     if not isinstance(data, dict):
         raise TypeError("Top-level YAML config must be a mapping")
@@ -461,11 +490,17 @@ def load_run_config_file(path: Optional[Path]) -> Dict[str, Any]:
     return _load_yaml_dict(path)
 
 
+def _resolve_pathlike(value: Path | str) -> Path:
+    """Expand user components and return an absolute path."""
+
+    return Path(value).expanduser().resolve()
+
+
 def _normalise_cli_value(value: Any) -> Any:
     if isinstance(value, Path):
-        return str(value)
+        return str(_resolve_pathlike(value))
     if isinstance(value, Iterable) and not isinstance(value, (str, bytes, dict)):
-        return [ _normalise_cli_value(v) for v in value ]
+        return [_normalise_cli_value(v) for v in value]
     return value
 
 
@@ -675,23 +710,23 @@ def update_args_from_config(args: Any, config: Mapping[str, Any]) -> None:
     model_key = "planner_model" if agent == "planner" else "cgm_model"
     model_path = paths.get(model_key)
     if model_path:
-        setattr(args, "model_path", Path(model_path))
+        setattr(args, "model_path", _resolve_pathlike(model_path))
     planner_tokenizer = paths.get("planner_tokenizer")
     if planner_tokenizer:
-        setattr(args, "tokenizer_path", Path(planner_tokenizer))
+        setattr(args, "tokenizer_path", _resolve_pathlike(planner_tokenizer))
     cgm_model = paths.get("cgm_model")
     if cgm_model:
-        setattr(args, "cgm_model_path", Path(cgm_model))
+        setattr(args, "cgm_model_path", _resolve_pathlike(cgm_model))
     cgm_tokenizer = paths.get("cgm_tokenizer")
     if cgm_tokenizer:
-        setattr(args, "cgm_tokenizer_path", Path(cgm_tokenizer))
+        setattr(args, "cgm_tokenizer_path", _resolve_pathlike(cgm_tokenizer))
 
     dataset_train = paths.get("dataset_train")
     if dataset_train:
-        setattr(args, "dataset", Path(dataset_train))
+        setattr(args, "dataset", _resolve_pathlike(dataset_train))
     dataset_val = paths.get("dataset_val")
     if dataset_val:
-        setattr(args, "val_dataset", Path(dataset_val))
+        setattr(args, "val_dataset", _resolve_pathlike(dataset_val))
 
     experiment = config.get("experiment", {})
     if "seed" in experiment:
@@ -718,7 +753,7 @@ def update_args_from_config(args: Any, config: Mapping[str, Any]) -> None:
     if training.get("total_steps") is not None:
         setattr(args, "total_steps", int(training["total_steps"]))
     if training.get("resume_from"):
-        setattr(args, "resume", Path(training["resume_from"]))
+        setattr(args, "resume", _resolve_pathlike(training["resume_from"]))
 
     sampling = config.get("planner_sampling", {})
     if sampling.get("temperature") is not None:
@@ -778,7 +813,7 @@ def update_args_from_config(args: Any, config: Mapping[str, Any]) -> None:
     if env_cfg.get("apply_patches") is not None:
         setattr(args, "apply_patches", bool(env_cfg["apply_patches"]))
     if env_cfg.get("docker_manifest"):
-        setattr(args, "docker_manifest", Path(env_cfg["docker_manifest"]))
+        setattr(args, "docker_manifest", _resolve_pathlike(env_cfg["docker_manifest"]))
     if env_cfg.get("prepull_containers") is not None:
         setattr(args, "prepull_containers", bool(env_cfg["prepull_containers"]))
     for field in ("prepull_max_workers", "prepull_retries", "prepull_delay", "prepull_timeout"):
@@ -803,12 +838,13 @@ def update_args_from_config(args: Any, config: Mapping[str, Any]) -> None:
     if logging_cfg.get("eval_interval") is not None:
         setattr(args, "eval_interval", logging_cfg["eval_interval"])
     if logging_cfg.get("output_dir") is not None:
-        setattr(args, "output_dir", Path(logging_cfg["output_dir"]))
+        setattr(args, "output_dir", _resolve_pathlike(logging_cfg["output_dir"]))
 
 
 def serialise_resolved_config(config: Mapping[str, Any], path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
+    resolved_path = _resolve_pathlike(path)
+    resolved_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(resolved_path, "w", encoding="utf-8") as handle:
         yaml.safe_dump(dict(config), handle, sort_keys=False, allow_unicode=True)
 
 

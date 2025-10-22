@@ -24,6 +24,15 @@ from graph_planner.runtime.containers import (
 LOGGER = logging.getLogger(__name__)
 
 
+REPO_ROOT = Path(
+    os.environ.get("GRAPH_PLANNER_ROOT") or Path(__file__).resolve().parent.parent
+).expanduser().resolve()
+
+
+def _resolve_path(path: Path | str) -> Path:
+    return Path(path).expanduser().resolve()
+
+
 def _load_hf_dataset(
     name: str, split: str, token: Optional[str] = None
 ) -> tuple[Iterable[Mapping[str, Any]], str]:
@@ -169,7 +178,8 @@ def _write_manifest_and_maybe_prepull(
         records=result.records,
         instance_paths=result.instance_paths,
     )
-    manifest_path = output_dir / manifest_name
+    output_dir = _resolve_path(output_dir)
+    manifest_path = (output_dir / manifest_name).resolve()
     write_docker_manifest(manifest_path, collection.images)
     missing = getattr(collection, "missing", 0)
     build_only = getattr(collection, "build_only", 0)
@@ -232,6 +242,7 @@ def _prepare_swebench(
                 requested_split,
             )
 
+    output_dir = _resolve_path(output_dir)
     ensure_directory(output_dir)
     result = convert_swebench_entries(
         rows,
@@ -239,7 +250,7 @@ def _prepare_swebench(
         dataset_name=dataset_path.as_posix() if dataset_path else dataset,
         split=effective_split,
     )
-    output_file = output_dir / f"{effective_split}.jsonl"
+    output_file = (output_dir / f"{effective_split}.jsonl").resolve()
     write_jsonl(output_file, result.records)
     LOGGER.info("Wrote %d SWE-bench records to %s", len(result.records), output_file)
     return result
@@ -252,7 +263,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--swebench-dataset", default="princeton-nlp/SWE-bench_Verified")
     parser.add_argument("--swebench-split", default="validation")
     parser.add_argument("--swebench-limit", type=int, default=None)
-    parser.add_argument("--swebench-output", type=Path, default=Path("datasets/swebench"))
+    parser.add_argument(
+        "--swebench-output",
+        type=Path,
+        default=(REPO_ROOT / "datasets" / "swebench").resolve(),
+    )
     parser.add_argument(
         "--swebench-path",
         type=Path,
@@ -274,6 +289,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    args.swebench_output = _resolve_path(args.swebench_output)
+    if args.swebench_path is not None:
+        args.swebench_path = _resolve_path(args.swebench_path)
     logging.basicConfig(level=getattr(logging, str(args.log_level).upper(), logging.INFO))
 
     if args.skip_swebench:

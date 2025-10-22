@@ -42,10 +42,11 @@ def test_convert_r2e_entries_creates_json_and_jsonl(tmp_dataset_dir: Path):
     record = result.records[0]
     assert record["task_id"] == "numpy#123"
     assert record["sandbox"]["backend"] == "repoenv"
-    rel_path = Path(record["sandbox"]["r2e_ds_json"])
-    assert (tmp_dataset_dir / rel_path).is_file()
-    with (tmp_dataset_dir / rel_path).open("r", encoding="utf-8") as handle:
-        saved = json.load(handle)
+    record_path = Path(record["sandbox"]["r2e_ds_json"])
+    assert record_path.is_absolute()
+    assert record_path.is_relative_to(tmp_dataset_dir)
+    assert record_path.is_file()
+    saved = json.loads(record_path.read_text(encoding="utf-8"))
     assert saved["docker_image"] == "r2e/numpy:latest"
     assert saved["task_id"] == "numpy#123"
 
@@ -67,8 +68,10 @@ def test_convert_r2e_entries_uses_nested_ds_identifier(tmp_dataset_dir: Path):
 
     assert [record["task_id"] for record in result.records] == ["pytorch__issue-42"]
     assert result.skipped == 0
-    rel_path = Path(result.records[0]["sandbox"]["r2e_ds_json"])
-    assert rel_path.suffix == ".json"
+    record_path = Path(result.records[0]["sandbox"]["r2e_ds_json"])
+    assert record_path.is_absolute()
+    assert record_path.is_relative_to(tmp_dataset_dir)
+    assert record_path.suffix == ".json"
 
 
 def test_convert_r2e_entries_generates_fallback_identifier(tmp_dataset_dir: Path):
@@ -89,9 +92,10 @@ def test_convert_r2e_entries_generates_fallback_identifier(tmp_dataset_dir: Path
     assert result.skipped == 0
     for record in result.records:
         assert record["task_id"].startswith("demo/r2e:train:")
-        rel_path = Path(record["sandbox"]["r2e_ds_json"])
-        assert rel_path.is_relative_to(Path("."))
-        assert rel_path.name.endswith(".json")
+        record_path = Path(record["sandbox"]["r2e_ds_json"])
+        assert record_path.is_absolute()
+        assert record_path.is_relative_to(tmp_dataset_dir)
+        assert record_path.name.endswith(".json")
 
 
 def test_convert_r2e_entries_skips_missing_metadata(tmp_dataset_dir: Path):
@@ -128,10 +132,10 @@ def test_convert_swebench_entries_requires_docker_image(tmp_dataset_dir: Path, m
     assert len(result.records) == 1
     assert result.skipped == 0
     record = result.records[0]
-    rel_path = Path(record["sandbox"]["r2e_ds_json"])
-    ds_file = tmp_dataset_dir / rel_path
-    assert ds_file.exists()
-    payload = json.loads(ds_file.read_text(encoding="utf-8"))
+    record_path = Path(record["sandbox"]["r2e_ds_json"])
+    assert record_path.is_absolute()
+    assert record_path.is_relative_to(tmp_dataset_dir)
+    payload = json.loads(record_path.read_text(encoding="utf-8"))
     assert payload["instance_id"] == "django__001"
     assert payload["docker_image"] == "swebench/django:latest"
     assert "requires_build" not in record["sandbox"]
@@ -153,8 +157,10 @@ def test_convert_swebench_entries_supports_environment_block(tmp_dataset_dir: Pa
 
     assert len(result.records) == 1
     record = result.records[0]
-    ds_file = tmp_dataset_dir / record["sandbox"]["r2e_ds_json"]
-    payload = json.loads(ds_file.read_text(encoding="utf-8"))
+    record_path = Path(record["sandbox"]["r2e_ds_json"])
+    assert record_path.is_absolute()
+    assert record_path.is_relative_to(tmp_dataset_dir)
+    payload = json.loads(record_path.read_text(encoding="utf-8"))
     assert payload["docker_image"] == "us-docker.pkg.dev/demo/astropy:latest"
     assert record["sandbox"]["docker_image"] == "us-docker.pkg.dev/demo/astropy:latest"
     assert "requires_build" not in record["sandbox"]
@@ -212,7 +218,10 @@ def test_convert_swebench_entries_uses_spec_when_available(tmp_dataset_dir: Path
     spec_payload = sandbox["swebench_spec"]
     assert spec_payload["repo"] == "sympy/sympy"
     assert spec_payload["arch"] == "x86_64"
-    ds_payload = json.loads((tmp_dataset_dir / sandbox["r2e_ds_json"]).read_text(encoding="utf-8"))
+    record_path = Path(sandbox["r2e_ds_json"])
+    assert record_path.is_absolute()
+    assert record_path.is_relative_to(tmp_dataset_dir)
+    ds_payload = json.loads(record_path.read_text(encoding="utf-8"))
     assert ds_payload["requires_build"] is True
     assert ds_payload["swebench_spec"]["repo_script_list"] == ["echo repo"]
 
@@ -317,7 +326,9 @@ def test_prepare_swebench_validation_prefers_local(tmp_path: Path, monkeypatch):
     record = result.records[0]
     assert record["task_id"] == "demo__repo-1"
     ds_path = Path(record["sandbox"]["r2e_ds_json"])
-    assert (tmp_path / "out" / ds_path).exists()
+    assert ds_path.is_absolute()
+    assert ds_path.exists()
+    assert ds_path.is_relative_to((tmp_path / "out").resolve())
 
 
 def test_prepare_swebench_validation_falls_back_to_test_split(tmp_path: Path, monkeypatch):

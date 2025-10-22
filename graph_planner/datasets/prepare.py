@@ -35,12 +35,14 @@ def sanitize_identifier(value: str) -> str:
 def ensure_directory(path: Path) -> None:
     """Ensure ``path`` exists as a directory."""
 
+    path = path.expanduser().resolve()
     path.mkdir(parents=True, exist_ok=True)
 
 
 def write_jsonl(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
     """Write ``rows`` to ``path`` in JSONL format using UTF-8 encoding."""
 
+    path = path.expanduser().resolve()
     ensure_directory(path.parent)
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
@@ -153,8 +155,9 @@ def convert_r2e_entries(
 ) -> DatasetConversionResult:
     """Convert R2E-Gym style entries into Graph Planner tasks."""
 
+    output_dir = output_dir.expanduser().resolve()
     ensure_directory(output_dir)
-    instance_dir = output_dir / "instances"
+    instance_dir = (output_dir / "instances").resolve()
     ensure_directory(instance_dir)
 
     records: List[MutableMapping[str, object]] = []
@@ -269,7 +272,7 @@ def convert_r2e_entries(
                 "sandbox": {
                     "backend": "repoenv",
                     "docker_image": docker_image.strip(),
-                    "r2e_ds_json": str(rel_path),
+                    "r2e_ds_json": str(abs_path),
                 },
             }
             if repo_name:
@@ -292,8 +295,9 @@ def convert_swebench_entries(
 ) -> DatasetConversionResult:
     """Convert SWE-bench style entries into Graph Planner tasks."""
 
+    output_dir = output_dir.expanduser().resolve()
     ensure_directory(output_dir)
-    instance_dir = output_dir / "instances"
+    instance_dir = (output_dir / "instances").resolve()
     ensure_directory(instance_dir)
 
     records: List[MutableMapping[str, object]] = []
@@ -440,7 +444,7 @@ def convert_swebench_entries(
                     "mounts": {},
                     "env": {},
                     "backend": "repoenv",
-                    "r2e_ds_json": str(swe_relative),
+                    "r2e_ds_json": str(ds_path),
                 },
                 "data_source": dataset_name,
                 "split": split,

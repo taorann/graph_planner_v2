@@ -44,6 +44,7 @@ from graph_planner.integrations.rllm import (  # noqa: E402
 from scripts.train_graphplanner_rllm import (  # noqa: E402
     DEFAULT_CGM_MODEL_PATH,
     DEFAULT_PLANNER_MODEL_PATH,
+    _absolutise_args,
     _apply_logging_overrides,
     _apply_model_overrides,
     _apply_parallel_overrides,
@@ -56,6 +57,7 @@ from scripts.train_graphplanner_rllm import (  # noqa: E402
     _set,
     _prepare_container_images,
     _validate_parallel_config,
+    _resolve_optional_path,
 )
 
 
@@ -163,6 +165,7 @@ def _resolve_eval_dataset(path: Path, *, name: str, split: str) -> tuple[str, in
 
 def main() -> None:
     args = _parse_args()
+    _absolutise_args(args)
 
     defaults = default_training_run_config(args.agent)
     yaml_cfg = load_run_config_file(getattr(args, "config_file", None))
@@ -178,22 +181,26 @@ def main() -> None:
     run_name = wandb_cfg["run_name"]
 
     update_args_from_config(args, final_run_cfg)
+    _absolutise_args(args)
 
     if args.model_path is None:
         default_model = DEFAULT_PLANNER_MODEL_PATH if args.agent == "planner" else DEFAULT_CGM_MODEL_PATH
         args.model_path = default_model
         key = "planner_model" if args.agent == "planner" else "cgm_model"
         final_run_cfg.setdefault("paths", {})[key] = str(default_model)
+    else:
+        args.model_path = _resolve_optional_path(args.model_path)
 
     output_base = Path(
         final_run_cfg.get("logging", {}).get("output_dir")
         or getattr(args, "output_dir", None)
         or args.model_path
     )
+    output_base = output_base.expanduser().resolve()
     if not run_name:
         run_name = f"{args.agent}-eval-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
         wandb_cfg["run_name"] = run_name
-    run_dir = output_base / run_name
+    run_dir = (output_base / run_name).resolve()
     final_run_cfg.setdefault("logging", {})["resolved_run_dir"] = str(run_dir)
     resolved_cfg_path = run_dir / "resolved_config.yaml"
     final_run_cfg["logging"]["resolved_config_path"] = str(resolved_cfg_path)
