@@ -28,9 +28,8 @@ tests/             # FakeSandbox 测试与 CGM 适配器回归
 
 各目录的职责与详细说明可参考：
 
-- [`docs/r2e_gym_code_overview.md`](docs/r2e_gym_code_overview.md)：系统分层、动作协议以及三种容器后端。
+- [`docs/graph_planner_architecture_pipeline.md`](docs/graph_planner_architecture_pipeline.md)：架构分层、容器运行流以及 CGM / rLLM 训练流水线的统一参考。
 - [`docs/scripts_and_tests_guide.md`](docs/scripts_and_tests_guide.md)：脚本与测试入口、ACI/Git/Lint/Test 的实现来源。
-- [`docs/container_testing_reference.md`](docs/container_testing_reference.md)：SandboxRuntime 行为、日志位置与 Rule pipeline 测试桩。
 
 ## 快速上手
 
@@ -53,18 +52,25 @@ tests/             # FakeSandbox 测试与 CGM 适配器回归
 
 3. **启动强化学习训练（需要 rLLM + Docker 环境）**
    ```bash
-   python scripts/train_graphplanner_rllm.py \
-     --dataset datasets/graphplanner_repoenv_sample.jsonl \
-     --model-path <path/to/base/checkpoint>
+   PYTHONPATH=. python scripts/train_graphplanner_rllm.py \
+     --config-file configs/experiments/planner_debug.yaml \
+     --dataset datasets/r2e_gym/graphplanner_repoenv_train.jsonl \
+     --model-path models/qwen3-14b-instruct \
+     --cgm-model-path models/codefuse-cgm \
+     --print-config
    ```
-   训练前请确认 Docker daemon 可用、数据集已注册且本地模型接口就绪。详细步骤可参阅 `docs/repoenv_smoke_test.md` 与 `docs/project_status.md`。
+   命令会按“内置默认 < YAML < CLI”优先级合并配置，并在 `outputs/<run_name>/resolved_config.yaml` 中保存最终参数。更多示例（单卡/8 卡/16 卡）与 W&B 监控说明见 [`docs/runbook.md`](docs/runbook.md)。
+
+4. **合同冒烟检查**
+   ```bash
+   PYTHONPATH=. python scripts/validate_contracts.py
+   ```
+   该脚本会调用解析器与补丁校验器，以确保 Planner/CGM 的协议未发生漂移。
 
 ## 文档索引
 
-- [`docs/repoenv_smoke_test.md`](docs/repoenv_smoke_test.md)：在拥有 Docker 的主机上进行 RepoEnv 冒烟测试的完整流程。
-- [`docs/github_update_instructions.md`](docs/github_update_instructions.md)：提交前的自检命令、Git 流程与日志要求。
-- [`docs/rllm_integration_report.md`](docs/rllm_integration_report.md)：rLLM/VERL 集成状态、配置项以及待办事项。
-- [`docs/container_testing_reference.md`](docs/container_testing_reference.md)：容器后端、遥测记录与测试桩说明。
+- [`docs/graph_planner_architecture_pipeline.md`](docs/graph_planner_architecture_pipeline.md)：端到端架构、RepoEnv 冒烟指引与训练命令速查。
+- [`docs/runbook.md`](docs/runbook.md)：rLLM 训练/评估配置、YAML-only 模式、并行预检与 W&B 监控指南。
 
 若需进一步了解 ACI 工具链与 Git 封装的使用方式，请参见 `docs/scripts_and_tests_guide.md` 中的“ACI / Git / Lint / Test 的实现来源”章节。
 

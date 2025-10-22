@@ -13,10 +13,19 @@ Step 4.0：配置定稿
 优先级：环境变量 > .aci/config.json > 默认值
 """
 
+import argparse
 from dataclasses import dataclass, field, asdict
-from typing import Any, Dict, Optional
+from pathlib import Path
+from typing import Any, Dict, Iterable, Mapping, Optional
 import os
 import json
+from copy import deepcopy
+
+import yaml
+
+
+PLANNER_MODEL_DIR = os.path.join("models", "qwen3-14b-instruct")
+CGM_MODEL_DIR = os.path.join("models", "codefuse-cgm")
 
 
 # ---------------- dataclasses ----------------
@@ -53,8 +62,13 @@ class CGMCfg:
     api_key_env: str = "CGM_API_KEY"     # 从这个环境变量里取 key
     model: str = "cgm-default"
     temperature: float = 0.2
+    top_p: float = 0.9
     max_tokens: int = 2048
     timeout_s: int = 60
+    model_path: Optional[str] = CGM_MODEL_DIR      # 本地模型权重路径（Hugging Face 兼容）
+    tokenizer_path: Optional[str] = None  # 如未指定则复用 model_path
+    max_input_tokens: int = 8192
+    device: Optional[str] = None
 
 
 @dataclass
@@ -69,6 +83,10 @@ class PlannerModelCfg:
     timeout_s: int = 60
     system_prompt: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    model_path: Optional[str] = PLANNER_MODEL_DIR          # 本地推理：HF checkpoint
+    tokenizer_path: Optional[str] = None
+    max_input_tokens: int = 4096
+    device: Optional[str] = None
 
 
 @dataclass
@@ -87,6 +105,15 @@ class Config:
     # ---- 记忆/测试策略 ----
     prefer_test_files: bool = True
     max_tfile_fraction: float = 0.60
+    memory_caps: Dict[str, int] = field(
+        default_factory=lambda: {
+            "nodes": 200,
+            "edges": 1000,
+            "frontier": 50,
+            "planner_tokens": 2000,
+            "cgm_tokens": 16000,
+        }
+    )
 
     # ---- 子系统配置 ----
     lint: LintCfg = field(default_factory=LintCfg)
@@ -147,12 +174,22 @@ def _apply_env_overrides(raw: Dict[str, Any]) -> Dict[str, Any]:
         raw.setdefault("cgm", {})["model"] = os.environ["CGM_MODEL"]
     if "CGM_TEMPERATURE" in os.environ:
         raw.setdefault("cgm", {})["temperature"] = float(os.environ["CGM_TEMPERATURE"])
+    if "CGM_TOP_P" in os.environ:
+        raw.setdefault("cgm", {})["top_p"] = float(os.environ["CGM_TOP_P"])
     if "CGM_MAX_TOKENS" in os.environ:
         raw.setdefault("cgm", {})["max_tokens"] = int(os.environ["CGM_MAX_TOKENS"])
     if "CGM_TIMEOUT_S" in os.environ:
         raw.setdefault("cgm", {})["timeout_s"] = int(os.environ["CGM_TIMEOUT_S"])
     if "CGM_API_KEY_ENV" in os.environ:
         raw.setdefault("cgm", {})["api_key_env"] = os.environ["CGM_API_KEY_ENV"]
+    if "CGM_MODEL_PATH" in os.environ:
+        raw.setdefault("cgm", {})["model_path"] = os.environ["CGM_MODEL_PATH"]
+    if "CGM_TOKENIZER_PATH" in os.environ:
+        raw.setdefault("cgm", {})["tokenizer_path"] = os.environ["CGM_TOKENIZER_PATH"]
+    if "CGM_MAX_INPUT_TOKENS" in os.environ:
+        raw.setdefault("cgm", {})["max_input_tokens"] = int(os.environ["CGM_MAX_INPUT_TOKENS"])
+    if "CGM_DEVICE" in os.environ:
+        raw.setdefault("cgm", {})["device"] = os.environ["CGM_DEVICE"]
 
     # PLANNER MODEL
     if "PLANNER_MODEL_ENABLED" in os.environ:
@@ -173,6 +210,14 @@ def _apply_env_overrides(raw: Dict[str, Any]) -> Dict[str, Any]:
         raw.setdefault("planner_model", {})["timeout_s"] = int(os.environ["PLANNER_MODEL_TIMEOUT_S"])
     if "PLANNER_MODEL_SYSTEM_PROMPT" in os.environ:
         raw.setdefault("planner_model", {})["system_prompt"] = os.environ["PLANNER_MODEL_SYSTEM_PROMPT"]
+    if "PLANNER_MODEL_PATH" in os.environ:
+        raw.setdefault("planner_model", {})["model_path"] = os.environ["PLANNER_MODEL_PATH"]
+    if "PLANNER_MODEL_TOKENIZER_PATH" in os.environ:
+        raw.setdefault("planner_model", {})["tokenizer_path"] = os.environ["PLANNER_MODEL_TOKENIZER_PATH"]
+    if "PLANNER_MODEL_MAX_INPUT_TOKENS" in os.environ:
+        raw.setdefault("planner_model", {})["max_input_tokens"] = int(os.environ["PLANNER_MODEL_MAX_INPUT_TOKENS"])
+    if "PLANNER_MODEL_DEVICE" in os.environ:
+        raw.setdefault("planner_model", {})["device"] = os.environ["PLANNER_MODEL_DEVICE"]
 
     # GLOBAL
     if "MODE" in os.environ:
@@ -201,6 +246,547 @@ def _apply_env_overrides(raw: Dict[str, Any]) -> Dict[str, Any]:
         raw.setdefault("telemetry", {})["test_runs_path"] = os.environ["TEST_RUNS_PATH"]
 
     return raw
+
+
+# ---------------------------------------------------------------------------
+# 训练/评估 YAML 配置解析（Pain Point #2 之后新增）
+# ---------------------------------------------------------------------------
+
+
+DEFAULT_TRAIN_DATASET = "datasets/r2e_gym/graphplanner_repoenv_train.jsonl"
+DEFAULT_VAL_DATASET = "datasets/r2e_gym/graphplanner_repoenv_val.jsonl"
+
+
+@dataclass
+class ExperimentSection:
+    name: str = "graph_planner_rl"
+    seed: int = 42
+    notes: Optional[str] = None
+
+
+@dataclass
+class PathsSection:
+    dataset_train: str = DEFAULT_TRAIN_DATASET
+    dataset_val: Optional[str] = DEFAULT_VAL_DATASET
+    planner_model: str = PLANNER_MODEL_DIR
+    planner_tokenizer: Optional[str] = None
+    cgm_model: str = CGM_MODEL_DIR
+    cgm_tokenizer: Optional[str] = None
+
+
+@dataclass
+class BackendsSection:
+    planner_backend: str = "local"
+    cgm_backend: str = "local"
+    dtype: str = "fp32"
+    device_map_planner: list[int] = field(default_factory=list)
+    device_map_cgm: list[int] = field(default_factory=list)
+    max_gpu_memory: Optional[str] = None
+
+
+@dataclass
+class SamplingSection:
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    top_k: Optional[int] = None
+    max_new_tokens: Optional[int] = None
+    repetition_penalty: Optional[float] = None
+    do_sample: Optional[bool] = None
+    stop_on_invalid_json: Optional[bool] = None
+    stop: list[str] = field(default_factory=list)
+    stop_ids: list[int] = field(default_factory=list)
+
+
+@dataclass
+class GenerationSection:
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    top_k: Optional[int] = None
+    max_new_tokens: Optional[int] = None
+    num_return_sequences: Optional[int] = None
+    do_sample: Optional[bool] = None
+
+
+@dataclass
+class TrainingSection:
+    total_epochs: int = 1
+    train_batch_size: int = 4
+    grad_accum_steps: int = 1
+    precision: Optional[str] = None
+    lr: Optional[float] = None
+    weight_decay: Optional[float] = None
+    warmup_steps: Optional[int] = None
+    gradient_checkpointing: bool = False
+    clip_grad_norm: Optional[float] = None
+    kl_coef: Optional[float] = None
+    entropy_coef: Optional[float] = None
+    value_coef: Optional[float] = None
+    clip_coef: Optional[float] = None
+    target_kl: Optional[float] = None
+    total_steps: Optional[int] = None
+    resume_from: Optional[str] = None
+
+
+@dataclass
+class EnvSection:
+    max_steps: int = 6
+    reward_scale: float = 1.0
+    failure_penalty: float = 0.0
+    step_penalty: float = 0.0
+    timeout_penalty: float = 0.0
+    repo_op_limit: Optional[int] = None
+    disable_cgm_synthesis: bool = False
+    apply_patches: bool = True
+
+
+@dataclass
+class ParallelSection:
+    tensor_parallel_planner: int = 1
+    tensor_parallel_cgm: int = 1
+    replicas: int = 1
+    parallel_agents: int = 1
+    rollout_workers: int = 1
+    workflow_parallel: int = 1
+
+
+@dataclass
+class ResourceSection:
+    num_gpus: int = 1
+    num_nodes: int = 1
+    ray_num_gpus: int = 1
+    ray_num_cpus: int = 4
+    ray_memory: Optional[int] = None
+    ray_object_store_memory: Optional[int] = None
+
+
+@dataclass
+class WandbWatchSection:
+    enabled: bool = False
+    log: str = "gradients"
+    log_freq: int = 200
+
+
+@dataclass
+class WandbSection:
+    enabled: bool = False
+    offline: bool = False
+    project: str = "graph-planner"
+    entity: Optional[str] = None
+    run_name: str = ""
+    watch: WandbWatchSection = field(default_factory=WandbWatchSection)
+
+
+@dataclass
+class LoggingSection:
+    wandb: WandbSection = field(default_factory=WandbSection)
+    log_backend: str = "none"
+    output_dir: str = PLANNER_MODEL_DIR
+    save_interval: Optional[int] = None
+    eval_interval: Optional[int] = None
+
+
+@dataclass
+class TelemetrySection:
+    log_gpu: bool = True
+    log_ray: bool = True
+    log_patch_stats: bool = True
+    log_planner_parse_errors: bool = True
+    log_cgm_errors: bool = True
+
+
+@dataclass
+class TrainingRunConfig:
+    experiment: ExperimentSection = field(default_factory=ExperimentSection)
+    paths: PathsSection = field(default_factory=PathsSection)
+    backends: BackendsSection = field(default_factory=BackendsSection)
+    planner_sampling: SamplingSection = field(default_factory=SamplingSection)
+    cgm_generation: GenerationSection = field(default_factory=GenerationSection)
+    training: TrainingSection = field(default_factory=TrainingSection)
+    env: EnvSection = field(default_factory=EnvSection)
+    parallel: ParallelSection = field(default_factory=ParallelSection)
+    resources: ResourceSection = field(default_factory=ResourceSection)
+    logging: LoggingSection = field(default_factory=LoggingSection)
+    telemetry: TelemetrySection = field(default_factory=TelemetrySection)
+    verl_overrides: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        return data
+
+
+def _deepcopy_dict(data: Mapping[str, Any]) -> Dict[str, Any]:
+    return deepcopy(dict(data))
+
+
+def _ensure_run_name(config: Dict[str, Any], agent: str) -> None:
+    wandb_cfg = config.setdefault("logging", {}).setdefault("wandb", {})
+    if not wandb_cfg.get("run_name"):
+        wandb_cfg["run_name"] = f"{agent}-run"
+
+
+def default_training_run_config(agent: str) -> Dict[str, Any]:
+    base = TrainingRunConfig().to_dict()
+    if agent == "planner":
+        base["logging"]["output_dir"] = str(Path(PLANNER_MODEL_DIR))
+        base["paths"]["planner_model"] = str(Path(PLANNER_MODEL_DIR))
+    else:
+        base["logging"]["output_dir"] = str(Path(CGM_MODEL_DIR))
+        base["paths"]["planner_model"] = str(Path(PLANNER_MODEL_DIR))
+        base["paths"]["cgm_model"] = str(Path(CGM_MODEL_DIR))
+    _ensure_run_name(base, agent)
+    return base
+
+
+def _load_yaml_dict(path: Optional[Path]) -> Dict[str, Any]:
+    if path is None:
+        return {}
+    if not Path(path).is_file():
+        raise FileNotFoundError(f"Config file {path} does not exist")
+    with open(path, "r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    if not isinstance(data, dict):
+        raise TypeError("Top-level YAML config must be a mapping")
+    return data
+
+
+def load_run_config_file(path: Optional[Path]) -> Dict[str, Any]:
+    """Public helper to read YAML config files for training/eval launches."""
+
+    return _load_yaml_dict(path)
+
+
+def _normalise_cli_value(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Iterable) and not isinstance(value, (str, bytes, dict)):
+        return [ _normalise_cli_value(v) for v in value ]
+    return value
+
+
+def _cli_override_entry(namespace: argparse.Namespace, attr: str) -> Any:  # type: ignore[name-defined]
+    if not hasattr(namespace, attr):  # pragma: no cover - defensive guard
+        return None
+    value = getattr(namespace, attr)
+    if value is None:
+        return None
+    return _normalise_cli_value(value)
+
+
+def build_cli_overrides(args: Any, *, mode: str) -> Dict[str, Any]:
+    overrides: Dict[str, Any] = {}
+
+    seed = _cli_override_entry(args, "seed")
+    if seed is not None:
+        overrides.setdefault("experiment", {})["seed"] = int(seed)
+
+    dataset = _cli_override_entry(args, "dataset")
+    if dataset is not None:
+        overrides.setdefault("paths", {})["dataset_train"] = dataset
+
+    val_dataset = _cli_override_entry(args, "val_dataset")
+    if val_dataset is not None:
+        overrides.setdefault("paths", {})["dataset_val"] = val_dataset
+
+    model_path = _cli_override_entry(args, "model_path")
+    if model_path is not None:
+        key = "planner_model" if getattr(args, "agent", "planner") == "planner" else "cgm_model"
+        overrides.setdefault("paths", {})[key] = model_path
+
+    tokenizer_path = _cli_override_entry(args, "tokenizer_path")
+    if tokenizer_path is not None:
+        overrides.setdefault("paths", {})["planner_tokenizer"] = tokenizer_path
+
+    cgm_model_path = _cli_override_entry(args, "cgm_model_path")
+    if cgm_model_path is not None:
+        overrides.setdefault("paths", {})["cgm_model"] = cgm_model_path
+
+    cgm_tokenizer_path = _cli_override_entry(args, "cgm_tokenizer_path")
+    if cgm_tokenizer_path is not None:
+        overrides.setdefault("paths", {})["cgm_tokenizer"] = cgm_tokenizer_path
+
+    precision = _cli_override_entry(args, "precision")
+    if precision is not None:
+        overrides.setdefault("training", {})["precision"] = precision
+
+    for field in ["train_batch_size", "total_epochs", "grad_accum_steps", "lr", "weight_decay", "warmup_steps"]:
+        value = _cli_override_entry(args, field)
+        if value is not None:
+            overrides.setdefault("training", {})[field if field != "total_epochs" else "total_epochs"] = value
+
+    total_steps = _cli_override_entry(args, "total_steps")
+    if total_steps is not None:
+        overrides.setdefault("training", {})["total_steps"] = total_steps
+
+    resume_from = _cli_override_entry(args, "resume")
+    if resume_from is not None:
+        overrides.setdefault("training", {})["resume_from"] = resume_from
+
+    temperature = _cli_override_entry(args, "temperature")
+    if temperature is not None:
+        overrides.setdefault("planner_sampling", {})["temperature"] = float(temperature)
+
+    top_p = _cli_override_entry(args, "top_p")
+    if top_p is not None:
+        overrides.setdefault("planner_sampling", {})["top_p"] = float(top_p)
+
+    max_input_tokens = _cli_override_entry(args, "max_input_tokens")
+    if max_input_tokens is not None:
+        overrides.setdefault("planner_sampling", {})["max_input_tokens"] = int(max_input_tokens)
+
+    max_output_tokens = _cli_override_entry(args, "max_output_tokens")
+    if max_output_tokens is not None:
+        overrides.setdefault("planner_sampling", {})["max_new_tokens"] = int(max_output_tokens)
+
+    stop = _cli_override_entry(args, "stop")
+    if stop is not None:
+        overrides.setdefault("planner_sampling", {})["stop"] = stop
+
+    stop_ids = _cli_override_entry(args, "stop_ids")
+    if stop_ids is not None:
+        overrides.setdefault("planner_sampling", {})["stop_ids"] = [int(s) for s in stop_ids]
+
+    overrides.setdefault("parallel", {})["tensor_parallel_planner"] = int(
+        getattr(args, "tensor_parallel", 1) or 1
+    )
+    overrides.setdefault("parallel", {})["tensor_parallel_cgm"] = int(
+        getattr(args, "tensor_parallel", 1) or 1
+    )
+    replicas = _cli_override_entry(args, "rollout_replicas")
+    if replicas is not None:
+        overrides.setdefault("parallel", {})["replicas"] = int(replicas)
+
+    parallel_agents = _cli_override_entry(args, "parallel_agents")
+    if parallel_agents is not None:
+        overrides.setdefault("parallel", {})["parallel_agents"] = int(parallel_agents)
+
+    rollout_workers = _cli_override_entry(args, "rollout_workers")
+    if rollout_workers is not None:
+        overrides.setdefault("parallel", {})["rollout_workers"] = int(rollout_workers)
+
+    workflow_parallel = _cli_override_entry(args, "workflow_parallel")
+    if workflow_parallel is not None:
+        overrides.setdefault("parallel", {})["workflow_parallel"] = int(workflow_parallel)
+
+    overrides.setdefault("resources", {})["num_gpus"] = int(getattr(args, "num_gpus", 1) or 1)
+    overrides.setdefault("resources", {})["num_nodes"] = int(getattr(args, "num_nodes", 1) or 1)
+
+    ray_num_gpus = _cli_override_entry(args, "ray_num_gpus")
+    if ray_num_gpus is not None:
+        overrides.setdefault("resources", {})["ray_num_gpus"] = int(ray_num_gpus)
+
+    ray_num_cpus = _cli_override_entry(args, "ray_num_cpus")
+    if ray_num_cpus is not None:
+        overrides.setdefault("resources", {})["ray_num_cpus"] = int(ray_num_cpus)
+
+    ray_memory = _cli_override_entry(args, "ray_memory")
+    if ray_memory is not None:
+        overrides.setdefault("resources", {})["ray_memory"] = int(ray_memory)
+
+    ray_object_store_memory = _cli_override_entry(args, "ray_object_store_memory")
+    if ray_object_store_memory is not None:
+        overrides.setdefault("resources", {})["ray_object_store_memory"] = int(ray_object_store_memory)
+
+    log_backend = _cli_override_entry(args, "log_backend")
+    if log_backend is not None:
+        overrides.setdefault("logging", {})["log_backend"] = log_backend
+
+    output_dir = _cli_override_entry(args, "output_dir")
+    if output_dir is not None:
+        overrides.setdefault("logging", {})["output_dir"] = output_dir
+
+    save_interval = _cli_override_entry(args, "save_interval")
+    if save_interval is not None:
+        overrides.setdefault("logging", {})["save_interval"] = int(save_interval)
+
+    eval_interval = _cli_override_entry(args, "eval_interval")
+    if eval_interval is not None:
+        overrides.setdefault("logging", {})["eval_interval"] = int(eval_interval)
+
+    log_to_wandb = bool(getattr(args, "log_to_wandb", False))
+    if log_to_wandb:
+        overrides.setdefault("logging", {}).setdefault("wandb", {})["enabled"] = True
+
+    if getattr(args, "wandb_offline", False):
+        overrides.setdefault("logging", {}).setdefault("wandb", {})["offline"] = True
+
+    project_name = _cli_override_entry(args, "project_name")
+    if project_name is not None:
+        overrides.setdefault("logging", {}).setdefault("wandb", {})["project"] = project_name
+
+    experiment_name = _cli_override_entry(args, "experiment_name")
+    if experiment_name is not None:
+        overrides.setdefault("logging", {}).setdefault("wandb", {})["run_name"] = experiment_name
+
+    env_fields = {
+        "max_steps": int(getattr(args, "max_steps", 6) or 6),
+        "reward_scale": _cli_override_entry(args, "reward_scale"),
+        "failure_penalty": _cli_override_entry(args, "failure_penalty"),
+        "step_penalty": _cli_override_entry(args, "step_penalty"),
+        "timeout_penalty": _cli_override_entry(args, "timeout_penalty"),
+        "repo_op_limit": _cli_override_entry(args, "repo_op_limit"),
+    }
+    env_overrides = {k: v for k, v in env_fields.items() if v is not None}
+    if env_overrides:
+        overrides.setdefault("env", {}).update(env_overrides)
+
+    if getattr(args, "disable_cgm_synthesis", False):
+        overrides.setdefault("env", {})["disable_cgm_synthesis"] = True
+
+    if getattr(args, "apply_patches", None) is not None:
+        overrides.setdefault("env", {})["apply_patches"] = bool(args.apply_patches)
+
+    return overrides
+
+
+def merge_run_config(
+    defaults: Dict[str, Any],
+    yaml_cfg: Mapping[str, Any],
+    cli_overrides: Mapping[str, Any],
+    *,
+    yaml_only: bool,
+) -> Dict[str, Any]:
+    merged = _deepcopy_dict(defaults)
+    _deep_update(merged, yaml_cfg or {})
+    if not yaml_only:
+        _deep_update(merged, cli_overrides or {})
+    return merged
+
+
+def update_args_from_config(args: Any, config: Mapping[str, Any]) -> None:
+    paths = config.get("paths", {})
+    agent = getattr(args, "agent", "planner")
+    model_key = "planner_model" if agent == "planner" else "cgm_model"
+    model_path = paths.get(model_key)
+    if model_path:
+        setattr(args, "model_path", Path(model_path))
+    planner_tokenizer = paths.get("planner_tokenizer")
+    if planner_tokenizer:
+        setattr(args, "tokenizer_path", Path(planner_tokenizer))
+    cgm_model = paths.get("cgm_model")
+    if cgm_model:
+        setattr(args, "cgm_model_path", Path(cgm_model))
+    cgm_tokenizer = paths.get("cgm_tokenizer")
+    if cgm_tokenizer:
+        setattr(args, "cgm_tokenizer_path", Path(cgm_tokenizer))
+
+    dataset_train = paths.get("dataset_train")
+    if dataset_train:
+        setattr(args, "dataset", Path(dataset_train))
+    dataset_val = paths.get("dataset_val")
+    if dataset_val:
+        setattr(args, "val_dataset", Path(dataset_val))
+
+    experiment = config.get("experiment", {})
+    if "seed" in experiment:
+        setattr(args, "seed", int(experiment["seed"]))
+
+    training = config.get("training", {})
+    if "train_batch_size" in training:
+        train_bs = int(training["train_batch_size"])
+        setattr(args, "train_batch_size", train_bs)
+        if hasattr(args, "batch_size"):
+            setattr(args, "batch_size", train_bs)
+    if "total_epochs" in training and training["total_epochs"] is not None:
+        setattr(args, "total_epochs", int(training["total_epochs"]))
+    if training.get("grad_accum_steps") is not None:
+        setattr(args, "grad_accum_steps", int(training["grad_accum_steps"]))
+    if training.get("precision"):
+        setattr(args, "precision", training["precision"])
+    if training.get("lr") is not None:
+        setattr(args, "lr", float(training["lr"]))
+    if training.get("weight_decay") is not None:
+        setattr(args, "weight_decay", float(training["weight_decay"]))
+    if training.get("warmup_steps") is not None:
+        setattr(args, "warmup_steps", int(training["warmup_steps"]))
+    if training.get("total_steps") is not None:
+        setattr(args, "total_steps", int(training["total_steps"]))
+    if training.get("resume_from"):
+        setattr(args, "resume", Path(training["resume_from"]))
+
+    sampling = config.get("planner_sampling", {})
+    if sampling.get("temperature") is not None:
+        setattr(args, "temperature", float(sampling["temperature"]))
+    if sampling.get("top_p") is not None:
+        setattr(args, "top_p", float(sampling["top_p"]))
+    if sampling.get("max_new_tokens") is not None:
+        setattr(args, "max_output_tokens", int(sampling["max_new_tokens"]))
+    if sampling.get("max_input_tokens") is not None:
+        setattr(args, "max_input_tokens", int(sampling["max_input_tokens"]))
+    if sampling.get("stop"):
+        setattr(args, "stop", list(sampling["stop"]))
+    if sampling.get("stop_ids"):
+        setattr(args, "stop_ids", list(int(v) for v in sampling["stop_ids"]))
+
+    parallel = config.get("parallel", {})
+    tp_planner = int(parallel.get("tensor_parallel_planner", 1) or 1)
+    tp_cgm = int(parallel.get("tensor_parallel_cgm", 1) or 1)
+    setattr(args, "tensor_parallel", tp_planner if agent == "planner" else tp_cgm)
+    setattr(args, "rollout_replicas", int(parallel.get("replicas", 1) or 1))
+    if parallel.get("parallel_agents") is not None:
+        setattr(args, "parallel_agents", int(parallel["parallel_agents"]))
+    if parallel.get("rollout_workers") is not None:
+        setattr(args, "rollout_workers", int(parallel["rollout_workers"]))
+    if parallel.get("workflow_parallel") is not None:
+        setattr(args, "workflow_parallel", int(parallel["workflow_parallel"]))
+
+    resources = config.get("resources", {})
+    if resources.get("num_gpus") is not None:
+        setattr(args, "num_gpus", int(resources["num_gpus"]))
+    if resources.get("num_nodes") is not None:
+        setattr(args, "num_nodes", int(resources["num_nodes"]))
+    if resources.get("ray_num_gpus") is not None:
+        setattr(args, "ray_num_gpus", int(resources["ray_num_gpus"]))
+    if resources.get("ray_num_cpus") is not None:
+        setattr(args, "ray_num_cpus", int(resources["ray_num_cpus"]))
+    if resources.get("ray_memory") is not None:
+        setattr(args, "ray_memory", int(resources["ray_memory"]))
+    if resources.get("ray_object_store_memory") is not None:
+        setattr(args, "ray_object_store_memory", int(resources["ray_object_store_memory"]))
+
+    env_cfg = config.get("env", {})
+    if env_cfg.get("max_steps") is not None:
+        setattr(args, "max_steps", int(env_cfg["max_steps"]))
+    if env_cfg.get("reward_scale") is not None:
+        setattr(args, "reward_scale", float(env_cfg["reward_scale"]))
+    if env_cfg.get("failure_penalty") is not None:
+        setattr(args, "failure_penalty", float(env_cfg["failure_penalty"]))
+    if env_cfg.get("step_penalty") is not None:
+        setattr(args, "step_penalty", float(env_cfg["step_penalty"]))
+    if env_cfg.get("timeout_penalty") is not None:
+        setattr(args, "timeout_penalty", float(env_cfg["timeout_penalty"]))
+    if env_cfg.get("repo_op_limit") is not None:
+        setattr(args, "repo_op_limit", int(env_cfg["repo_op_limit"]))
+    if env_cfg.get("disable_cgm_synthesis") is not None:
+        setattr(args, "disable_cgm_synthesis", bool(env_cfg["disable_cgm_synthesis"]))
+    if env_cfg.get("apply_patches") is not None:
+        setattr(args, "apply_patches", bool(env_cfg["apply_patches"]))
+
+    logging_cfg = config.get("logging", {})
+    wandb_cfg = logging_cfg.get("wandb", {})
+    if wandb_cfg.get("project"):
+        setattr(args, "project_name", wandb_cfg["project"])
+    if wandb_cfg.get("run_name"):
+        setattr(args, "experiment_name", wandb_cfg["run_name"])
+    if wandb_cfg.get("enabled") is not None:
+        setattr(args, "log_to_wandb", bool(wandb_cfg["enabled"]))
+    if wandb_cfg.get("offline") is not None:
+        setattr(args, "wandb_offline", bool(wandb_cfg["offline"]))
+
+    if logging_cfg.get("log_backend") is not None:
+        setattr(args, "log_backend", logging_cfg["log_backend"])
+    if logging_cfg.get("save_interval") is not None:
+        setattr(args, "save_interval", logging_cfg["save_interval"])
+    if logging_cfg.get("eval_interval") is not None:
+        setattr(args, "eval_interval", logging_cfg["eval_interval"])
+    if logging_cfg.get("output_dir") is not None:
+        setattr(args, "output_dir", Path(logging_cfg["output_dir"]))
+
+
+def serialise_resolved_config(config: Mapping[str, Any], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        yaml.safe_dump(dict(config), handle, sort_keys=False, allow_unicode=True)
+
 
 
 def load() -> Config:
@@ -242,6 +828,7 @@ def _dict_to_config(d: Dict[str, Any]) -> Config:
     telemetry = TelemetryCfg(**(d.get("telemetry") or {}))
     collate = CollateCfg(**(d.get("collate") or {}))
     cgm = CGMCfg(**(d.get("cgm") or {}))
+    planner_model = PlannerModelCfg(**(d.get("planner_model") or {}))
 
     return Config(
         mode=d.get("mode", "wsd"),
@@ -260,6 +847,7 @@ def _dict_to_config(d: Dict[str, Any]) -> Config:
         telemetry=telemetry,
         collate=collate,
         cgm=cgm,
+        planner_model=planner_model,
 
         memlog=d.get("memlog") or {"enabled": True},
     )
