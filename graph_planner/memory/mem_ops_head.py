@@ -1,3 +1,4 @@
+# 2025-10-22 memory hardening
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 """
@@ -62,6 +63,8 @@ class MemOp(dict):
             confidence=float(max(0.0, min(1.0, confidence))),
             reasons=list(reasons)
         )
+        if "score" in node and node.get("score") is not None:
+            self["score"] = float(node.get("score"))
 
 # ------------------ 可调参数（默认即可用；可接 infra/config） ------------------
 @dataclass(frozen=True)
