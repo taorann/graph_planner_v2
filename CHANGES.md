@@ -6,7 +6,7 @@
 - Add CLI helpers (`scripts/validate_patches.py`) and regression tests covering diff validation, atomic apply, and observation telemetry.
 - Fix README quick-start instructions to reference the actual R2E-Gym installation workflow and remove the obsolete `requirements-dev.txt` step.
 - Tune the 16×A800 training profile (`gp_full_73b14b_16g.yaml`) for higher throughput and document the updated parallelism hints in the runbook.
-- Add `scripts/prepare_datasets.py` plus dataset converters so R2E-Gym train/val and SWE-bench test splits can be downloaded into `datasets/` and consumed by the rLLM pipeline.
+- Split dataset preparation into `scripts/prepare_training_datasets.py` (R2E-Gym train/val) and `scripts/prepare_swebench_validation.py` (SWE-bench Verified validation/test), with local-repo parsing, docker manifest emission, and documentation updates for the new workflow.
 - Make the R2E-Gym converter tolerant of missing `task_id` fields by deriving identifiers from nested metadata or falling back to deterministic dataset indexes; extend coverage to nested `ds` payloads.
 - Skip malformed R2E rows lacking docker metadata while reporting skip counts, and expose those metrics via the dataset preparation CLI logs.
 - Extend dataset preparation with docker manifest emission and optional pre-pull hooks, wire training/eval CLIs to reuse the manifest (or preheat containers via `--prepull-containers`), and add tests covering the new helpers.

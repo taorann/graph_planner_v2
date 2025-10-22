@@ -27,6 +27,7 @@ class DockerImageCollection:
     images: List[str]
     missing: int = 0
     inspected: int = 0
+    build_only: int = 0
 
 
 @dataclass
@@ -37,18 +38,20 @@ class ContainerPrepResult:
     invoked: bool
 
 
-def _extract_image(payload: Mapping[str, object] | None) -> Optional[str]:
+def _extract_image(payload: Mapping[str, object] | None) -> Optional[tuple[str, bool]]:
     if not isinstance(payload, Mapping):
         return None
 
     candidate = None
+    requires_build = False
     sandbox = payload.get("sandbox")
     if isinstance(sandbox, Mapping):
+        requires_build = bool(sandbox.get("requires_build"))
         candidate = sandbox.get("docker_image")
     if not candidate:
         candidate = payload.get("docker_image")
     if isinstance(candidate, str) and candidate.strip():
-        return candidate.strip()
+        return candidate.strip(), requires_build
     return None
 
 
@@ -90,16 +93,21 @@ def collect_docker_images(
     seen: set[str] = set()
     images: List[str] = []
     missing = 0
+    build_only = 0
     inspected = 0
 
-    def _register(value: Optional[str]) -> None:
-        nonlocal missing
+    def _register(value: Optional[tuple[str, bool]]) -> None:
+        nonlocal missing, build_only
         if not value:
             missing += 1
             return
-        if value not in seen:
-            seen.add(value)
-            images.append(value)
+        image, requires_build = value
+        if requires_build:
+            build_only += 1
+            return
+        if image not in seen:
+            seen.add(image)
+            images.append(image)
 
     if records is not None:
         for row in records:
@@ -132,7 +140,7 @@ def collect_docker_images(
                         continue
                     _register(_extract_image(payload))
 
-    return DockerImageCollection(images=images, missing=missing, inspected=inspected)
+    return DockerImageCollection(images=images, missing=missing, inspected=inspected, build_only=build_only)
 
 
 def write_docker_manifest(path: Path, images: Sequence[str]) -> Path:

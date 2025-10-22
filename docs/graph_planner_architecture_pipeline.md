@@ -219,7 +219,7 @@ CLI / Scripts / Tests
    - Planner：默认使用 Qwen3-14B-Instruct 权重，需解压到仓库根目录的 `models/qwen3-14b-instruct/`；若需快速验证亦可把仓库内的 ToyLM checkpoint 拷贝到该目录（或通过 `--model-path` 指向其它 Hugging Face 目录）。若 tokenizer 不在同一路径，可通过 `--tokenizer-path` 指定。【F:scripts/train_graphplanner_rllm.py†L40-L95】
    - CGM：请将 CodeFuse CGM 的本地权重与 tokenizer 放在 `models/codefuse-cgm/`，该路径会在训练/评测脚本中作为默认值。【F:scripts/train_graphplanner_rllm.py†L70-L95】
 2. **准备任务数据集**
-  - 以 JSON/JSONL 形式提供 Issue、容器配置、最大步数等字段。运行 `scripts/prepare_datasets.py` 会先从 Hugging Face 下载真实的 R2E-Gym parquet 分片，再落盘为 `datasets/r2e_gym/train.jsonl` 与 `datasets/r2e_gym/val.jsonl`。每条 JSON 记录都会显式写出：
+  - 以 JSON/JSONL 形式提供 Issue、容器配置、最大步数等字段。运行 `scripts/prepare_training_datasets.py` 会先从 Hugging Face 下载 R2E-Gym parquet 分片，再落盘为 `datasets/r2e_gym/train.jsonl` 与 `datasets/r2e_gym/val.jsonl`；SWE-bench 验证/测试数据则由 `scripts/prepare_swebench_validation.py` 负责解析（优先使用仓库内的 `graph_planner/SWE-bench`，否则回退至 Hugging Face）。每条 JSON 记录都会显式写出：
     1. **`task_id`**：唯一任务标识，用于 RepoEnv 缓存、Ray 分发以及训练日志聚合。脚本会从 `task_id`、`instance_id`、`ds.task.task_id` 等字段回退提取，必要时退化为 `数据集名:split:编号`。
     2. **`docker_image`**：RepoEnv 启动容器所需的镜像；缺失时任务会被跳过并记入 `skipped` 计数，避免在训练时才失败。脚本还会生成 `docker_images.txt` manifest（SWE-bench 为 `docker_images_<split>.txt`），供训练/评测脚本直接加载。
     3. **`instance` JSON**：包含挂载、环境变量、测试命令、最大步数等运行时信息，后续 `ensure_dataset_registered` 会把它写入 Verl parquet 的 `payload_json` 字段，供 rLLM 环境还原容器。【F:graph_planner/datasets/prepare.py†L52-L188】【F:datasets/README.md†L1-L52】

@@ -4,23 +4,25 @@
 
 ## 0. 数据准备
 
-运行训练或评测前，先执行 `scripts/prepare_datasets.py` 将 Hugging Face 上的 R2E-Gym 训练集与 SWE-bench 测试集转换成仓库使用的 JSONL 结构：
+运行训练或评测前，分别执行下列两个脚本，将 Hugging Face 或本地数据转换成 Graph Planner 消费的 JSON/JSONL：
 
 ```bash
-PYTHONPATH=. python scripts/prepare_datasets.py \
+# 训练：R2E-Gym
+PYTHONPATH=. python scripts/prepare_training_datasets.py \
   --r2e-dataset R2E-Gym/R2E-Gym-Lite \
-  --r2e-output datasets/r2e_gym \
+  --r2e-output datasets/r2e_gym
+
+# 验证/测试：SWE-bench Verified
+PYTHONPATH=. python scripts/prepare_swebench_validation.py \
   --swebench-dataset princeton-nlp/SWE-bench_Verified \
   --swebench-output datasets/swebench
 ```
 
-- 默认会读取 Hugging Face token（环境变量 `HF_TOKEN`），必要时可通过 `--hf-token` 显式指定。
-- `train.jsonl` 与 `val.jsonl` 会写入 `datasets/r2e_gym/`，实例配置（`r2e_ds_json`）位于 `datasets/r2e_gym/instances/`。脚本在内部先落 parquet 缓存，再输出 JSON/JSONL，并会对缺失 `task_id`/`docker_image` 的条目打印 warning 并跳过，以免整个批次失败。
-- 每次转换会同时生成 `docker_images.txt`（SWE-bench 为 `docker_images_<split>.txt`）罗列所有唯一容器；若带 `--prepull-containers` 会复用 R2E-Gym 的 `pre_pull_docker_images` 并行拉取镜像，支持 `--prepull-max-workers/--prepull-retries/--prepull-delay/--prepull-timeout` 调优。
-- SWE-bench 评测集会保存为 `datasets/swebench/test.jsonl`，实例配置写入 `datasets/swebench/instances/`，并同样生成容器 manifest。
-- 若只想刷新其中一种数据，可带 `--skip-r2e` 或 `--skip-swebench`。
-
-脚本带 `--r2e-val-size` 时会从训练集合中划分验证集；也可通过 `--r2e-val-split` 直接指定官方 split。所有路径均可按需覆盖。
+- 两个脚本都会读取 Hugging Face token（环境变量 `HF_TOKEN`），必要时可通过 `--hf-token` 显式指定。
+- `prepare_training_datasets.py` 负责写入 `datasets/r2e_gym/train.jsonl`、`datasets/r2e_gym/val.jsonl` 与配套的 `instances/*.json`，并支持 `--r2e-val-size`/`--r2e-val-split` 自定义验证集切分。
+- `prepare_swebench_validation.py` 会优先解析仓库内的 `graph_planner/SWE-bench`（若存在），否则回退至 Hugging Face 数据集，最终在 `datasets/swebench/<split>.jsonl` 与 `datasets/swebench/instances/` 产出验证/测试任务。`--swebench-split` 默认 `validation`，也可改为 `test`。
+- 两个脚本都会生成 docker manifest（如 `datasets/r2e_gym/docker_images.txt`、`datasets/swebench/docker_images_validation.txt`），并在 `--prepull-containers` 时复用 R2E-Gym 的工具并行预拉容器，可用 `--prepull-max-workers/--prepull-retries/--prepull-delay/--prepull-timeout` 调整。
+- 若仅需刷新其中一种数据，可分别带 `--skip-r2e` 或 `--skip-swebench`。
 
 ## 1. 配置加载优先级
 

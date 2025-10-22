@@ -42,11 +42,15 @@ tests/             # FakeSandbox 测试与 CGM 适配器回归
 
 2. **准备训练/评测数据集**
    ```bash
-   PYTHONPATH=. python scripts/prepare_datasets.py \
-     --r2e-dataset R2E-Gym/R2E-Gym-Lite \
+   # R2E-Gym 训练/验证集
+   PYTHONPATH=. python scripts/prepare_training_datasets.py \
+     --r2e-dataset R2E-Gym/R2E-Gym-Lite
+
+   # SWE-bench Verified 验证/测试集
+   PYTHONPATH=. python scripts/prepare_swebench_validation.py \
      --swebench-dataset princeton-nlp/SWE-bench_Verified
    ```
-  该脚本会下载 Hugging Face 上的 R2E-Gym 训练集与 SWE-bench 测试集，分别写入 `datasets/r2e_gym/train.jsonl`、`datasets/r2e_gym/val.jsonl` 和 `datasets/swebench/test.jsonl`，并在 `instances/` 子目录生成每个任务的 `r2e_ds_json`。同时会生成 `docker_images.txt` manifest；若带 `--prepull-containers` 会复用 R2E-Gym 的工具并行预拉取容器（可用 `--prepull-max-workers/--prepull-retries/--prepull-delay/--prepull-timeout` 调整）。
+  第一个脚本会下载 Hugging Face 上的 R2E-Gym 训练集并写入 `datasets/r2e_gym/train.jsonl`、`datasets/r2e_gym/val.jsonl`，同时生成 `instances/*.json` 与 `docker_images.txt` 供 RepoEnv 使用。第二个脚本会优先解析仓库内的 `graph_planner/SWE-bench`（若存在），否则回退到 Hugging Face 数据集，把验证/测试任务写入 `datasets/swebench/<split>.jsonl` 并生成对应的 docker manifest。两个脚本均支持 `--prepull-containers` 预拉容器以及一组 `--prepull-*` 并行参数。
 
 3. **运行规则代理冒烟**
    ```bash
