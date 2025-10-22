@@ -1,0 +1,101 @@
+experiment:
+  name: planner-8g
+  seed: 1234
+  notes: "Planner GRPO with 8 GPUs"
+paths:
+  dataset_train: datasets/r2e_gym/train.jsonl
+  dataset_val: datasets/r2e_gym/val.jsonl
+  planner_model: models/qwen3-14b-instruct
+  planner_tokenizer: null
+  cgm_model: models/codefuse-cgm
+  cgm_tokenizer: null
+backends:
+  planner_backend: local
+  cgm_backend: local
+  dtype: bfloat16
+  device_map_planner: [0,1,2,3]
+  device_map_cgm: [4,5,6,7]
+  max_gpu_memory: null
+planner_sampling:
+  temperature: 0.2
+  top_p: 0.95
+  top_k: 50
+  max_input_tokens: 4096
+  max_new_tokens: 512
+  repetition_penalty: 1.0
+  do_sample: false
+  stop: []
+  stop_ids: []
+  stop_on_invalid_json: true
+cgm_generation:
+  temperature: 0.2
+  top_p: 0.9
+  top_k: 40
+  max_new_tokens: 768
+  num_return_sequences: 1
+  do_sample: false
+training:
+  total_epochs: 1
+  train_batch_size: 4
+  grad_accum_steps: 8
+  precision: bf16
+  lr: 3.0e-05
+  weight_decay: 0.01
+  warmup_steps: 200
+  gradient_checkpointing: true
+  clip_grad_norm: 1.0
+  kl_coef: 0.1
+  entropy_coef: 0.01
+  value_coef: 1.0
+  clip_coef: 0.2
+  target_kl: 0.15
+  total_steps: null
+  resume_from: null
+env:
+  max_steps: 6
+  reward_scale: 1.0
+  failure_penalty: -1.0
+  step_penalty: -0.05
+  timeout_penalty: -0.5
+  repo_op_limit: 64
+  disable_cgm_synthesis: false
+  apply_patches: true
+parallel:
+  tensor_parallel_planner: 4
+  tensor_parallel_cgm: 4
+  replicas: 1
+  parallel_agents: 4
+  rollout_workers: 4
+  workflow_parallel: 4
+resources:
+  num_gpus: 8
+  num_nodes: 1
+  ray_num_gpus: 8
+  ray_num_cpus: 32
+  ray_memory: null
+  ray_object_store_memory: null
+logging:
+  wandb:
+    enabled: true
+    offline: false
+    project: graph-planner
+    entity: null
+    run_name: planner-8g
+    watch:
+      enabled: true
+      log: gradients
+      log_freq: 200
+  log_backend: wandb
+  output_dir: outputs
+  save_interval: 500
+  eval_interval: 500
+telemetry:
+  log_gpu: true
+  log_ray: true
+  log_patch_stats: true
+  log_planner_parse_errors: true
+  log_cgm_errors: true
+verl_overrides:
+  trainer:
+    n_gpus_per_node: 8
+    gradient_accumulation_steps: 8
