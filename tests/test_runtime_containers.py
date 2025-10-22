@@ -11,6 +11,7 @@ def test_collect_docker_images_from_multiple_sources(tmp_path: Path):
     records = [
         {"sandbox": {"docker_image": "img:one"}},
         {"sandbox": {"docker_image": "img:two"}},
+        {"sandbox": {"docker_image": "local:build", "requires_build": True}},
         {"sandbox": {}},
     ]
     instance = tmp_path / "instances"
@@ -38,6 +39,7 @@ def test_collect_docker_images_from_multiple_sources(tmp_path: Path):
     )
 
     assert collection.images == ["img:one", "img:two", "img:three", "img:four"]
+    assert collection.build_only == 1
     assert collection.missing >= 2  # missing sandbox + malformed JSON
     assert collection.inspected >= 6
 

@@ -11,3 +11,4 @@
 - Skip malformed R2E rows lacking docker metadata while reporting skip counts, and expose those metrics via the dataset preparation CLI logs.
 - Extend dataset preparation with docker manifest emission and optional pre-pull hooks, wire training/eval CLIs to reuse the manifest (or preheat containers via `--prepull-containers`), and add tests covering the new helpers.
 - Refresh architecture/runbook documentation so all training/evaluation examples use the YAML-first launch flow and reflect the current script flags; update the project status note accordingly.
+- Teach the SWE-bench converter to fall back on official TestSpec metadata when docker images are missing, persist `requires_build`/`swebench_spec` markers, skip pre-pulling build-only entries, and document the new workflow with regression tests.

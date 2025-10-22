@@ -14,7 +14,11 @@
 
 - `r2e_gym/val.jsonl`：Graph Planner 默认的 R2E-Gym 验证集，生成流程同上。
 - `graphplanner_repoenv_sample.jsonl`：保留的历史示例，便于快速回归旧版脚本。
-- `swebench/`：通过 `scripts/prepare_datasets.py --skip-r2e` 下载并生成的 SWE-bench 测试集。
+- `swebench/`：通过 `scripts/prepare_datasets.py --skip-r2e` 下载并生成的 SWE-bench 测试集。Verified 分支不再
+  提供现成的容器镜像，脚本会在 `instances/*.json` 与 JSONL 中额外写入 `requires_build=true` 以及从官方
+  `swebench.harness.test_spec` 解析出的 `swebench_spec`（仓库、安装脚本、评测脚本等）。若 manifest 中只有
+  build-only 项，`--prepull-containers` 会给出提示，需要先运行 `python -m swebench.harness.prepare_images`
+  或仓库的容器构建工具把 `sweb.eval.*` 镜像在本机构建完成，之后训练/评测即可直接消费这些任务。
 
 单条 JSONL 记录的结构如下（字段经过扁平化，方便后续写入 Verl parquet）：
 

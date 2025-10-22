@@ -7,7 +7,15 @@ import re
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Mapping, MutableMapping, Sequence
+from typing import Any, Iterable, List, Mapping, MutableMapping, Optional, Sequence, TYPE_CHECKING
+
+try:  # pragma: no cover - optional dependency
+    from swebench.harness.test_spec.test_spec import make_test_spec as _make_test_spec  # type: ignore
+except Exception:  # pragma: no cover - fallback when swebench is unavailable
+    _make_test_spec = None  # type: ignore[assignment]
+
+if TYPE_CHECKING:  # pragma: no cover - typing aid only
+    from swebench.harness.test_spec.test_spec import TestSpec
 
 SANITISE_PATTERN = re.compile(r"[^a-zA-Z0-9_.-]+")
 
@@ -51,6 +59,19 @@ class DatasetConversionResult:
 
 def _deepcopy_entry(entry: Mapping[str, object]) -> MutableMapping[str, object]:
     return json.loads(json.dumps(entry))
+
+
+def _make_swebench_spec(entry: Mapping[str, object]) -> Optional["TestSpec"]:
+    """Return a SWE-bench TestSpec when the harness is available."""
+
+    maker = _make_test_spec
+    if maker is None:
+        return None
+    try:
+        return maker(entry)  # type: ignore[arg-type]
+    except Exception as exc:  # pragma: no cover - defensive against schema drift
+        LOGGER.debug("Failed to build SWE-bench spec for %s: %s", entry.get("instance_id"), exc)
+        return None
 
 
 def _normalise_issue_text(*candidates: object, fallback: str) -> str:
@@ -293,6 +314,9 @@ def convert_swebench_entries(
             instance_id = instance_id.strip() or "instance"
             safe_id = sanitize_identifier(instance_id)
 
+            spec_payload: Optional[MutableMapping[str, object]] = None
+            requires_build = False
+
             docker_image = _extract_first(
                 entry,
                 ("docker_image",),
@@ -325,15 +349,42 @@ def convert_swebench_entries(
                         docker_image = f"us-docker.pkg.dev/princeton-nlp/swe-bench/{repo_segment}"
 
             if not isinstance(docker_image, str) or not docker_image.strip():
+                spec = _make_swebench_spec(entry)
+                if spec is not None:
+                    candidate = getattr(spec, "instance_image_key", None)
+                    if isinstance(candidate, str) and candidate.strip():
+                        docker_image = candidate.strip()
+                        requires_build = True
+                        spec_payload = {
+                            "repo": getattr(spec, "repo", None),
+                            "version": getattr(spec, "version", None),
+                            "arch": getattr(spec, "arch", None),
+                            "repo_script_list": list(getattr(spec, "repo_script_list", [])),
+                            "env_script_list": list(getattr(spec, "env_script_list", [])),
+                            "eval_script_list": list(getattr(spec, "eval_script_list", [])),
+                        }
+
+            if not isinstance(docker_image, str) or not docker_image.strip():
                 raise ValueError(f"Entry {instance_id!r} did not contain a docker image")
 
             docker_image = docker_image.strip()
+            if not spec_payload:
+                spec = _make_swebench_spec(entry)
+                if spec is not None:
+                    spec_payload = {
+                        "repo": getattr(spec, "repo", None),
+                        "version": getattr(spec, "version", None),
+                        "arch": getattr(spec, "arch", None),
+                        "repo_script_list": list(getattr(spec, "repo_script_list", [])),
+                        "env_script_list": list(getattr(spec, "env_script_list", [])),
+                        "eval_script_list": list(getattr(spec, "eval_script_list", [])),
+                    }
 
             repo_name = _extract_first(entry, ("repo",), ("repo_name",))
             if not isinstance(repo_name, str):
                 repo_name = None
 
-            swe_ds = {
+            swe_ds: MutableMapping[str, object] = {
                 "instance_id": instance_id,
                 "docker_image": docker_image,
                 "repo": repo_name,
@@ -342,6 +393,10 @@ def convert_swebench_entries(
                 "patch": entry.get("patch"),
                 "tests": entry.get("tests"),
             }
+            if requires_build:
+                swe_ds["requires_build"] = True
+            if spec_payload:
+                swe_ds["swebench_spec"] = spec_payload
 
             ds_path = instance_dir / f"{safe_id}.json"
             ds_paths.append(ds_path)
@@ -390,6 +445,10 @@ def convert_swebench_entries(
                 "data_source": dataset_name,
                 "split": split,
             }
+            if requires_build:
+                record["sandbox"]["requires_build"] = True
+            if spec_payload:
+                record["sandbox"]["swebench_spec"] = spec_payload
             if repo_name:
                 record["repo"] = repo_name
             records.append(record)

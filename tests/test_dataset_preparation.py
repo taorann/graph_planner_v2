@@ -9,6 +9,7 @@ from graph_planner.datasets import (
     DatasetConversionResult,
     convert_r2e_entries,
     convert_swebench_entries,
+    prepare as datasets_prepare,
 )
 from scripts import prepare_datasets
 
@@ -110,7 +111,8 @@ def test_convert_r2e_entries_skips_missing_metadata(tmp_dataset_dir: Path):
     assert record["sandbox"]["docker_image"] == "demo:image"
 
 
-def test_convert_swebench_entries_requires_docker_image(tmp_dataset_dir: Path):
+def test_convert_swebench_entries_requires_docker_image(tmp_dataset_dir: Path, monkeypatch):
+    monkeypatch.setattr(datasets_prepare, "_make_swebench_spec", lambda entry: None)
     entries = [
         {
             "instance_id": "django__001",
@@ -131,10 +133,12 @@ def test_convert_swebench_entries_requires_docker_image(tmp_dataset_dir: Path):
     payload = json.loads(ds_file.read_text(encoding="utf-8"))
     assert payload["instance_id"] == "django__001"
     assert payload["docker_image"] == "swebench/django:latest"
+    assert "requires_build" not in record["sandbox"]
     assert record["issue"]["title"] == "Fix Django bug"
 
 
-def test_convert_swebench_entries_supports_environment_block(tmp_dataset_dir: Path):
+def test_convert_swebench_entries_supports_environment_block(tmp_dataset_dir: Path, monkeypatch):
+    monkeypatch.setattr(datasets_prepare, "_make_swebench_spec", lambda entry: None)
     entries = [
         {
             "instance_id": "astropy__astropy-12907",
@@ -152,10 +156,16 @@ def test_convert_swebench_entries_supports_environment_block(tmp_dataset_dir: Pa
     payload = json.loads(ds_file.read_text(encoding="utf-8"))
     assert payload["docker_image"] == "us-docker.pkg.dev/demo/astropy:latest"
     assert record["sandbox"]["docker_image"] == "us-docker.pkg.dev/demo/astropy:latest"
+    assert "requires_build" not in record["sandbox"]
     assert result.skipped == 0
 
 
-def test_convert_swebench_entries_skips_missing_docker(tmp_dataset_dir: Path, caplog: pytest.LogCaptureFixture):
+def test_convert_swebench_entries_skips_missing_docker(
+    tmp_dataset_dir: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch,
+):
+    monkeypatch.setattr(datasets_prepare, "_make_swebench_spec", lambda entry: None)
     entries = [
         {
             "instance_id": "missing",
@@ -169,6 +179,41 @@ def test_convert_swebench_entries_skips_missing_docker(tmp_dataset_dir: Path, ca
     assert result.records == []
     assert result.skipped == 1
     assert "docker image" in caplog.text
+
+
+def test_convert_swebench_entries_uses_spec_when_available(tmp_dataset_dir: Path, monkeypatch):
+    class DummySpec:
+        instance_image_key = "sweb.eval.sympy-1"
+        repo = "sympy/sympy"
+        version = "v1"
+        arch = "x86_64"
+        repo_script_list = ["echo repo"]
+        env_script_list = ["echo env"]
+        eval_script_list = ["echo eval"]
+
+    monkeypatch.setattr(datasets_prepare, "_make_swebench_spec", lambda entry: DummySpec())
+
+    entries = [
+        {
+            "instance_id": "sympy__sympy-24066",
+            "title": "Fix Sympy",
+            "repo": "sympy/sympy",
+        }
+    ]
+
+    result = convert_swebench_entries(entries, output_dir=tmp_dataset_dir, dataset_name="demo/swe", split="test")
+
+    assert len(result.records) == 1
+    record = result.records[0]
+    sandbox = record["sandbox"]
+    assert sandbox["docker_image"] == "sweb.eval.sympy-1"
+    assert sandbox["requires_build"] is True
+    spec_payload = sandbox["swebench_spec"]
+    assert spec_payload["repo"] == "sympy/sympy"
+    assert spec_payload["arch"] == "x86_64"
+    ds_payload = json.loads((tmp_dataset_dir / sandbox["r2e_ds_json"]).read_text(encoding="utf-8"))
+    assert ds_payload["requires_build"] is True
+    assert ds_payload["swebench_spec"]["repo_script_list"] == ["echo repo"]
 
 
 def test_write_manifest_and_maybe_prepull(tmp_path: Path, monkeypatch):

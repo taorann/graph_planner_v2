@@ -62,9 +62,10 @@ def _write_manifest_and_maybe_prepull(
     manifest_path = output_dir / manifest_name
     write_docker_manifest(manifest_path, collection.images)
     LOGGER.info(
-        "Docker manifest written to %s (%d images, %d missing metadata)",
+        "Docker manifest written to %s (%d images, %d build-only, %d missing metadata)",
         manifest_path,
         len(collection.images),
+        collection.build_only,
         collection.missing,
     )
     if prepull and collection.images:
@@ -77,6 +78,11 @@ def _write_manifest_and_maybe_prepull(
             retries=retries,
             delay=delay,
             pull_timeout=pull_timeout,
+        )
+    elif prepull and collection.build_only:
+        LOGGER.warning(
+            "Pre-pull requested but only build-only SWE-bench images were discovered;"
+            " run swebench.harness.prepare_images to build them locally."
         )
     elif prepull:
         LOGGER.warning("Pre-pull requested but no docker images detected in dataset")
