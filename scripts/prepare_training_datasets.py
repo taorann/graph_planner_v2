@@ -189,6 +189,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     args.r2e_output = _resolve_path(args.r2e_output)
+    LOGGER.info("Resolved R2E output directory: %s", args.r2e_output)
     logging.basicConfig(level=getattr(logging, str(args.log_level).upper(), logging.INFO))
 
     token = args.hf_token
@@ -213,6 +214,7 @@ def main() -> None:
         len(r2e_result.instance_paths),
         r2e_result.skipped,
     )
+    LOGGER.info("R2E dataset artifacts available under %s", args.r2e_output)
     _write_manifest_and_maybe_prepull(
         output_dir=args.r2e_output,
         result=r2e_result,

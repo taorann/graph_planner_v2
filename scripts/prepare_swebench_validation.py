@@ -290,6 +290,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     args.swebench_output = _resolve_path(args.swebench_output)
+    LOGGER.info("Resolved SWE-bench output directory: %s", args.swebench_output)
     if args.swebench_path is not None:
         args.swebench_path = _resolve_path(args.swebench_path)
     logging.basicConfig(level=getattr(logging, str(args.log_level).upper(), logging.INFO))
@@ -323,6 +324,9 @@ def main() -> None:
         len(swe_result.records),
         len(swe_result.instance_paths),
         swe_result.skipped,
+    )
+    LOGGER.info(
+        "SWE-bench dataset artifacts available under %s", args.swebench_output
     )
     _write_manifest_and_maybe_prepull(
         output_dir=args.swebench_output,
