@@ -3,8 +3,8 @@ experiment:
   seed: 1234
   notes: "Planner GRPO with 8 GPUs"
 paths:
-  dataset_train: datasets/r2e_gym/graphplanner_repoenv_train.jsonl
-  dataset_val: datasets/r2e_gym/graphplanner_repoenv_val.jsonl
+  dataset_train: datasets/r2e_gym/train.jsonl
+  dataset_val: datasets/r2e_gym/val.jsonl
   planner_model: models/qwen3-14b-instruct
   planner_tokenizer: null
   cgm_model: models/codefuse-cgm

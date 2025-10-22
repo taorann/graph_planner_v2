@@ -40,7 +40,15 @@ tests/             # FakeSandbox 测试与 CGM 适配器回归
    ```
    R2E-Gym 使用 `pyproject.toml` 管理依赖，`pip install -e ./R2E-Gym` 会自动拉取所需包；如需与官方流程保持一致，可按照 `R2E-Gym/README.md` 中的 `uv sync` 步骤进行高级安装。若需要运行本地 LLM / CGM，请在 `.aci/config.json` 中填写对应的 endpoint、model、API Key 等字段。
 
-2. **运行规则代理冒烟**
+2. **准备训练/评测数据集**
+   ```bash
+   PYTHONPATH=. python scripts/prepare_datasets.py \
+     --r2e-dataset R2E-Gym/R2E-Gym-Lite \
+     --swebench-dataset princeton-nlp/SWE-bench_Verified
+   ```
+   该脚本会下载 Hugging Face 上的 R2E-Gym 训练集与 SWE-bench 测试集，分别写入 `datasets/r2e_gym/train.jsonl`、`datasets/r2e_gym/val.jsonl` 和 `datasets/swebench/test.jsonl`，并在 `instances/` 子目录生成每个任务的 `r2e_ds_json`。
+
+3. **运行规则代理冒烟**
    ```bash
    PYTHONPATH=. python scripts/run_rule_agent.py \
      --backend repoenv \
@@ -50,18 +58,18 @@ tests/             # FakeSandbox 测试与 CGM 适配器回归
    ```
    该脚本会生成 `smoke_report.json` 和 `logs/test_runs.jsonl`，便于分析修复轨迹。
 
-3. **启动强化学习训练（需要 rLLM + Docker 环境）**
+4. **启动强化学习训练（需要 rLLM + Docker 环境）**
    ```bash
    PYTHONPATH=. python scripts/train_graphplanner_rllm.py \
      --config-file configs/experiments/planner_debug.yaml \
-     --dataset datasets/r2e_gym/graphplanner_repoenv_train.jsonl \
+     --dataset datasets/r2e_gym/train.jsonl \
      --model-path models/qwen3-14b-instruct \
      --cgm-model-path models/codefuse-cgm \
      --print-config
    ```
    仓库在 `configs/experiments/` 下提供了可直接运行的示例 YAML（单卡调试、8 卡/16 卡配方等）。命令会按“内置默认 < YAML < CLI”优先级合并配置，并在 `outputs/<run_name>/resolved_config.yaml` 中保存最终参数。更多示例与 W&B 监控说明见 [`docs/runbook.md`](docs/runbook.md)。
 
-4. **合同冒烟检查**
+5. **合同冒烟检查**
    ```bash
    PYTHONPATH=. python scripts/validate_contracts.py
    ```

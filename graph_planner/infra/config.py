@@ -253,8 +253,8 @@ def _apply_env_overrides(raw: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-DEFAULT_TRAIN_DATASET = "datasets/r2e_gym/graphplanner_repoenv_train.jsonl"
-DEFAULT_VAL_DATASET = "datasets/r2e_gym/graphplanner_repoenv_val.jsonl"
+DEFAULT_TRAIN_DATASET = "datasets/r2e_gym/train.jsonl"
+DEFAULT_VAL_DATASET = "datasets/r2e_gym/val.jsonl"
 
 
 @dataclass

@@ -2,6 +2,25 @@
 
 本指南描述 rLLM 训练/评估脚本的统一配置方式、启动命令与监控要点，解决“多处配置”“指令不一致”等痛点。默认语言为中文，括号内附英文关键词，便于跨团队协作。
 
+## 0. 数据准备
+
+运行训练或评测前，先执行 `scripts/prepare_datasets.py` 将 Hugging Face 上的 R2E-Gym 训练集与 SWE-bench 测试集转换成仓库使用的 JSONL 结构：
+
+```bash
+PYTHONPATH=. python scripts/prepare_datasets.py \
+  --r2e-dataset R2E-Gym/R2E-Gym-Lite \
+  --r2e-output datasets/r2e_gym \
+  --swebench-dataset princeton-nlp/SWE-bench_Verified \
+  --swebench-output datasets/swebench
+```
+
+- 默认会读取 Hugging Face token（环境变量 `HF_TOKEN`），必要时可通过 `--hf-token` 显式指定。
+- `train.jsonl` 与 `val.jsonl` 会写入 `datasets/r2e_gym/`，实例配置（`r2e_ds_json`）位于 `datasets/r2e_gym/instances/`。
+- SWE-bench 评测集会保存为 `datasets/swebench/test.jsonl`，实例配置写入 `datasets/swebench/instances/`。
+- 若只想刷新其中一种数据，可带 `--skip-r2e` 或 `--skip-swebench`。
+
+脚本带 `--r2e-val-size` 时会从训练集合中划分验证集；也可通过 `--r2e-val-split` 直接指定官方 split。所有路径均可按需覆盖。
+
 ## 1. 配置加载优先级
 
 `scripts/train_graphplanner_rllm.py` 与 `scripts/eval_graphplanner_rllm.py` 现在支持三层优先级；仓库在 `configs/experiments/` 下提供了可直接引用的示例 YAML，便于复制或按需修改：
@@ -42,8 +61,8 @@ experiment:
   name: planner_grpo
   seed: 1234
 paths:
-  dataset_train: datasets/r2e_gym/graphplanner_repoenv_train.jsonl
-  dataset_val: datasets/r2e_gym/graphplanner_repoenv_val.jsonl
+  dataset_train: datasets/r2e_gym/train.jsonl
+  dataset_val: datasets/r2e_gym/val.jsonl
   planner_model: models/qwen3-14b-instruct
   cgm_model: models/codefuse-cgm
 training:
@@ -75,7 +94,7 @@ logging:
 PYTHONPATH=. python scripts/train_graphplanner_rllm.py \
   --agent planner \
   --config-file configs/experiments/planner_8g.yaml \
-  --dataset datasets/r2e_gym/graphplanner_repoenv_train.jsonl \
+  --dataset datasets/r2e_gym/train.jsonl \
   --model-path models/qwen3-14b-instruct \
   --cgm-model-path models/codefuse-cgm \
   --print-config

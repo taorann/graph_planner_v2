@@ -77,7 +77,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset",
         type=Path,
-        default=Path("datasets/r2e_gym/graphplanner_repoenv_train.jsonl"),
+        default=Path("datasets/r2e_gym/train.jsonl"),
         help="Training dataset in JSON/JSONL format.",
     )
     parser.add_argument("--dataset-name", default=None, help="Override dataset registry name.")

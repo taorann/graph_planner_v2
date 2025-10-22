@@ -219,12 +219,12 @@ CLI / Scripts / Tests
    - Planner：默认使用 Qwen3-14B-Instruct 权重，需解压到仓库根目录的 `models/qwen3-14b-instruct/`；若需快速验证亦可把仓库内的 ToyLM checkpoint 拷贝到该目录（或通过 `--model-path` 指向其它 Hugging Face 目录）。若 tokenizer 不在同一路径，可通过 `--tokenizer-path` 指定。【F:scripts/train_graphplanner_rllm.py†L40-L95】
    - CGM：请将 CodeFuse CGM 的本地权重与 tokenizer 放在 `models/codefuse-cgm/`，该路径会在训练/评测脚本中作为默认值。【F:scripts/train_graphplanner_rllm.py†L70-L95】
 2. **准备任务数据集**
-   - 以 JSON/JSONL 形式提供 Issue、容器配置、最大步数等字段（仓库已在 `datasets/r2e_gym/graphplanner_repoenv_train.jsonl` 中预置一份按照 R2E-Gym 训练数据格式整理的样例；验证示例位于 `datasets/r2e_gym/graphplanner_repoenv_val.jsonl`）。脚本会通过 `ensure_dataset_registered` 将其转换为 Verl 读取的 parquet。【F:graph_planner/integrations/rllm/dataset.py†L85-L109】
+  - 以 JSON/JSONL 形式提供 Issue、容器配置、最大步数等字段。运行 `scripts/prepare_datasets.py` 会从 Hugging Face 下载真实的 R2E-Gym 数据并写入 `datasets/r2e_gym/train.jsonl` 与 `datasets/r2e_gym/val.jsonl`，仓库内的文件仅保留最小样例，便于测试。脚本会通过 `ensure_dataset_registered` 将其转换为 Verl 读取的 parquet。【F:graph_planner/integrations/rllm/dataset.py†L85-L109】
 3. **执行训练命令**
    ```bash
    PYTHONPATH=. python scripts/train_graphplanner_rllm.py \
      --agent planner \
-     --dataset datasets/r2e_gym/graphplanner_repoenv_train.jsonl \
+     --dataset datasets/r2e_gym/train.jsonl \
      --model-path models/qwen3-14b-instruct \
      --cgm-model-path models/codefuse-cgm \
      --max-steps 6 \
@@ -320,7 +320,7 @@ R2E-Gym 本身提供了 RepoEnv 环境、动作解析与容器运行时等通用
    - 安装 Python 3.10+ 并创建虚拟环境，执行 `pip install -e .` 与 `pip install -e R2E-Gym` 获取 RepoEnv 依赖；
    - 确保 Docker daemon 可访问（本地或远程 socket）。
 2. **拉取示例镜像与数据集**
-- 样例数据位于 `datasets/r2e_gym/graphplanner_repoenv_train.jsonl`，对应 RepoEnv 配置为 `config/r2e_ds_repoenv_sample.json`；
+- 样例数据位于 `datasets/r2e_gym/train.jsonl`，对应 RepoEnv 配置为 `config/r2e_ds_repoenv_sample.json`；
    - 运行 `docker pull graph-planner/repoenv-sample:latest` 预热镜像。
 3. **执行冒烟命令**
    ```bash
@@ -369,7 +369,7 @@ R2E-Gym 本身提供了 RepoEnv 环境、动作解析与容器运行时等通用
    ```bash
    PYTHONPATH=. python scripts/eval_graphplanner_rllm.py \
      --agent planner \
-     --dataset datasets/r2e_gym/graphplanner_repoenv_val.jsonl \
+     --dataset datasets/r2e_gym/val.jsonl \
      --model-path models/qwen3-14b-instruct \
      --cgm-model-path models/codefuse-cgm \
      --print-config
@@ -389,7 +389,7 @@ R2E-Gym 本身提供了 RepoEnv 环境、动作解析与容器运行时等通用
 | 本地 LLM 调试 | `PYTHONPATH=. python scripts/run_rule_agent.py --backend repoenv --ds-json config/r2e_ds_repoenv_sample.json --agent llm --planner-model-path <hf-model>` |
 | CGM 本地推理 | `python - <<'PY'`<br>`from graph_planner.integrations.codefuse_cgm import CodeFuseCGMGenerator, CGMExample;`<br>`gen = CodeFuseCGMGenerator.from_pretrained("<model>");`<br>`example = CGMExample.from_json_file("sample.json");`<br>`print(gen.generate(example).model_dump())`<br>`PY` |
 | CGM 监督微调 | `PYTHONPATH=. python - <<'PY'`<br>`from graph_planner.integrations.codefuse_cgm import CodeFuseCGMTrainer, CGMTrainingConfig;`<br>`cfg = CGMTrainingConfig(model_name="<model>", train_path="train.jsonl", output_dir="runs/cgm");`<br>`CodeFuseCGMTrainer(cfg).train()`<br>`PY` |
-| rLLM PPO 训练 | `python scripts/train_graphplanner_rllm.py --agent planner --dataset datasets/r2e_gym/graphplanner_repoenv_train.jsonl --model-path models/qwen3-14b-instruct --cgm-model-path models/codefuse-cgm --max-steps 6` |
+| rLLM PPO 训练 | `python scripts/train_graphplanner_rllm.py --agent planner --dataset datasets/r2e_gym/train.jsonl --model-path models/qwen3-14b-instruct --cgm-model-path models/codefuse-cgm --max-steps 6` |
 
 ## 6. 日志与调试建议 / Logging & troubleshooting
 

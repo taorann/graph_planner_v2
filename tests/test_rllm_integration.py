@@ -26,7 +26,11 @@ from verl.trainer.ppo.core_algos import compute_grpo_outcome_advantage, compute_
 from graph_planner.integrations.rllm.agent import GraphPlannerRLLMAgent
 from graph_planner.integrations.rllm.cgm_env import CGMRLLMEnv
 from graph_planner.integrations.rllm import dataset as dataset_mod
+from graph_planner.infra.config import DEFAULT_TRAIN_DATASET
 from graph_planner.models.toy_lm import create_toy_checkpoint
+
+
+DATASET_FILE = Path(DEFAULT_TRAIN_DATASET)
 
 
 def test_find_in_rllm_handles_namespace_packages():
@@ -287,7 +291,7 @@ def test_grpo_step_updates_toy_model(tmp_path):
 
 
 def test_train_cli_print_config_planner(tmp_path, monkeypatch, capsys):
-    dataset_file = Path("datasets/r2e_gym/graphplanner_repoenv_train.jsonl")
+    dataset_file = DATASET_FILE
     assert dataset_file.exists(), "sample dataset missing"
 
     verl_path = tmp_path / "train_verl.parquet"
@@ -325,7 +329,7 @@ def test_train_cli_print_config_planner(tmp_path, monkeypatch, capsys):
 
 
 def test_train_cli_parallel_overrides(tmp_path, monkeypatch, capsys):
-    dataset_file = Path("datasets/r2e_gym/graphplanner_repoenv_train.jsonl")
+    dataset_file = DATASET_FILE
     assert dataset_file.exists(), "sample dataset missing"
 
     verl_path = tmp_path / "train_verl.parquet"
@@ -392,7 +396,7 @@ def test_train_cli_parallel_overrides(tmp_path, monkeypatch, capsys):
 
 
 def test_train_cli_training_overrides(tmp_path, monkeypatch, capsys):
-    dataset_file = Path("datasets/r2e_gym/graphplanner_repoenv_train.jsonl")
+    dataset_file = DATASET_FILE
     assert dataset_file.exists(), "sample dataset missing"
 
     train_verl = tmp_path / "train_verl.parquet"
@@ -466,7 +470,7 @@ def test_train_cli_training_overrides(tmp_path, monkeypatch, capsys):
 
 
 def test_eval_cli_print_config(tmp_path, monkeypatch, capsys):
-    dataset_file = Path("datasets/r2e_gym/graphplanner_repoenv_train.jsonl")
+    dataset_file = DATASET_FILE
     assert dataset_file.exists(), "sample dataset missing"
 
     verl_path = tmp_path / "eval_verl.parquet"
@@ -501,7 +505,7 @@ def test_eval_cli_print_config(tmp_path, monkeypatch, capsys):
 
 
 def test_train_cli_config_file_and_resolved_config(tmp_path, monkeypatch, capsys):
-    dataset_file = Path("datasets/r2e_gym/graphplanner_repoenv_train.jsonl")
+    dataset_file = DATASET_FILE
     assert dataset_file.exists(), "sample dataset missing"
 
     verl_path = tmp_path / "train_verl.parquet"
@@ -599,7 +603,7 @@ def test_train_cli_config_file_and_resolved_config(tmp_path, monkeypatch, capsys
 
 
 def test_train_cli_yaml_only_ignores_overrides(tmp_path, monkeypatch, capsys):
-    dataset_file = Path("datasets/r2e_gym/graphplanner_repoenv_train.jsonl")
+    dataset_file = DATASET_FILE
     assert dataset_file.exists(), "sample dataset missing"
 
     verl_path = tmp_path / "train_verl.parquet"
@@ -663,7 +667,7 @@ def test_train_cli_yaml_only_ignores_overrides(tmp_path, monkeypatch, capsys):
 
 
 def test_train_cli_preflight_failure(tmp_path, monkeypatch):
-    dataset_file = Path("datasets/r2e_gym/graphplanner_repoenv_train.jsonl")
+    dataset_file = DATASET_FILE
     assert dataset_file.exists(), "sample dataset missing"
 
     verl_path = tmp_path / "train_verl.parquet"
