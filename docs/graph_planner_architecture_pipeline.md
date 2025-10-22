@@ -156,6 +156,14 @@ CLI / Scripts / Tests
 5. **补丁生成**：`CodeFuseCGMGenerator.generate` 或远端 `CodeFuseCGMClient.complete` 获取补丁 JSON；本地路径支持多 GPU `device_map`、量化或自定义 dtype，若模型不可用则 `_LocalCGMRuntime` 在目标文件行尾添加 `CGM-LOCAL` 标记构造兜底补丁。【F:graph_planner/integrations/codefuse_cgm/inference.py†L18-L152】【F:graph_planner/agents/rule_based/cgm_adapter.py†L145-L207】
 6. **动作流**：Planner 代理（规则或 LLM）依据当前观测和计划决定 Explore/Memory/Repair/Submit 动作，通过 `core.actions` 传递给环境，再由 `SandboxRuntime` 实际执行命令或应用补丁。【F:graph_planner/core/actions.py†L6-L42】【F:graph_planner/runtime/sandbox.py†L60-L214】
 
+#### 子图维护与 1-hop 扩展
+
+- **工作子图结构**：`memory.subgraph_store` 将子图标准化为 `WorkingSubgraph`，内部持久化 `nodes`/`edges` 字典并维护 `node_ids` 集合，支持 `iter_node_ids`、`get_node`、`add_nodes`、`remove_nodes` 等操作。子图会被序列化到仓库根目录下的 `.aci/subgraphs/<issue>.json`，从而在 Planner 重启后恢复上下文。【F:graph_planner/memory/subgraph_store.py†L23-L90】【F:graph_planner/memory/subgraph_store.py†L107-L141】
+- **统计与线性化**：环境在返回 observation 时调用 `subgraph_store.stats/linearize` 统计节点类型、文件数，并依据需要（WSD/FULL）把节点映射到文本片段，为 CGM、规则策略或 UI 展示提供统一上下文。【F:graph_planner/memory/subgraph_store.py†L143-L204】
+- **Explore→Memory 流程**：`PlannerEnv._handle_explore` 的 `expand` 分支会使用 `mem_candidates.build_mem_candidates` 生成 1-hop 候选并附带得分、来源标签；后续若 Planner 选择 `memory` 提交，`text_memory.memory_commit` 会把这些节点写入子图并同步统计信息。【F:graph_planner/env/planner_env.py†L167-L215】【F:graph_planner/memory/text_memory.py†L501-L566】
+- **1-hop 扩展实现**：`mem_candidates.build_mem_candidates` 内部调用 `graph_adapter.one_hop_expand`。适配器优先加载外部 `repo_graph.jsonl/graph.jsonl/code_graph.jsonl`，若缺失则按需扫描仓库源文件构建轻量代码图（文件节点、Python 函数/类、导入边）。1-hop 邻居不仅包含原图边，还会补充同文件函数/类及同目录文件，使 Planner 无需手工解析仓库即可围绕锚点扩展上下文。【F:graph_planner/memory/mem_candidates.py†L39-L152】【F:graph_planner/memory/graph_adapter.py†L19-L231】【F:graph_planner/memory/graph_adapter.py†L250-L371】
+- **是否需要预先解析代码图？** 不需要额外的前置步骤：若仓库随任务提供序列化图，适配器会直接载入；否则会在首次调用 `graph_adapter.connect()` 时构建本地图句柄，并在 1-hop 扩展时缓存和复用，从而保证 Explore 功能在没有独立图生成服务的情况下也能运行。【F:graph_planner/memory/graph_adapter.py†L52-L133】【F:graph_planner/memory/graph_adapter.py†L308-L371】
+
 ### 3.1 测试数据流（Toy MLP）/ Test data flow with the toy MLP
 
 1. **Checkpoint 构建**：`tests/test_toy_mlp.py::test_toy_checkpoint_integrates_with_cgm_generator` 调用 `create_toy_checkpoint()`，在临时目录写入字符粒度 `ToyTokenizer`、`ToyLMConfig` 以及两层 MLP 权重，形成 Hugging Face 兼容的本地模型目录。【F:graph_planner/models/toy_lm.py†L27-L200】【F:tests/test_toy_mlp.py†L13-L31】

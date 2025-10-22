@@ -35,10 +35,10 @@ tests/             # FakeSandbox 测试与 CGM 适配器回归
 
 1. **安装依赖**
    ```bash
-   pip install -e R2E-Gym  # 提供 RepoEnv、DockerRuntime 及相关依赖
-   pip install -r R2E-Gym/requirements-dev.txt
+   pip install -e .             # 安装 Graph Planner 自身
+   pip install -e ./R2E-Gym     # 安装 RepoEnv / DockerRuntime 依赖
    ```
-   如果需要运行本地 LLM / CGM，请在 `.aci/config.json` 中填写对应的 endpoint、model、API Key 等字段。
+   R2E-Gym 使用 `pyproject.toml` 管理依赖，`pip install -e ./R2E-Gym` 会自动拉取所需包；如需与官方流程保持一致，可按照 `R2E-Gym/README.md` 中的 `uv sync` 步骤进行高级安装。若需要运行本地 LLM / CGM，请在 `.aci/config.json` 中填写对应的 endpoint、model、API Key 等字段。
 
 2. **运行规则代理冒烟**
    ```bash
@@ -59,7 +59,7 @@ tests/             # FakeSandbox 测试与 CGM 适配器回归
      --cgm-model-path models/codefuse-cgm \
      --print-config
    ```
-   命令会按“内置默认 < YAML < CLI”优先级合并配置，并在 `outputs/<run_name>/resolved_config.yaml` 中保存最终参数。更多示例（单卡/8 卡/16 卡）与 W&B 监控说明见 [`docs/runbook.md`](docs/runbook.md)。
+   仓库在 `configs/experiments/` 下提供了可直接运行的示例 YAML（单卡调试、8 卡/16 卡配方等）。命令会按“内置默认 < YAML < CLI”优先级合并配置，并在 `outputs/<run_name>/resolved_config.yaml` 中保存最终参数。更多示例与 W&B 监控说明见 [`docs/runbook.md`](docs/runbook.md)。
 
 4. **合同冒烟检查**
    ```bash

@@ -28,10 +28,6 @@ PLANNER_MODEL_DIR = os.path.join("models", "qwen3-14b-instruct")
 CGM_MODEL_DIR = os.path.join("models", "codefuse-cgm")
 
 
-PLANNER_MODEL_DIR = os.path.join("models", "qwen3-14b-instruct")
-CGM_MODEL_DIR = os.path.join("models", "codefuse-cgm")
-
-
 # ---------------- dataclasses ----------------
 
 @dataclass

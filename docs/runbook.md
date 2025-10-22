@@ -4,7 +4,7 @@
 
 ## 1. 配置加载优先级
 
-`scripts/train_graphplanner_rllm.py` 与 `scripts/eval_graphplanner_rllm.py` 现在支持三层优先级：
+`scripts/train_graphplanner_rllm.py` 与 `scripts/eval_graphplanner_rllm.py` 现在支持三层优先级；仓库在 `configs/experiments/` 下提供了可直接引用的示例 YAML，便于复制或按需修改：
 
 1. **内置默认值**（`default_training_run_config`）
 2. **YAML 配置文件**（`--config-file`，使用 `yaml.safe_load`）
@@ -142,9 +142,9 @@ PYTHONPATH=. python scripts/train_graphplanner_rllm.py \
 
 | 场景 | 关键字段 | 命令示例 |
 |------|----------|---------|
-| 单卡调试（Planner + CGM 本地权重） | `tensor_parallel_* = 1`, `parallel_agents = 1`, `rollout_workers = 1`, `num_gpus = 1`, `device_map_* = [0]` | `PYTHONPATH=. python scripts/train_graphplanner_rllm.py --config-file configs/experiments/debug_single_gpu.yaml --yaml-only` |
+| 单卡调试（Planner + CGM 本地权重） | `tensor_parallel_* = 1`, `parallel_agents = 1`, `rollout_workers = 1`, `num_gpus = 1`, `device_map_* = [0]` | `PYTHONPATH=. python scripts/train_graphplanner_rllm.py --config-file configs/experiments/planner_debug.yaml --yaml-only` |
 | 8×A800（Planner 训练 + CGM 推理） | `tensor_parallel_planner = 4`, `tensor_parallel_cgm = 4`, `parallel_agents = 4`, `rollout_workers = 4`, `num_gpus = 8`, `device_map_planner = [0,1,2,3]`, `device_map_cgm = [4,5,6,7]` | `PYTHONPATH=. python scripts/train_graphplanner_rllm.py --config-file configs/experiments/planner_cgm_8g.yaml --yaml-only --print-config` |
-| 16×A800（Planner 14B + CGM 73B） | `tensor_parallel_planner = 8`, `tensor_parallel_cgm = 8`, `parallel_agents = 4`, `rollout_workers = 5`, `num_gpus = 16`, `device_map_planner = [0-7]`, `device_map_cgm = [8-15]` | `PYTHONPATH=. python scripts/train_graphplanner_rllm.py --config-file configs/experiments/gp_full_73b14b_16g.yaml --yaml-only --print-config` |
+| 16×A800（Planner 14B + CGM 73B） | `tensor_parallel_planner = 8`, `tensor_parallel_cgm = 8`, `parallel_agents = 8`, `rollout_workers = 8`, `workflow_parallel = 10`, `num_gpus = 16`, `device_map_planner = [0,1,2,3,4,5,6,7]`, `device_map_cgm = [8,9,10,11,12,13,14,15]` | `PYTHONPATH=. python scripts/train_graphplanner_rllm.py --config-file configs/experiments/gp_full_73b14b_16g.yaml --yaml-only --print-config` |
 
 > **注意**：上表中的 YAML 样例需要同时指定 `paths.planner_model: models/qwen3-14b-instruct` 与 `paths.cgm_model: models/codefuse-cgm`，仓库已在 `models/` 目录下预留路径。
 
