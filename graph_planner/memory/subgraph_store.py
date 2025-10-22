@@ -3,6 +3,7 @@ from __future__ import annotations
 """
 memory/subgraph_store.py
 
+# 2025-10-22 memory hardening
 工作子图存取与线性化（WSD/FULL），标准化为带 .node_ids 的对象：
   - WorkingSubgraph: .nodes(dict)、.edges(list)、.node_ids(set)
   - new()/wrap() 便于创建/迁移
@@ -28,6 +29,10 @@ except Exception:
 
 # ======================= 基础类 =======================
 
+def _norm_posix(path: str | None) -> str:
+    return (path or "").replace("\\", "/")
+
+
 @dataclass
 class WorkingSubgraph:
     nodes: Dict[str, Dict[str, Any]]
@@ -50,7 +55,10 @@ class WorkingSubgraph:
             nid = n.get("id")
             if not nid:
                 continue
-            self.nodes[nid] = dict(n)
+            data = dict(n)
+            if "path" in data:
+                data["path"] = _norm_posix(data.get("path"))
+            self.nodes[nid] = data
             self.node_ids.add(nid)
 
     def update_node(self, node_id: str, **patch) -> None:
@@ -58,7 +66,10 @@ class WorkingSubgraph:
         if not n:
             return
         for k, v in patch.items():
-            n[k] = v
+            if k == "path":
+                n[k] = _norm_posix(v)
+            else:
+                n[k] = v
 
     def remove_nodes(self, node_ids: Iterable[str]) -> None:
         ids = set(node_ids or [])
@@ -95,9 +106,20 @@ def wrap(obj) -> WorkingSubgraph:
         nodes_store = obj.get("nodes", {})
         # 允许 list 或 dict 两种形态
         if isinstance(nodes_store, list):
-            nodes = {n["id"]: n for n in nodes_store if isinstance(n, dict) and "id" in n}
+            nodes = {}
+            for n in nodes_store:
+                if isinstance(n, dict) and "id" in n:
+                    data = dict(n)
+                    if "path" in data:
+                        data["path"] = _norm_posix(data.get("path"))
+                    nodes[data["id"]] = data
         elif isinstance(nodes_store, dict):
-            nodes = {k: dict(v) for k, v in nodes_store.items()}
+            nodes = {}
+            for k, v in nodes_store.items():
+                data = dict(v)
+                if "path" in data:
+                    data["path"] = _norm_posix(data.get("path"))
+                nodes[k] = data
         else:
             nodes = {}
         edges = [e for e in obj.get("edges", []) if isinstance(e, dict)]
@@ -152,7 +174,7 @@ def stats(subgraph) -> Dict[str, Any]:
     for n in sg.nodes.values():
         k = (n.get("kind") or "").lower()
         kinds[k] += 1
-        p = n.get("path")
+        p = _norm_posix(n.get("path"))
         if p:
             files[p] = None
     return {
@@ -168,7 +190,7 @@ def stats(subgraph) -> Dict[str, Any]:
 # ======================= 线性化 =======================
 
 def _is_tfile_path(path: str) -> bool:
-    p = (path or "").lower()
+    p = _norm_posix(path).lower()
     return ("test" in p) or ("/tests/" in p) or p.endswith("_test.py") or p.endswith("test.py")
 
 def _read_file_lines(rel_path: str) -> List[str]:

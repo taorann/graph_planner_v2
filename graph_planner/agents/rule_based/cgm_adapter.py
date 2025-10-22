@@ -9,15 +9,30 @@ agents/rule_based/cgm_adapter.py
   以保证补丁在 Guard/测试流程中的可见性，同时避免依赖容器外的文件系统。
 """
 
-from typing import Any, Dict, List, Optional
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 import os
 
 from aci.schema import Patch, PatchEdit, Plan, PlanTarget
 from ...infra import telemetry
 from ...infra.config import load as load_config
-from ...integrations.codefuse_cgm import CodeFuseCGMClient
+from ..common.contracts import CGM_PATCH_INSTRUCTION
+from ...integrations.codefuse_cgm import (
+    CGMExample,
+    CGMGenerationConfig,
+    CodeFuseCGMClient,
+    CodeFuseCGMGenerator,
+    ConversationEncoder,
+    GraphLinearizer,
+    SnippetFormatter,
+)
+from ..common.chat import extract_json_payload
 
 _MARKER = "CGM-LOCAL"
+
+_LOCAL_INSTRUCTION = CGM_PATCH_INSTRUCTION
 
 
 # ---------------- helpers ----------------
@@ -128,6 +143,8 @@ def _summarize_patch(edits: List[PatchEdit]) -> str:
 
 _CLIENT_CACHE: Optional[CodeFuseCGMClient] = None
 _CLIENT_FINGERPRINT: Optional[tuple] = None
+_LOCAL_RUNTIME_CACHE: Optional["_LocalCGMRuntime"] = None
+_LOCAL_RUNTIME_FINGERPRINT: Optional[tuple] = None
 
 
 def _get_client() -> Optional[CodeFuseCGMClient]:
@@ -165,6 +182,222 @@ def _get_client() -> Optional[CodeFuseCGMClient]:
     return _CLIENT_CACHE
 
 
+@dataclass
+class _LocalCGMRuntime:
+    generator: CodeFuseCGMGenerator
+    instruction: str = _LOCAL_INSTRUCTION
+
+    def generate_patch(
+        self,
+        *,
+        issue: Optional[Mapping[str, Any]],
+        plan: Plan,
+        plan_text: Optional[str],
+        subgraph_linearized: Optional[Iterable[Mapping[str, Any]]],
+        snippets: Optional[Iterable[Mapping[str, Any]]],
+        constraints: Optional[Mapping[str, Any]] = None,
+    ) -> Patch:
+        example = self._build_example(
+            plan=plan_text,
+            issue=issue,
+            snippets=snippets,
+            subgraph_linearized=subgraph_linearized,
+        )
+        sequences = self.generator.generate(example)
+
+        max_edits = None
+        if constraints:
+            try:
+                max_edits = int(constraints.get("max_edits", 0)) or None
+            except Exception:
+                max_edits = None
+
+        summary_fallback = plan_text or self.instruction
+        for seq in sequences:
+            patch = self._parse_sequence(seq, max_edits=max_edits, summary=summary_fallback)
+            if patch:
+                patch.setdefault("summary", summary_fallback)
+                return patch
+        raise RuntimeError("local CGM produced no valid patch")
+
+    def _build_example(
+        self,
+        *,
+        plan: Optional[str],
+        issue: Optional[Mapping[str, Any]],
+        snippets: Optional[Iterable[Mapping[str, Any]]],
+        subgraph_linearized: Optional[Iterable[Mapping[str, Any]]],
+    ) -> CGMExample:
+        graph_obj = self._chunks_to_graph(subgraph_linearized)
+        snippet_seq: Sequence[Mapping[str, Any]] = [dict(s) for s in (snippets or []) if isinstance(s, Mapping)]
+        return CGMExample(
+            prompt=self.instruction,
+            response="",
+            graph=graph_obj,
+            plan=plan,
+            issue=dict(issue or {}),
+            snippets=snippet_seq,
+            metadata={"source": "graph_planner"},
+        )
+
+    def _chunks_to_graph(
+        self, chunks: Optional[Iterable[Mapping[str, Any]]]
+    ) -> Optional[Dict[str, Any]]:
+        if not chunks:
+            return None
+        nodes: List[Dict[str, Any]] = []
+        for idx, chunk in enumerate(chunks):
+            if not isinstance(chunk, Mapping):
+                continue
+            text = chunk.get("text")
+            snippet = chunk.get("snippet") or chunk.get("lines")
+            if text is None and isinstance(snippet, Sequence):
+                text = "\n".join(str(line) for line in snippet)
+            if text is None:
+                continue
+            path = chunk.get("path") or chunk.get("file") or f"chunk-{idx}"
+            node = {
+                "id": str(chunk.get("id") or chunk.get("node_id") or f"chunk-{idx}"),
+                "name": str(path),
+                "text": text,
+            }
+            summary = chunk.get("summary")
+            if isinstance(summary, str) and summary.strip():
+                node["summary"] = summary.strip()
+            anchors = chunk.get("anchors") or chunk.get("keywords")
+            if anchors:
+                node["anchors"] = list(anchors)
+            start = chunk.get("start", chunk.get("line"))
+            end = chunk.get("end", start)
+            try:
+                if start is not None:
+                    node["span"] = {
+                        "start": int(start),
+                        "end": int(end if end is not None else start),
+                    }
+            except Exception:
+                pass
+            nodes.append(node)
+        if not nodes:
+            return None
+        return {"nodes": nodes, "edges": []}
+
+    def _parse_sequence(
+        self,
+        text: str,
+        *,
+        max_edits: Optional[int],
+        summary: Optional[str],
+    ) -> Optional[Patch]:
+        payload = extract_json_payload(text)
+        if payload is None:
+            try:
+                payload = json.loads(text)
+            except Exception:
+                return None
+        if not isinstance(payload, Mapping):
+            return None
+
+        patch_obj: Optional[Mapping[str, Any]] = None
+        candidate = payload.get("patch")
+        if isinstance(candidate, Mapping):
+            patch_obj = candidate
+        elif isinstance(payload.get("edits"), Sequence):
+            patch_obj = payload
+        if patch_obj is None:
+            return None
+
+        edits_raw = patch_obj.get("edits")
+        if not isinstance(edits_raw, Sequence):
+            return None
+
+        edits: List[PatchEdit] = []
+        for entry in edits_raw:
+            if not isinstance(entry, Mapping):
+                continue
+            path = entry.get("path")
+            if not path:
+                continue
+            new_text = entry.get("new_text") or entry.get("text") or entry.get("diff")
+            if new_text is None:
+                continue
+            start = entry.get("start", entry.get("line", 1))
+            end = entry.get("end", start)
+            try:
+                start_i = int(start)
+                end_i = int(end if end is not None else start_i)
+            except Exception:
+                continue
+            text_val = str(new_text)
+            if not text_val.endswith("\n"):
+                text_val += "\n"
+            edits.append(
+                {
+                    "path": str(path),
+                    "start": start_i,
+                    "end": end_i,
+                    "new_text": text_val,
+                }
+            )
+            if max_edits and max_edits > 0 and len(edits) >= max_edits:
+                break
+
+        if not edits:
+            return None
+
+        summary_text = (
+            patch_obj.get("summary")
+            or payload.get("summary")
+            or summary
+            or "cgm-local"
+        )
+        return {"edits": edits, "summary": str(summary_text)}
+
+
+def _get_local_runtime() -> Optional[_LocalCGMRuntime]:
+    global _LOCAL_RUNTIME_CACHE, _LOCAL_RUNTIME_FINGERPRINT
+    cfg = load_config()
+    cgm_cfg = getattr(cfg, "cgm", None)
+    if not cgm_cfg or not getattr(cgm_cfg, "enabled", False):
+        return None
+    model_path = getattr(cgm_cfg, "model_path", None)
+    if not model_path:
+        return None
+
+    path_obj = Path(model_path)
+    if not path_obj.exists():
+        return None
+    if path_obj.is_dir() and not (path_obj / "config.json").exists():
+        return None
+
+    fingerprint = (
+        str(path_obj),
+        getattr(cgm_cfg, "tokenizer_path", None),
+        getattr(cgm_cfg, "max_tokens", None),
+        getattr(cgm_cfg, "temperature", None),
+        getattr(cgm_cfg, "top_p", None),
+        getattr(cgm_cfg, "max_input_tokens", None),
+        getattr(cgm_cfg, "device", None),
+    )
+    if _LOCAL_RUNTIME_CACHE and _LOCAL_RUNTIME_FINGERPRINT == fingerprint:
+        return _LOCAL_RUNTIME_CACHE
+
+    generation_cfg = CGMGenerationConfig(
+        model_name_or_path=str(path_obj),
+        tokenizer_name_or_path=getattr(cgm_cfg, "tokenizer_path", None),
+        max_length=int(getattr(cgm_cfg, "max_input_tokens", 8192)),
+        max_new_tokens=int(getattr(cgm_cfg, "max_tokens", 2048)),
+        temperature=float(getattr(cgm_cfg, "temperature", 0.0)),
+        top_p=float(getattr(cgm_cfg, "top_p", 0.9)),
+        do_sample=float(getattr(cgm_cfg, "temperature", 0.0)) > 0,
+        device=getattr(cgm_cfg, "device", None),
+    )
+    generator = CodeFuseCGMGenerator(generation_cfg)
+    _LOCAL_RUNTIME_CACHE = _LocalCGMRuntime(generator=generator)
+    _LOCAL_RUNTIME_FINGERPRINT = fingerprint
+    return _LOCAL_RUNTIME_CACHE
+
+
 def _generate_local_patch(
     plan: Plan,
     constraints: Optional[Dict[str, Any]],
@@ -196,6 +429,7 @@ def generate(
     """生成补丁：优先调用 CodeFuse CGM，失败时回退到本地标记方案。"""
 
     client = _get_client()
+    runtime = _get_local_runtime()
     if client:
         try:
             return client.generate_patch(
@@ -216,8 +450,35 @@ def generate(
                 }
             )
 
+    if runtime:
+        try:
+            patch = runtime.generate_patch(
+                issue=issue,
+                plan=plan,
+                plan_text=plan_text,
+                subgraph_linearized=subgraph_linearized,
+                snippets=snippets,
+                constraints=constraints,
+            )
+            return patch
+        except Exception as exc:  # pragma: no cover - graceful fallback
+            telemetry.log_event(
+                {
+                    "kind": "cgm-local",
+                    "ok": False,
+                    "error": str(exc),
+                    "model": getattr(runtime.generator.config, "model_name_or_path", ""),
+                }
+            )
+
     patch = _generate_local_patch(plan, constraints, snippets)
-    if client:
+    if client or runtime:
         base_summary = patch.get("summary") or "local-cgm"
-        patch["summary"] = f"{base_summary} | fallback"
+        suffix_parts = []
+        if client:
+            suffix_parts.append("remote-fallback")
+        if runtime:
+            suffix_parts.append("local-runtime")
+        suffix = "+".join(suffix_parts) if suffix_parts else "fallback"
+        patch["summary"] = f"{base_summary} | {suffix}"
     return patch
