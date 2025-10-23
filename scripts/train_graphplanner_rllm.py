@@ -236,6 +236,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--repo-op-limit", type=int, default=None, help="Maximum repository operations before forcing termination.")
     parser.add_argument("--disable-cgm-synthesis", action="store_true", help="Disable CGM synthesis assistance inside the planner env.")
     parser.add_argument("--cgm-synthesis-strategy", default=None, help="Label for the CGM synthesis strategy exposed via env info.")
+    parser.add_argument(
+        "--strict-planner-io",
+        action="store_true",
+        help="Enable strict planner I/O re-validation and capping in env.",
+    )
     parser.add_argument("--project-name", default=None)
     parser.add_argument("--experiment-name", default=None)
     parser.add_argument("--log-to-wandb", action="store_true", help="Enable Weights & Biases logging.")
@@ -663,6 +668,12 @@ def main() -> None:
     update_args_from_config(args, final_run_cfg)
     _absolutise_args(args)
 
+    final_run_cfg.setdefault("io", {})["strict_planner_io"] = bool(args.strict_planner_io)
+    if args.strict_planner_io:
+        os.environ["GRAPH_PLANNER_STRICT_IO"] = "1"
+    else:
+        os.environ.pop("GRAPH_PLANNER_STRICT_IO", None)
+
     if args.model_path is None:
         default_model = DEFAULT_PLANNER_MODEL_PATH if args.agent == "planner" else DEFAULT_CGM_MODEL_PATH
         args.model_path = default_model
@@ -728,6 +739,7 @@ def main() -> None:
     if args.val_batch_size is not None:
         _set(cfg, "data.val_batch_size", int(args.val_batch_size))
     _set(cfg, "data.shuffle", False)
+    _set(cfg, "io.strict_planner_io", bool(args.strict_planner_io))
 
     if args.project_name:
         _set(cfg, "trainer.project_name", args.project_name)
@@ -768,49 +780,51 @@ def main() -> None:
         run_name=wandb_cfg.get("run_name", run_name),
         config=final_run_cfg,
     )
-    parallel_metrics = {
-        "parallel/tensor_parallel_planner": pcfg.tensor_parallel_planner,
-        "parallel/tensor_parallel_cgm": pcfg.tensor_parallel_cgm,
-        "parallel/replicas": pcfg.replicas,
-        "parallel/agents": pcfg.parallel_agents,
-        "parallel/workers": pcfg.rollout_workers,
-        "parallel/workflow_parallel": pcfg.workflow_parallel,
-        "resources/num_gpus": pcfg.num_gpus,
-        "resources/ray_gpus": pcfg.ray_num_gpus,
-        "resources/ray_cpus": pcfg.ray_num_cpus,
-    }
-    gpu_snapshot = make_gpu_snapshot()
-    ray_snapshot = make_ray_snapshot()
-    log_metrics(0, {**parallel_metrics, **gpu_snapshot(), **ray_snapshot()})
 
-    if args.print_config:
-        print(OmegaConf.to_yaml(cfg))
-        return
+    try:
+        parallel_metrics = {
+            "parallel/tensor_parallel_planner": pcfg.tensor_parallel_planner,
+            "parallel/tensor_parallel_cgm": pcfg.tensor_parallel_cgm,
+            "parallel/replicas": pcfg.replicas,
+            "parallel/agents": pcfg.parallel_agents,
+            "parallel/workers": pcfg.rollout_workers,
+            "parallel/workflow_parallel": pcfg.workflow_parallel,
+            "resources/num_gpus": pcfg.num_gpus,
+            "resources/ray_gpus": pcfg.ray_num_gpus,
+            "resources/ray_cpus": pcfg.ray_num_cpus,
+        }
+        gpu_snapshot = make_gpu_snapshot()
+        ray_snapshot = make_ray_snapshot()
+        log_metrics(0, {**parallel_metrics, **gpu_snapshot(), **ray_snapshot()})
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+        if args.print_config:
+            print(OmegaConf.to_yaml(cfg))
+            return
 
-    _sanity_checks(train_path=train_path, val_path=val_path, args=args)
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-    from rllm.trainer.agent_trainer import AgentTrainer  # noqa: E402
+        _sanity_checks(train_path=train_path, val_path=val_path, args=args)
 
-    trainer = AgentTrainer(
-        agent_class=agent_cls,
-        env_class=env_cls,
-        agent_args=agent_args,
-        env_args=env_args,
-        config=cfg,
-    )
+        from rllm.trainer.agent_trainer import AgentTrainer  # noqa: E402
 
-    if args.ray_address:
-        os.environ.setdefault("RAY_ADDRESS", args.ray_address)
+        trainer = AgentTrainer(
+            agent_class=agent_cls,
+            env_class=env_cls,
+            agent_args=agent_args,
+            env_args=env_args,
+            config=cfg,
+        )
 
-    trainer.train()
+        if args.ray_address:
+            os.environ.setdefault("RAY_ADDRESS", args.ray_address)
 
-    if wandb_run is not None:  # pragma: no cover - network side effect
-        try:
-            wandb_run.finish()
-        except Exception:
-            pass
+        trainer.train()
+    finally:
+        if wandb_run is not None:  # pragma: no cover - network side effect
+            try:
+                wandb_run.finish()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

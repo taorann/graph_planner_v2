@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import base64
 import json
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+import os
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from difflib import unified_diff
 
 from ..agents.common import text_protocol
-from ..agents.common.contracts import ProtocolError
+from ..agents.common.contracts import ProtocolError, validate_planner_action
 from ..core.actions import (
     ActionUnion,
     ExploreAction,
@@ -64,6 +65,14 @@ class PlannerEnv:
         self.box = SandboxRuntime(sandbox_cfg)
         self.config: Config = load_config()
         self.config_dict: Dict[str, Any] = self.config.to_dict()
+        io_cfg = self.config_dict.get("io") if isinstance(self.config_dict, Mapping) else {}
+        if not isinstance(io_cfg, Mapping):
+            io_cfg = {}
+        strict_env = os.environ.get("GRAPH_PLANNER_STRICT_IO") or os.environ.get("STRICT_PLANNER_IO")
+        if strict_env is not None:
+            self._strict_io = str(strict_env).strip().lower() in {"1", "true", "yes"}
+        else:
+            self._strict_io = bool(io_cfg.get("strict_planner_io", False))
 
         self.steps: int = 0
         self.last_info: Dict[str, Any] = {}
@@ -133,20 +142,60 @@ class PlannerEnv:
     # 主 step
     # ------------------------------------------------------------------
     def step(
-        self, action: ActionUnion
+        self, action: ActionUnion | Mapping[str, Any]
     ) -> Tuple[Dict[str, Any], float, bool, Dict[str, Any]]:
-        if isinstance(action, ExploreAction):
-            info = self._handle_explore(action)
-        elif isinstance(action, MemoryAction):
-            info = self._handle_memory(action)
-        elif isinstance(action, RepairAction):
-            info = self._handle_repair(action)
-        elif isinstance(action, SubmitAction):
+        validation_meta: Dict[str, Any] = {}
+        action_obj: ActionUnion
+
+        if isinstance(action, Mapping):
+            try:
+                action_obj = validate_planner_action(action)
+                validation_meta = getattr(action_obj, "_meta", {}) or {}
+            except ProtocolError as exc:
+                if self._strict_io:
+                    info = {"error": exc.code, "detail": exc.detail}
+                    return self._obs(), -0.05, False, info
+                raise
+        else:
+            action_obj = action
+            if self._strict_io:
+                try:
+                    payload = self._serialise_action_for_validation(action_obj)
+                except Exception as exc:
+                    info = {"error": "invalid-action", "detail": str(exc)}
+                    return self._obs(), -0.05, False, info
+                try:
+                    action_obj = validate_planner_action(payload)
+                    validation_meta = getattr(action_obj, "_meta", {}) or {}
+                except ProtocolError as exc:
+                    info = {"error": exc.code, "detail": exc.detail}
+                    return self._obs(), -0.05, False, info
+
+        if isinstance(action_obj, ExploreAction):
+            info = self._handle_explore(action_obj)
+        elif isinstance(action_obj, MemoryAction):
+            info = self._handle_memory(action_obj)
+        elif isinstance(action_obj, RepairAction):
+            info = self._handle_repair(action_obj)
+        elif isinstance(action_obj, SubmitAction):
             info = self._handle_submit()
-        elif isinstance(action, NoopAction):
+        elif isinstance(action_obj, NoopAction):
             info = {"kind": "noop"}
         else:
             info = {"kind": "noop"}
+
+        if validation_meta.get("capped"):
+            info["capped"] = True
+            capped_fields = validation_meta.get("capped_fields") or {}
+            if capped_fields:
+                info["capped_fields"] = capped_fields
+        warnings = validation_meta.get("warnings")
+        if warnings:
+            existing = info.get("warnings")
+            if isinstance(existing, list):
+                info["warnings"] = existing + [w for w in warnings if w not in existing]
+            else:
+                info["warnings"] = list(warnings)
 
         if self.memory_state:
             kind = info.get("kind")
@@ -160,6 +209,14 @@ class PlannerEnv:
         self.steps += 1
         self.last_info = info
         return self._obs(), reward, done, info
+
+    @staticmethod
+    def _serialise_action_for_validation(action: ActionUnion) -> Dict[str, Any]:
+        payload = action.dict(exclude={"schema_version"}, exclude_none=True)
+        name = payload.pop("type", getattr(action, "type", None))
+        if not name:
+            raise ValueError("action missing type field")
+        return {"name": name, "params": payload}
 
     # ------------------------------------------------------------------
     # Explore / Memory handlers

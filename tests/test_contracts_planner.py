@@ -1,6 +1,7 @@
 import pytest
 
 from graph_planner.agents.common.contracts import (
+    PlannerErrorCode,
     ProtocolError,
     parse_action_block,
     validate_planner_action,
@@ -16,6 +17,7 @@ def test_parse_and_validate_explore_success() -> None:
     text = (
         "<function=explore>\n"
         "  <param name=\"thought\">expand search</param>\n"
+        "  <param name=\"anchors\">[{\"path\": \"src/a.py\"}]</param>\n"
         "  <param name=\"op\"><![CDATA[expand]]></param>\n"
         "</function>"
     )
@@ -138,3 +140,34 @@ def test_parse_rejects_invalid_json() -> None:
     with pytest.raises(ProtocolError) as excinfo:
         parse_action_block(text)
     assert excinfo.value.code == "invalid-json-param"
+
+
+def test_explore_hop_and_limit_capped() -> None:
+    text = (
+        "<function=explore>\n"
+        "  <param name=\"anchors\">[{\"path\": \"src/a.py\"}]</param>\n"
+        "  <param name=\"hop\">999</param>\n"
+        "  <param name=\"limit\">0</param>\n"
+        "</function>"
+    )
+    parsed = parse_action_block(text)
+    action = validate_planner_action(parsed)
+    meta = getattr(action, "_meta", {})
+    assert isinstance(action, ExploreAction)
+    assert action.hop == 2
+    assert action.limit == 1
+    assert meta.get("capped") is True
+    assert "value-capped" in (meta.get("warnings") or [])
+
+
+def test_explore_requires_anchors() -> None:
+    text = "<function=explore>\n  <param name=\"hop\">1</param>\n</function>"
+    parsed = parse_action_block(text)
+    with pytest.raises(ProtocolError) as excinfo:
+        validate_planner_action(parsed)
+    assert excinfo.value.code == PlannerErrorCode.MISSING_REQUIRED_PARAM.value
+
+
+def test_actions_schema_version_default() -> None:
+    obj = ExploreAction(type="explore", anchors=[{"path": "src/a.py"}], hop=1, limit=20)
+    assert getattr(obj, "schema_version", None) == 1

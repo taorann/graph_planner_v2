@@ -145,6 +145,7 @@ PLANNER_CONTRACT = PlannerContract(
     required_params={
         "repair": {"subplan"},
         "memory": {"target", "intent"},
+        "explore": {"anchors"},
     },
 )
 
@@ -312,25 +313,57 @@ def _ensure_dict_list(value: Any) -> List[Dict[str, Any]]:
     return []
 
 
+def _attach_meta(action: ActionUnion, meta: Dict[str, Any]) -> ActionUnion:
+    object.__setattr__(action, "_meta", dict(meta))
+    return action
+
+
 def validate_planner_action(result: Mapping[str, Any]) -> ActionUnion:
     """Validate planner parameters and convert to a typed action."""
 
     action_name = PLANNER_CONTRACT.normalise_action(result.get("name"))
     params = dict(result.get("params") or {})
+    meta: Dict[str, Any] = {}
+
+    required = PLANNER_CONTRACT.required_params.get(action_name, set())
+    missing = [key for key in required if key not in params]
+    if missing:
+        raise ProtocolError(
+            PlannerErrorCode.MISSING_REQUIRED_PARAM.value,
+            f"action '{action_name}' missing required params: {', '.join(sorted(missing))}",
+        )
 
     if action_name == "explore":
         op = str(params.get("op", "expand")).lower()
         anchors = _ensure_dict_list(params.get("anchors"))
+        if not anchors:
+            raise ProtocolError(
+                PlannerErrorCode.MISSING_REQUIRED_PARAM.value,
+                "explore action requires at least one anchor",
+            )
         nodes = _ensure_str_list(params.get("nodes"))
         try:
-            hop = int(params.get("hop", 1))
+            hop_raw = int(params.get("hop", 1))
         except Exception:
-            hop = 1
+            hop_raw = 1
         try:
-            limit = int(params.get("limit", 50))
+            limit_raw = int(params.get("limit", 50))
         except Exception:
-            limit = 50
-        return ExploreAction(op=op, anchors=anchors, nodes=nodes, hop=hop, limit=limit)
+            limit_raw = 50
+
+        hop = max(0, min(2, hop_raw))
+        limit = max(1, min(100, limit_raw))
+        capped_fields: Dict[str, Any] = {}
+        if hop != hop_raw:
+            capped_fields["hop"] = hop_raw
+        if limit != limit_raw:
+            capped_fields["limit"] = limit_raw
+        if capped_fields:
+            meta.setdefault("warnings", []).append("value-capped")
+            meta["capped"] = True
+            meta["capped_fields"] = capped_fields
+
+        return _attach_meta(ExploreAction(op=op, anchors=anchors, nodes=nodes, hop=hop, limit=limit), meta)
 
     if action_name == "memory":
         target = str(params.get("target", "explore"))
@@ -339,7 +372,7 @@ def validate_planner_action(result: Mapping[str, Any]) -> ActionUnion:
         selector = params.get("selector")
         if isinstance(selector, (dict, list)):
             selector = json.dumps(selector, ensure_ascii=False)
-        return MemoryAction(target=target, scope=scope, intent=intent, selector=selector)
+        return _attach_meta(MemoryAction(target=target, scope=scope, intent=intent, selector=selector), meta)
 
     if action_name == "repair":
         subplan = params.get("subplan")
@@ -352,13 +385,16 @@ def validate_planner_action(result: Mapping[str, Any]) -> ActionUnion:
             for fid in focus_ids
             if fid
         ]
-        return RepairAction(apply=apply_flag, issue={}, plan=subplan.strip(), plan_targets=plan_targets, patch=None)
+        return _attach_meta(
+            RepairAction(apply=apply_flag, issue={}, plan=subplan.strip(), plan_targets=plan_targets, patch=None),
+            meta,
+        )
 
     if action_name == "submit":
-        return SubmitAction()
+        return _attach_meta(SubmitAction(), meta)
 
     if action_name == "noop":
-        return NoopAction()
+        return _attach_meta(NoopAction(), meta)
 
     raise ProtocolError(PlannerErrorCode.UNKNOWN_ACTION.value, f"unsupported action '{action_name}'")
 
