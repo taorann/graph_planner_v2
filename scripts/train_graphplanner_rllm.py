@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sys
 import random
 import warnings
 from datetime import datetime
@@ -68,8 +69,8 @@ REPO_ROOT = Path(
     os.environ.get("GRAPH_PLANNER_ROOT") or Path(__file__).resolve().parent.parent
 ).expanduser().resolve()
 
-DEFAULT_PLANNER_MODEL_PATH = (REPO_ROOT / "models" / "qwen3-14b-instruct").resolve()
-DEFAULT_CGM_MODEL_PATH = (REPO_ROOT / "models" / "codefuse-cgm").resolve()
+DEFAULT_PLANNER_MODEL_PATH = (REPO_ROOT / "models" / "Qwen3-14B").resolve()
+DEFAULT_CGM_MODEL_PATH = (REPO_ROOT / "models" / "CodeFuse-CGM").resolve()
 DEFAULT_TRAIN_DATASET_PATH = (REPO_ROOT / "datasets" / "r2e_gym" / "train.jsonl").resolve()
 
 
@@ -107,7 +108,25 @@ def _default_config_path() -> Path:
     return find_in_rllm("trainer", "config", "agent_ppo_trainer.yaml")
 
 
-def _parse_args() -> argparse.Namespace:
+def _collect_specified_cli_args(
+    parser: argparse.ArgumentParser, argv: list[str] | None = None
+) -> set[str]:
+    tokens = list(argv if argv is not None else sys.argv[1:])
+    specified: set[str] = set()
+    for action in parser._actions:
+        if action.dest in {"help", argparse.SUPPRESS}:
+            continue
+        if not action.option_strings:
+            specified.add(action.dest)
+            continue
+        for opt in action.option_strings:
+            if opt in tokens or any(token.startswith(f"{opt}=") for token in tokens):
+                specified.add(action.dest)
+                break
+    return specified
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """解析命令行参数，支持模型/数据集/调度配置。"""
 
     parser = argparse.ArgumentParser(description="Train Graph Planner agents with rLLM PPO")
@@ -148,7 +167,7 @@ def _parse_args() -> argparse.Namespace:
         "--model-path",
         type=Path,
         default=None,
-        help="Target policy checkpoint path (defaults to models/qwen3-14b-instruct or models/codefuse-cgm).",
+        help="Target policy checkpoint path (defaults to models/Qwen3-14B or models/CodeFuse-CGM).",
     )
     parser.add_argument("--output-dir", type=Path, default=None, help="Directory for checkpoints and logs (defaults to model path).")
     parser.add_argument("--tokenizer-path", type=Path, default=None)
@@ -223,6 +242,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--ray-object-store-memory", type=int, default=None)
     parser.add_argument("--config", type=Path, default=_default_config_path())
     parser.add_argument("--print-config", action="store_true")
+    parser.add_argument(
+        "--print-config-only",
+        action="store_true",
+        help="Print the resolved Hydra configuration and exit without launching training.",
+    )
     parser.add_argument("--use-fallback", action="store_true", help="Enable rule fallback when training planner agent.")
     parser.add_argument(
         "--cgm-instruction",
@@ -251,7 +275,13 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Alternative logging backend when W&B is disabled.",
     )
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    if getattr(args, "print_config_only", False):
+        args.print_config = True
+    args._specified_cli_args = _collect_specified_cli_args(parser, argv)
+    if args.agent == "cgm":
+        args.disable_cgm_synthesis = True
+    return args
 
 
 def _load_config(path: Path) -> OmegaConf:
@@ -799,7 +829,8 @@ def main() -> None:
 
         if args.print_config:
             print(OmegaConf.to_yaml(cfg))
-            return
+            if getattr(args, "print_config_only", False):
+                return
 
         output_dir.mkdir(parents=True, exist_ok=True)
 

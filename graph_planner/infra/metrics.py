@@ -71,7 +71,10 @@ def make_ray_snapshot() -> Callable[[], Dict[str, float]]:
         import ray
 
         def snapshot() -> Dict[str, float]:
-            resources = ray.available_resources()
+            try:
+                resources = ray.available_resources()
+            except Exception:  # ray not initialised or runtime unavailable
+                return {}
             return {
                 "ray/cpus_avail": float(resources.get("CPU", 0.0)),
                 "ray/gpus_avail": float(resources.get("GPU", 0.0)),
