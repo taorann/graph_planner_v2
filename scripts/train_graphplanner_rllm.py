@@ -68,8 +68,8 @@ REPO_ROOT = Path(
     os.environ.get("GRAPH_PLANNER_ROOT") or Path(__file__).resolve().parent.parent
 ).expanduser().resolve()
 
-DEFAULT_PLANNER_MODEL_PATH = (REPO_ROOT / "models" / "qwen3-14b-instruct").resolve()
-DEFAULT_CGM_MODEL_PATH = (REPO_ROOT / "models" / "codefuse-cgm").resolve()
+DEFAULT_PLANNER_MODEL_PATH = (REPO_ROOT / "models" / "Qwen3-14B").resolve()
+DEFAULT_CGM_MODEL_PATH = (REPO_ROOT / "models" / "CodeFuse-CGM").resolve()
 DEFAULT_TRAIN_DATASET_PATH = (REPO_ROOT / "datasets" / "r2e_gym" / "train.jsonl").resolve()
 
 
@@ -148,7 +148,7 @@ def _parse_args() -> argparse.Namespace:
         "--model-path",
         type=Path,
         default=None,
-        help="Target policy checkpoint path (defaults to models/qwen3-14b-instruct or models/codefuse-cgm).",
+        help="Target policy checkpoint path (defaults to models/Qwen3-14B or models/CodeFuse-CGM).",
     )
     parser.add_argument("--output-dir", type=Path, default=None, help="Directory for checkpoints and logs (defaults to model path).")
     parser.add_argument("--tokenizer-path", type=Path, default=None)

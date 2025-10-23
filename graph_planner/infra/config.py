@@ -52,8 +52,8 @@ def _detect_repo_root() -> Path:
 
 REPO_ROOT = _detect_repo_root()
 
-PLANNER_MODEL_DIR = (REPO_ROOT / "models" / "qwen3-14b-instruct").resolve()
-CGM_MODEL_DIR = (REPO_ROOT / "models" / "codefuse-cgm").resolve()
+PLANNER_MODEL_DIR = (REPO_ROOT / "models" / "Qwen3-14B").resolve()
+CGM_MODEL_DIR = (REPO_ROOT / "models" / "CodeFuse-CGM").resolve()
 
 
 # ---------------- dataclasses ----------------
