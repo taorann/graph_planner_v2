@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 from difflib import unified_diff
 
 from ..agents.common import text_protocol
+from ..agents.common.chat import action_to_payload
 from ..agents.common.contracts import ProtocolError, validate_planner_action
 from ..core.actions import (
     ActionUnion,
@@ -213,7 +214,9 @@ class PlannerEnv:
     @staticmethod
     def _serialise_action_for_validation(action: ActionUnion) -> Dict[str, Any]:
         payload = action.dict(exclude={"schema_version"}, exclude_none=True)
-        name = payload.pop("type", getattr(action, "type", None))
+        name = payload.pop("type", None)
+        if not name:
+            name = action_to_payload(action).get("type")
         if not name:
             raise ValueError("action missing type field")
         return {"name": name, "params": payload}
