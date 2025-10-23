@@ -80,7 +80,9 @@ def _make_args(**overrides):
         val_split="val",
     )
     defaults.update(overrides)
-    return SimpleNamespace(**defaults)
+    ns = SimpleNamespace(**defaults)
+    ns._specified_cli_args = set(defaults.keys())
+    return ns
 
 
 def test_merge_run_config_priority(tmp_path):
