@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sys
 import random
 import warnings
 from datetime import datetime
@@ -107,7 +108,25 @@ def _default_config_path() -> Path:
     return find_in_rllm("trainer", "config", "agent_ppo_trainer.yaml")
 
 
-def _parse_args() -> argparse.Namespace:
+def _collect_specified_cli_args(
+    parser: argparse.ArgumentParser, argv: list[str] | None = None
+) -> set[str]:
+    tokens = list(argv if argv is not None else sys.argv[1:])
+    specified: set[str] = set()
+    for action in parser._actions:
+        if action.dest in {"help", argparse.SUPPRESS}:
+            continue
+        if not action.option_strings:
+            specified.add(action.dest)
+            continue
+        for opt in action.option_strings:
+            if opt in tokens or any(token.startswith(f"{opt}=") for token in tokens):
+                specified.add(action.dest)
+                break
+    return specified
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """解析命令行参数，支持模型/数据集/调度配置。"""
 
     parser = argparse.ArgumentParser(description="Train Graph Planner agents with rLLM PPO")
@@ -251,7 +270,11 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Alternative logging backend when W&B is disabled.",
     )
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    args._specified_cli_args = _collect_specified_cli_args(parser, argv)
+    if args.agent == "cgm":
+        args.disable_cgm_synthesis = True
+    return args
 
 
 def _load_config(path: Path) -> OmegaConf:
