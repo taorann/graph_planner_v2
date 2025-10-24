@@ -54,7 +54,7 @@ Graph Planner 致力于复现 CGM + Planner 的双智能体代码修复流程：
 
 3. **本地模型接入信息**
    - `.aci/config.json` 中 `planner_model`、`cgm` 默认均为禁用状态，需要提供实际的本地部署端点、模型名、鉴权 token 等信息。
-   - 虽然仓库已预留 `models/qwen3-14b-instruct/` 与 `models/codefuse-cgm/` 目录作为默认 checkpoint 路径，但仍需在这些目录内放入真实权重与 tokenizer 才能执行训练或推理。
+   - 虽然仓库已预留 `models/Qwen3-14B/` 与 `models/CodeFuse-CGM/` 目录作为默认 checkpoint 路径，但仍需在这些目录内放入真实权重与 tokenizer 才能执行训练或推理。
 
 4. **数据与奖励配置**
    - 尚未定义更多 RepoEnv/R2E 任务的奖励 shaping、终止条件调整等策略；如需与真实训练目标对齐，需要进一步扩充。
@@ -75,7 +75,7 @@ Graph Planner 致力于复现 CGM + Planner 的双智能体代码修复流程：
    - 通过 `scripts/run_rule_agent.py --agent llm` 进行冒烟测试，确认模型输出合法的 `<function=...>` 块，补丁流程可走通。
 
 4. **训练启动**
-   - 将基础 checkpoint 拷贝至 `models/qwen3-14b-instruct/`（以及需要的 `models/codefuse-cgm/`），脚本会自动使用这些路径作为默认模型目录。
+   - 将基础 checkpoint 拷贝至 `models/Qwen3-14B/`（以及需要的 `models/CodeFuse-CGM/`），脚本会自动使用这些路径作为默认模型目录。
    - 根据实验计划编辑 `configs/experiments/*.yaml`（或使用 `--config-file` 指向自定义 YAML），再运行 `scripts/train_graphplanner_rllm.py`；需要临时覆写时可继续使用 CLI（例如 `--dataset`、`--total-epochs`），若希望完全依赖 YAML 则追加 `--yaml-only`。
    - 在训练过程中关注 `logs/` 与 Ray dashboard，确保奖励、轨迹记录符合预期。
 

@@ -52,8 +52,8 @@ def _detect_repo_root() -> Path:
 
 REPO_ROOT = _detect_repo_root()
 
-PLANNER_MODEL_DIR = (REPO_ROOT / "models" / "qwen3-14b-instruct").resolve()
-CGM_MODEL_DIR = (REPO_ROOT / "models" / "codefuse-cgm").resolve()
+PLANNER_MODEL_DIR = (REPO_ROOT / "models" / "Qwen3-14B").resolve()
+CGM_MODEL_DIR = (REPO_ROOT / "models" / "CodeFuse-CGM").resolve()
 
 
 # ---------------- dataclasses ----------------
@@ -505,6 +505,9 @@ def _normalise_cli_value(value: Any) -> Any:
 
 
 def _cli_override_entry(namespace: argparse.Namespace, attr: str) -> Any:  # type: ignore[name-defined]
+    specified = getattr(namespace, "_specified_cli_args", None)
+    if specified is not None and attr not in specified:
+        return None
     if not hasattr(namespace, attr):  # pragma: no cover - defensive guard
         return None
     value = getattr(namespace, attr)
@@ -586,12 +589,10 @@ def build_cli_overrides(args: Any, *, mode: str) -> Dict[str, Any]:
     if stop_ids is not None:
         overrides.setdefault("planner_sampling", {})["stop_ids"] = [int(s) for s in stop_ids]
 
-    overrides.setdefault("parallel", {})["tensor_parallel_planner"] = int(
-        getattr(args, "tensor_parallel", 1) or 1
-    )
-    overrides.setdefault("parallel", {})["tensor_parallel_cgm"] = int(
-        getattr(args, "tensor_parallel", 1) or 1
-    )
+    tensor_parallel = _cli_override_entry(args, "tensor_parallel")
+    if tensor_parallel is not None:
+        overrides.setdefault("parallel", {})["tensor_parallel_planner"] = int(tensor_parallel)
+        overrides.setdefault("parallel", {})["tensor_parallel_cgm"] = int(tensor_parallel)
     replicas = _cli_override_entry(args, "rollout_replicas")
     if replicas is not None:
         overrides.setdefault("parallel", {})["replicas"] = int(replicas)
@@ -608,8 +609,12 @@ def build_cli_overrides(args: Any, *, mode: str) -> Dict[str, Any]:
     if workflow_parallel is not None:
         overrides.setdefault("parallel", {})["workflow_parallel"] = int(workflow_parallel)
 
-    overrides.setdefault("resources", {})["num_gpus"] = int(getattr(args, "num_gpus", 1) or 1)
-    overrides.setdefault("resources", {})["num_nodes"] = int(getattr(args, "num_nodes", 1) or 1)
+    num_gpus = _cli_override_entry(args, "num_gpus")
+    if num_gpus is not None:
+        overrides.setdefault("resources", {})["num_gpus"] = int(num_gpus)
+    num_nodes = _cli_override_entry(args, "num_nodes")
+    if num_nodes is not None:
+        overrides.setdefault("resources", {})["num_nodes"] = int(num_nodes)
 
     ray_num_gpus = _cli_override_entry(args, "ray_num_gpus")
     if ray_num_gpus is not None:
@@ -704,141 +709,167 @@ def merge_run_config(
     return merged
 
 
-def update_args_from_config(args: Any, config: Mapping[str, Any]) -> None:
+def update_args_from_config(
+    args: Any, config: Mapping[str, Any], *, respect_cli: bool = True
+) -> None:
+    specified: set[str] = (
+        set(getattr(args, "_specified_cli_args", set())) if respect_cli else set()
+    )
+
+    def _can_set(field: str) -> bool:
+        return hasattr(args, field) and field not in specified
+
+    def _set_value(field: str, value: Any, *, transform: Optional[Any] = None) -> None:
+        if value is None or not _can_set(field):
+            return
+        setattr(args, field, transform(value) if transform else value)
+
+    def _set_path(field: str, value: Any) -> None:
+        _set_value(field, value, transform=_resolve_pathlike)
+
+    def _set_int(field: str, value: Any) -> None:
+        _set_value(field, value, transform=int)
+
+    def _set_float(field: str, value: Any) -> None:
+        _set_value(field, value, transform=float)
+
     paths = config.get("paths", {})
     agent = getattr(args, "agent", "planner")
     model_key = "planner_model" if agent == "planner" else "cgm_model"
     model_path = paths.get(model_key)
     if model_path:
-        setattr(args, "model_path", _resolve_pathlike(model_path))
+        _set_path("model_path", model_path)
     planner_tokenizer = paths.get("planner_tokenizer")
     if planner_tokenizer:
-        setattr(args, "tokenizer_path", _resolve_pathlike(planner_tokenizer))
+        _set_path("tokenizer_path", planner_tokenizer)
     cgm_model = paths.get("cgm_model")
     if cgm_model:
-        setattr(args, "cgm_model_path", _resolve_pathlike(cgm_model))
+        _set_path("cgm_model_path", cgm_model)
     cgm_tokenizer = paths.get("cgm_tokenizer")
     if cgm_tokenizer:
-        setattr(args, "cgm_tokenizer_path", _resolve_pathlike(cgm_tokenizer))
+        _set_path("cgm_tokenizer_path", cgm_tokenizer)
 
     dataset_train = paths.get("dataset_train")
     if dataset_train:
-        setattr(args, "dataset", _resolve_pathlike(dataset_train))
+        _set_path("dataset", dataset_train)
     dataset_val = paths.get("dataset_val")
     if dataset_val:
-        setattr(args, "val_dataset", _resolve_pathlike(dataset_val))
+        _set_path("val_dataset", dataset_val)
 
     experiment = config.get("experiment", {})
     if "seed" in experiment:
-        setattr(args, "seed", int(experiment["seed"]))
+        _set_int("seed", experiment["seed"])
 
     training = config.get("training", {})
     if "train_batch_size" in training:
         train_bs = int(training["train_batch_size"])
-        setattr(args, "train_batch_size", train_bs)
+        _set_value("train_batch_size", train_bs)
         if hasattr(args, "batch_size"):
-            setattr(args, "batch_size", train_bs)
+            _set_value("batch_size", train_bs)
     if "total_epochs" in training and training["total_epochs"] is not None:
-        setattr(args, "total_epochs", int(training["total_epochs"]))
+        _set_int("total_epochs", training["total_epochs"])
     if training.get("grad_accum_steps") is not None:
-        setattr(args, "grad_accum_steps", int(training["grad_accum_steps"]))
+        _set_int("grad_accum_steps", training["grad_accum_steps"])
     if training.get("precision"):
-        setattr(args, "precision", training["precision"])
+        _set_value("precision", training["precision"])
     if training.get("lr") is not None:
-        setattr(args, "lr", float(training["lr"]))
+        _set_float("lr", training["lr"])
     if training.get("weight_decay") is not None:
-        setattr(args, "weight_decay", float(training["weight_decay"]))
+        _set_float("weight_decay", training["weight_decay"])
     if training.get("warmup_steps") is not None:
-        setattr(args, "warmup_steps", int(training["warmup_steps"]))
+        _set_int("warmup_steps", training["warmup_steps"])
     if training.get("total_steps") is not None:
-        setattr(args, "total_steps", int(training["total_steps"]))
+        _set_int("total_steps", training["total_steps"])
     if training.get("resume_from"):
-        setattr(args, "resume", _resolve_pathlike(training["resume_from"]))
+        _set_path("resume", training["resume_from"])
 
     sampling = config.get("planner_sampling", {})
     if sampling.get("temperature") is not None:
-        setattr(args, "temperature", float(sampling["temperature"]))
+        _set_float("temperature", sampling["temperature"])
     if sampling.get("top_p") is not None:
-        setattr(args, "top_p", float(sampling["top_p"]))
+        _set_float("top_p", sampling["top_p"])
     if sampling.get("max_new_tokens") is not None:
-        setattr(args, "max_output_tokens", int(sampling["max_new_tokens"]))
+        _set_int("max_output_tokens", sampling["max_new_tokens"])
     if sampling.get("max_input_tokens") is not None:
-        setattr(args, "max_input_tokens", int(sampling["max_input_tokens"]))
-    if sampling.get("stop"):
+        _set_int("max_input_tokens", sampling["max_input_tokens"])
+    if sampling.get("stop") and _can_set("stop"):
         setattr(args, "stop", list(sampling["stop"]))
-    if sampling.get("stop_ids"):
-        setattr(args, "stop_ids", list(int(v) for v in sampling["stop_ids"]))
+    if sampling.get("stop_ids") and _can_set("stop_ids"):
+        setattr(args, "stop_ids", [int(v) for v in sampling["stop_ids"]])
 
     parallel = config.get("parallel", {})
     tp_planner = int(parallel.get("tensor_parallel_planner", 1) or 1)
     tp_cgm = int(parallel.get("tensor_parallel_cgm", 1) or 1)
-    setattr(args, "tensor_parallel", tp_planner if agent == "planner" else tp_cgm)
-    setattr(args, "rollout_replicas", int(parallel.get("replicas", 1) or 1))
+    target_tp = tp_planner if agent == "planner" else tp_cgm
+    _set_int("tensor_parallel", target_tp)
+    replicas = int(parallel.get("replicas", 1) or 1)
+    _set_int("rollout_replicas", replicas)
     if parallel.get("parallel_agents") is not None:
-        setattr(args, "parallel_agents", int(parallel["parallel_agents"]))
+        _set_int("parallel_agents", parallel["parallel_agents"])
     if parallel.get("rollout_workers") is not None:
-        setattr(args, "rollout_workers", int(parallel["rollout_workers"]))
+        _set_int("rollout_workers", parallel["rollout_workers"])
     if parallel.get("workflow_parallel") is not None:
-        setattr(args, "workflow_parallel", int(parallel["workflow_parallel"]))
+        _set_int("workflow_parallel", parallel["workflow_parallel"])
 
     resources = config.get("resources", {})
     if resources.get("num_gpus") is not None:
-        setattr(args, "num_gpus", int(resources["num_gpus"]))
+        _set_int("num_gpus", resources["num_gpus"])
     if resources.get("num_nodes") is not None:
-        setattr(args, "num_nodes", int(resources["num_nodes"]))
+        _set_int("num_nodes", resources["num_nodes"])
     if resources.get("ray_num_gpus") is not None:
-        setattr(args, "ray_num_gpus", int(resources["ray_num_gpus"]))
+        _set_int("ray_num_gpus", resources["ray_num_gpus"])
     if resources.get("ray_num_cpus") is not None:
-        setattr(args, "ray_num_cpus", int(resources["ray_num_cpus"]))
+        _set_int("ray_num_cpus", resources["ray_num_cpus"])
     if resources.get("ray_memory") is not None:
-        setattr(args, "ray_memory", int(resources["ray_memory"]))
+        _set_int("ray_memory", resources["ray_memory"])
     if resources.get("ray_object_store_memory") is not None:
-        setattr(args, "ray_object_store_memory", int(resources["ray_object_store_memory"]))
+        _set_int("ray_object_store_memory", resources["ray_object_store_memory"])
 
     env_cfg = config.get("env", {})
     if env_cfg.get("max_steps") is not None:
-        setattr(args, "max_steps", int(env_cfg["max_steps"]))
+        _set_int("max_steps", env_cfg["max_steps"])
     if env_cfg.get("reward_scale") is not None:
-        setattr(args, "reward_scale", float(env_cfg["reward_scale"]))
+        _set_float("reward_scale", env_cfg["reward_scale"])
     if env_cfg.get("failure_penalty") is not None:
-        setattr(args, "failure_penalty", float(env_cfg["failure_penalty"]))
+        _set_float("failure_penalty", env_cfg["failure_penalty"])
     if env_cfg.get("step_penalty") is not None:
-        setattr(args, "step_penalty", float(env_cfg["step_penalty"]))
+        _set_float("step_penalty", env_cfg["step_penalty"])
     if env_cfg.get("timeout_penalty") is not None:
-        setattr(args, "timeout_penalty", float(env_cfg["timeout_penalty"]))
+        _set_float("timeout_penalty", env_cfg["timeout_penalty"])
     if env_cfg.get("repo_op_limit") is not None:
-        setattr(args, "repo_op_limit", int(env_cfg["repo_op_limit"]))
+        _set_int("repo_op_limit", env_cfg["repo_op_limit"])
     if env_cfg.get("disable_cgm_synthesis") is not None:
-        setattr(args, "disable_cgm_synthesis", bool(env_cfg["disable_cgm_synthesis"]))
+        _set_value("disable_cgm_synthesis", bool(env_cfg["disable_cgm_synthesis"]))
     if env_cfg.get("apply_patches") is not None:
-        setattr(args, "apply_patches", bool(env_cfg["apply_patches"]))
+        _set_value("apply_patches", bool(env_cfg["apply_patches"]))
     if env_cfg.get("docker_manifest"):
-        setattr(args, "docker_manifest", _resolve_pathlike(env_cfg["docker_manifest"]))
+        _set_path("docker_manifest", env_cfg["docker_manifest"])
     if env_cfg.get("prepull_containers") is not None:
-        setattr(args, "prepull_containers", bool(env_cfg["prepull_containers"]))
+        _set_value("prepull_containers", bool(env_cfg["prepull_containers"]))
     for field in ("prepull_max_workers", "prepull_retries", "prepull_delay", "prepull_timeout"):
         if env_cfg.get(field) is not None:
-            setattr(args, field, int(env_cfg[field]))
+            _set_int(field, env_cfg[field])
 
     logging_cfg = config.get("logging", {})
     wandb_cfg = logging_cfg.get("wandb", {})
     if wandb_cfg.get("project"):
-        setattr(args, "project_name", wandb_cfg["project"])
+        _set_value("project_name", wandb_cfg["project"])
     if wandb_cfg.get("run_name"):
-        setattr(args, "experiment_name", wandb_cfg["run_name"])
+        _set_value("experiment_name", wandb_cfg["run_name"])
     if wandb_cfg.get("enabled") is not None:
-        setattr(args, "log_to_wandb", bool(wandb_cfg["enabled"]))
+        _set_value("log_to_wandb", bool(wandb_cfg["enabled"]))
     if wandb_cfg.get("offline") is not None:
-        setattr(args, "wandb_offline", bool(wandb_cfg["offline"]))
+        _set_value("wandb_offline", bool(wandb_cfg["offline"]))
 
     if logging_cfg.get("log_backend") is not None:
-        setattr(args, "log_backend", logging_cfg["log_backend"])
+        _set_value("log_backend", logging_cfg["log_backend"])
     if logging_cfg.get("save_interval") is not None:
-        setattr(args, "save_interval", logging_cfg["save_interval"])
+        _set_value("save_interval", logging_cfg["save_interval"])
     if logging_cfg.get("eval_interval") is not None:
-        setattr(args, "eval_interval", logging_cfg["eval_interval"])
+        _set_value("eval_interval", logging_cfg["eval_interval"])
     if logging_cfg.get("output_dir") is not None:
-        setattr(args, "output_dir", _resolve_pathlike(logging_cfg["output_dir"]))
+        _set_path("output_dir", logging_cfg["output_dir"])
+
 
 
 def serialise_resolved_config(config: Mapping[str, Any], path: Path) -> None:

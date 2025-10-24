@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
@@ -182,6 +183,83 @@ def test_ensure_dataset_registered_uses_registry(tmp_path, monkeypatch):
     assert dataset.get_verl_data_path().endswith("train_verl.parquet")
 
 
+def test_resolve_task_file_falls_back_to_verified_variant(tmp_path, caplog):
+    base_dir = tmp_path / "swebench"
+    base_dir.mkdir()
+    verified = base_dir / "validation_verified.jsonl"
+    verified.write_text(json.dumps({"task_id": "demo"}) + "\n", encoding="utf-8")
+    missing = base_dir / "validation.jsonl"
+
+    with caplog.at_level(logging.INFO):
+        resolved = dataset_mod.resolve_task_file(missing, split="validation")
+
+    assert resolved == verified.resolve()
+    assert "Resolved dataset path" in caplog.text
+    rows = dataset_mod.load_task_entries(resolved)
+    assert rows[0]["task_id"] == "demo"
+
+
+def test_resolve_task_file_handles_split_aliases(tmp_path):
+    base_dir = tmp_path / "swebench"
+    base_dir.mkdir()
+    alias_file = base_dir / "val.jsonl"
+    alias_file.write_text(json.dumps({"task_id": "alias"}) + "\n", encoding="utf-8")
+
+    resolved = dataset_mod.resolve_task_file(base_dir / "validation.json", split="validation")
+
+    assert resolved == alias_file.resolve()
+
+
+def test_materialise_instances_from_nested_directories(tmp_path, caplog):
+    base_dir = tmp_path / "swebench"
+    instances_dir = base_dir / "instances" / "validation"
+    nested_issue = instances_dir / "ISSUE-1"
+    nested_issue.mkdir(parents=True)
+    metadata = {"task_id": "issue-1", "sandbox": {"docker_image": "image", "workdir": "."}}
+    (nested_issue / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+    with caplog.at_level(logging.INFO):
+        resolved = dataset_mod.resolve_task_file(base_dir / "validation.json", split="validation")
+
+    assert resolved.suffix == ".jsonl"
+    assert "Materialised dataset split" in caplog.text
+
+    rows = dataset_mod.load_task_entries(resolved)
+    assert len(rows) == 1
+    assert rows[0]["task_id"] == "issue-1"
+
+
+def test_resolve_task_file_accepts_directory(tmp_path):
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir()
+    test_file = dataset_dir / "test.jsonl"
+    test_file.write_text(json.dumps({"task_id": "demo"}) + "\n", encoding="utf-8")
+
+    resolved = dataset_mod.resolve_task_file(dataset_dir, split="test")
+
+    assert resolved == test_file.resolve()
+
+
+def test_resolve_task_file_materialises_instances_split(tmp_path):
+    dataset_dir = tmp_path / "dataset"
+    instances_dir = dataset_dir / "instances" / "validation"
+    instances_dir.mkdir(parents=True)
+    instance_payload = {
+        "task_id": "demo-instance",
+        "issue": {"id": "123", "title": "Bug"},
+        "sandbox": {"docker_image": "demo", "workdir": "."},
+    }
+    (instances_dir / "case.json").write_text(json.dumps(instance_payload), encoding="utf-8")
+
+    resolved = dataset_mod.resolve_task_file(dataset_dir, split="validation")
+
+    assert resolved.parent == dataset_dir
+    assert resolved.name.startswith(".auto_validation")
+
+    rows = dataset_mod.load_task_entries(resolved)
+    assert rows and rows[0]["task_id"] == "demo-instance"
+
+
 class _ToyRewardEnv:
     """Utility providing deterministic rewards for GRPO toy experiments."""
 
@@ -295,19 +373,26 @@ def test_train_cli_print_config_planner(tmp_path, monkeypatch, capsys):
     dataset_file = DATASET_FILE
     assert dataset_file.exists(), "sample dataset missing"
 
-    verl_path = tmp_path / "train_verl.parquet"
-    verl_path.write_text("", encoding="utf-8")
-    (tmp_path / "val_verl.parquet").write_text("", encoding="utf-8")
-    dataset_stub = SimpleNamespace(
-        get_verl_data_path=lambda: str(verl_path),
+    train_verl = tmp_path / "train_verl.parquet"
+    train_verl.write_text("", encoding="utf-8")
+    val_verl = tmp_path / "val_verl.parquet"
+    val_verl.write_text("", encoding="utf-8")
+    train_stub = SimpleNamespace(
+        get_verl_data_path=lambda: str(train_verl),
         get_data_path=lambda: str(tmp_path / "train.parquet"),
+    )
+    val_stub = SimpleNamespace(
+        get_verl_data_path=lambda: str(val_verl),
+        get_data_path=lambda: str(tmp_path / "val.parquet"),
     )
 
     def fake_register(*, name, split, path):
+        if "val" in name or split == "val":
+            return val_stub
         assert name == dataset_mod.GRAPH_PLANNER_DATASET_NAME
         assert split == "train"
         assert Path(path) == dataset_file
-        return dataset_stub
+        return train_stub
 
     monkeypatch.setattr("scripts.train_graphplanner_rllm.ensure_dataset_registered", fake_register)
 
@@ -318,7 +403,11 @@ def test_train_cli_print_config_planner(tmp_path, monkeypatch, capsys):
         "train_graphplanner_rllm.py",
         "--model-path",
         str(tmp_path / "policy"),
-        "--print-config",
+        "--num-gpus",
+        "2",
+        "--ray-num-gpus",
+        "2",
+        "--print-config-only",
     ]
     monkeypatch.setattr(sys, "argv", argv, raising=False)
 
@@ -328,22 +417,98 @@ def test_train_cli_print_config_planner(tmp_path, monkeypatch, capsys):
 
     output = capsys.readouterr().out
     assert "data:" in output
-    assert str(verl_path) in output
+    assert str(train_verl) in output
+
+
+def test_train_cli_print_config_runs_trainer(tmp_path, monkeypatch):
+    dataset_file = DATASET_FILE
+    assert dataset_file.exists(), "sample dataset missing"
+
+    train_verl = tmp_path / "train_verl.parquet"
+    train_verl.write_text("", encoding="utf-8")
+    val_verl = tmp_path / "val_verl.parquet"
+    val_verl.write_text("", encoding="utf-8")
+
+    train_stub = SimpleNamespace(
+        get_verl_data_path=lambda: str(train_verl),
+        get_data_path=lambda: str(tmp_path / "train.parquet"),
+    )
+    val_stub = SimpleNamespace(
+        get_verl_data_path=lambda: str(val_verl),
+        get_data_path=lambda: str(tmp_path / "val.parquet"),
+    )
+
+    def fake_register(*, name, split, path):
+        if "val" in name or split == "val":
+            return val_stub
+        assert Path(path) == dataset_file
+        return train_stub
+
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.ensure_dataset_registered", fake_register)
+
+    model_dir = tmp_path / "policy"
+    model_dir.mkdir()
+
+    calls = SimpleNamespace(init=False, train=False)
+
+    class DummyTrainer:
+        def __init__(self, *_, **__):
+            calls.init = True
+
+        def train(self):
+            calls.train = True
+
+    trainer_pkg = ModuleType("rllm.trainer")
+    agent_module = ModuleType("rllm.trainer.agent_trainer")
+    agent_module.AgentTrainer = DummyTrainer
+    trainer_pkg.agent_trainer = agent_module
+    monkeypatch.setitem(sys.modules, "rllm.trainer", trainer_pkg)
+    monkeypatch.setitem(sys.modules, "rllm.trainer.agent_trainer", agent_module)
+
+    argv = [
+        "train_graphplanner_rllm.py",
+        "--dataset",
+        str(dataset_file),
+        "--model-path",
+        str(model_dir),
+        "--num-gpus",
+        "2",
+        "--ray-num-gpus",
+        "2",
+        "--print-config",
+    ]
+    monkeypatch.setattr(sys, "argv", argv, raising=False)
+
+    from scripts import train_graphplanner_rllm as train_mod
+
+    train_mod.main()
+
+    assert calls.init is True
+    assert calls.train is True
 
 
 def test_train_cli_parallel_overrides(tmp_path, monkeypatch, capsys):
     dataset_file = DATASET_FILE
     assert dataset_file.exists(), "sample dataset missing"
 
-    verl_path = tmp_path / "train_verl.parquet"
-    dataset_stub = SimpleNamespace(
-        get_verl_data_path=lambda: str(verl_path),
+    train_verl = tmp_path / "train_verl.parquet"
+    val_verl = tmp_path / "val_verl.parquet"
+    train_verl.write_text("", encoding="utf-8")
+    val_verl.write_text("", encoding="utf-8")
+    train_stub = SimpleNamespace(
+        get_verl_data_path=lambda: str(train_verl),
         get_data_path=lambda: str(tmp_path / "train.parquet"),
+    )
+    val_stub = SimpleNamespace(
+        get_verl_data_path=lambda: str(val_verl),
+        get_data_path=lambda: str(tmp_path / "val.parquet"),
     )
 
     def fake_register(*, name, split, path):
+        if "val" in name or split == "val":
+            return val_stub
         assert Path(path) == dataset_file
-        return dataset_stub
+        return train_stub
 
     monkeypatch.setattr("scripts.train_graphplanner_rllm.ensure_dataset_registered", fake_register)
 
@@ -351,7 +516,7 @@ def test_train_cli_parallel_overrides(tmp_path, monkeypatch, capsys):
         "train_graphplanner_rllm.py",
         "--model-path",
         str(tmp_path / "policy"),
-        "--print-config",
+        "--print-config-only",
         "--num-gpus",
         "16",
         "--num-nodes",
@@ -423,6 +588,10 @@ def test_train_cli_training_overrides(tmp_path, monkeypatch, capsys):
         str(tmp_path / "outputs"),
         "--val-dataset",
         str(dataset_file),
+        "--num-gpus",
+        "2",
+        "--ray-num-gpus",
+        "2",
         "--save-interval",
         "10",
         "--eval-interval",
@@ -451,7 +620,7 @@ def test_train_cli_training_overrides(tmp_path, monkeypatch, capsys):
         "demo_proj",
         "--experiment-name",
         "demo_exp",
-        "--print-config",
+        "--print-config-only",
     ]
     monkeypatch.setattr(sys, "argv", argv, raising=False)
 
@@ -493,7 +662,11 @@ def test_eval_cli_print_config(tmp_path, monkeypatch, capsys):
         str(dataset_file),
         "--model-path",
         str(tmp_path / "policy"),
-        "--print-config",
+        "--num-gpus",
+        "2",
+        "--ray-num-gpus",
+        "2",
+        "--print-config-only",
     ]
     monkeypatch.setattr(sys, "argv", argv, raising=False)
 
@@ -505,6 +678,63 @@ def test_eval_cli_print_config(tmp_path, monkeypatch, capsys):
     assert "val_only: true" in output
     assert str(verl_path) in output
     assert "Graph Planner rLLM evaluation launch summary:" in output
+
+
+def test_eval_cli_print_config_runs_trainer(tmp_path, monkeypatch):
+    dataset_file = DATASET_FILE
+    assert dataset_file.exists(), "sample dataset missing"
+
+    verl_path = tmp_path / "eval_verl.parquet"
+    verl_path.write_text("", encoding="utf-8")
+
+    def fake_register(*, name, split, path):
+        assert Path(path) == dataset_file
+        return SimpleNamespace(
+            get_verl_data_path=lambda: str(verl_path),
+            get_data_path=lambda: str(verl_path.with_suffix(".raw.parquet")),
+        )
+
+    monkeypatch.setattr("scripts.eval_graphplanner_rllm.ensure_dataset_registered", fake_register)
+
+    model_dir = tmp_path / "policy"
+    model_dir.mkdir()
+
+    calls = SimpleNamespace(init=False, train=False)
+
+    class DummyTrainer:
+        def __init__(self, *_, **__):
+            calls.init = True
+
+        def train(self):
+            calls.train = True
+
+    trainer_pkg = ModuleType("rllm.trainer")
+    agent_module = ModuleType("rllm.trainer.agent_trainer")
+    agent_module.AgentTrainer = DummyTrainer
+    trainer_pkg.agent_trainer = agent_module
+    monkeypatch.setitem(sys.modules, "rllm.trainer", trainer_pkg)
+    monkeypatch.setitem(sys.modules, "rllm.trainer.agent_trainer", agent_module)
+
+    argv = [
+        "eval_graphplanner_rllm.py",
+        "--dataset",
+        str(dataset_file),
+        "--model-path",
+        str(model_dir),
+        "--num-gpus",
+        "2",
+        "--ray-num-gpus",
+        "2",
+        "--print-config",
+    ]
+    monkeypatch.setattr(sys, "argv", argv, raising=False)
+
+    from scripts import eval_graphplanner_rllm as eval_mod
+
+    eval_mod.main()
+
+    assert calls.init is True
+    assert calls.train is True
 
 
 def test_train_cli_config_file_and_resolved_config(tmp_path, monkeypatch, capsys):
@@ -565,7 +795,7 @@ def test_train_cli_config_file_and_resolved_config(tmp_path, monkeypatch, capsys
         str(cfg_path),
         "--model-path",
         str(tmp_path / "policy"),
-        "--print-config",
+        "--print-config-only",
         "--train-batch-size",
         "16",
         "--tensor-parallel",
@@ -650,7 +880,7 @@ def test_train_cli_yaml_only_ignores_overrides(tmp_path, monkeypatch, capsys):
         "--yaml-only",
         "--model-path",
         str(tmp_path / "policy"),
-        "--print-config",
+        "--print-config-only",
         "--train-batch-size",
         "16",
         "--tensor-parallel",
@@ -749,7 +979,7 @@ def test_train_cli_prepull_containers(tmp_path, monkeypatch, capsys):
         "--prepull-containers",
         "--docker-manifest",
         str(tmp_path / "docker_manifest.txt"),
-        "--print-config",
+        "--print-config-only",
     ]
 
     monkeypatch.setenv("WANDB_MODE", "offline")
@@ -802,7 +1032,7 @@ def test_train_cli_preflight_failure(tmp_path, monkeypatch):
         str(cfg_path),
         "--model-path",
         str(tmp_path / "policy"),
-        "--print-config",
+        "--print-config-only",
     ]
     monkeypatch.setattr(sys, "argv", argv, raising=False)
 

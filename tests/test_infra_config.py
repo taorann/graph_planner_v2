@@ -80,7 +80,9 @@ def _make_args(**overrides):
         val_split="val",
     )
     defaults.update(overrides)
-    return SimpleNamespace(**defaults)
+    ns = SimpleNamespace(**defaults)
+    ns._specified_cli_args = set(defaults.keys())
+    return ns
 
 
 def test_merge_run_config_priority(tmp_path):
@@ -134,10 +136,10 @@ def test_merge_run_config_priority(tmp_path):
     assert args.parallel_agents == 3
     assert args.rollout_workers == 5
     assert args.save_interval == 10
-    assert args.output_dir == Path("cli-output").resolve()
+    assert args.output_dir == Path("cli-output")
     assert args.project_name == "cli-project"
     assert args.disable_cgm_synthesis is True
-    assert args.docker_manifest == Path("cli-manifest.txt").resolve()
+    assert args.docker_manifest == Path("cli-manifest.txt")
     assert args.prepull_containers is True
     assert args.prepull_max_workers == 8
     assert args.prepull_retries == 3
@@ -165,9 +167,28 @@ def test_merge_run_config_yaml_only_blocks_cli(tmp_path):
     assert merged["experiment"]["seed"] == 1234
     assert merged["training"]["train_batch_size"] == 8
 
-    update_args_from_config(args, merged)
+    update_args_from_config(args, merged, respect_cli=False)
     assert args.train_batch_size == 8
     assert args.seed == 1234
+
+
+def test_update_args_from_config_keeps_cli_dataset(tmp_path):
+    args = _make_args()
+    yaml_cfg = {"paths": {"dataset_train": str(tmp_path / "yaml.jsonl")}}
+
+    update_args_from_config(args, yaml_cfg)
+
+    assert args.dataset == Path("cli-train.jsonl")
+
+
+def test_update_args_from_config_sets_dataset_when_unspecified(tmp_path):
+    args = _make_args()
+    args._specified_cli_args.discard("dataset")
+    yaml_cfg = {"paths": {"dataset_train": str(tmp_path / "yaml.jsonl")}}
+
+    update_args_from_config(args, yaml_cfg)
+
+    assert args.dataset == (tmp_path / "yaml.jsonl").resolve()
 
 
 def test_load_run_config_file_roundtrip(tmp_path):
