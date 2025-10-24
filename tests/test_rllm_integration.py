@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -180,6 +181,33 @@ def test_ensure_dataset_registered_uses_registry(tmp_path, monkeypatch):
     assert calls["split"] == "train"
     assert isinstance(calls["entries"], list) and calls["entries"]
     assert dataset.get_verl_data_path().endswith("train_verl.parquet")
+
+
+def test_resolve_task_file_falls_back_to_verified_variant(tmp_path, caplog):
+    base_dir = tmp_path / "swebench"
+    base_dir.mkdir()
+    verified = base_dir / "validation_verified.jsonl"
+    verified.write_text(json.dumps({"task_id": "demo"}) + "\n", encoding="utf-8")
+    missing = base_dir / "validation.jsonl"
+
+    with caplog.at_level(logging.INFO):
+        resolved = dataset_mod.resolve_task_file(missing, split="validation")
+
+    assert resolved == verified.resolve()
+    assert "Resolved dataset path" in caplog.text
+    rows = dataset_mod.load_task_entries(resolved)
+    assert rows[0]["task_id"] == "demo"
+
+
+def test_resolve_task_file_accepts_directory(tmp_path):
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir()
+    test_file = dataset_dir / "test.jsonl"
+    test_file.write_text(json.dumps({"task_id": "demo"}) + "\n", encoding="utf-8")
+
+    resolved = dataset_mod.resolve_task_file(dataset_dir, split="test")
+
+    assert resolved == test_file.resolve()
 
 
 class _ToyRewardEnv:

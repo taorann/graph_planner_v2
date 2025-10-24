@@ -41,6 +41,7 @@ from graph_planner.integrations.rllm import (  # noqa: E402
     GraphPlannerRLLMEnv,
     ensure_dataset_registered,
     load_task_entries,
+    resolve_task_file,
 )
 from scripts.train_graphplanner_rllm import (  # noqa: E402
     DEFAULT_CGM_MODEL_PATH,
@@ -180,15 +181,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def _resolve_eval_dataset(path: Path, *, name: str, split: str) -> tuple[str, int]:
-    rows = load_task_entries(path)
+def _resolve_eval_dataset(path: Path, *, name: str, split: str) -> tuple[Path, str, int]:
+    resolved = resolve_task_file(path, split=split)
+    rows = load_task_entries(resolved)
     if not rows:
-        raise RuntimeError(f"Dataset {path} did not contain any rows")
-    dataset = ensure_dataset_registered(name=name, split=split, path=path)
+        raise RuntimeError(f"Dataset {resolved} did not contain any rows")
+    dataset = ensure_dataset_registered(name=name, split=split, path=resolved)
     verl_path = dataset.get_verl_data_path()
     if not verl_path:
         raise RuntimeError("Dataset registration did not produce a Verl parquet file")
-    return verl_path, len(rows)
+    return resolved, verl_path, len(rows)
 
 
 def main() -> None:
@@ -249,11 +251,13 @@ def main() -> None:
     if not dataset_name:
         dataset_name = GRAPH_PLANNER_CGM_DATASET_NAME if args.agent == "cgm" else GRAPH_PLANNER_DATASET_NAME
     eval_dataset_name = f"{dataset_name}_eval"
-    eval_path, sample_count = _resolve_eval_dataset(
+    dataset_jsonl, eval_path, sample_count = _resolve_eval_dataset(
         args.dataset,
         name=eval_dataset_name,
         split=args.dataset_split,
     )
+    args.dataset = dataset_jsonl
+    final_run_cfg.setdefault("paths", {})["dataset_train"] = str(dataset_jsonl)
 
     container_images = _prepare_container_images(args, final_run_cfg)
 

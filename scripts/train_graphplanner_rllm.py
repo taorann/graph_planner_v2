@@ -54,6 +54,7 @@ from graph_planner.integrations.rllm import (  # noqa: E402
     GraphPlannerRLLMEnv,
     ensure_dataset_registered,
     load_task_entries,
+    resolve_task_file,
 )
 from graph_planner.runtime.containers import (  # noqa: E402
     collect_docker_images,
@@ -742,11 +743,21 @@ def main() -> None:
     if not dataset_name:
         dataset_name = GRAPH_PLANNER_CGM_DATASET_NAME if args.agent == "cgm" else GRAPH_PLANNER_DATASET_NAME
 
+    resolved_train_ds = resolve_task_file(args.dataset, split=args.dataset_split)
+    args.dataset = resolved_train_ds
+    final_run_cfg.setdefault("paths", {})["dataset_train"] = str(resolved_train_ds)
+
+    resolved_val_ds: Path | None = None
+    if args.val_dataset is not None:
+        resolved_val_ds = resolve_task_file(args.val_dataset, split=args.val_split)
+        args.val_dataset = resolved_val_ds
+        final_run_cfg.setdefault("paths", {})["dataset_val"] = str(resolved_val_ds)
+
     train_path, val_path, train_rows, val_rows = _resolve_dataset(
-        dataset_path=args.dataset,
+        dataset_path=resolved_train_ds,
         dataset_name=dataset_name,
         split=args.dataset_split,
-        val_dataset=args.val_dataset,
+        val_dataset=resolved_val_ds,
         val_split=args.val_split,
     )
 
