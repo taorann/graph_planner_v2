@@ -260,6 +260,20 @@ def test_resolve_task_file_materialises_instances_split(tmp_path):
     assert rows and rows[0]["task_id"] == "demo-instance"
 
 
+def test_resolve_task_file_error_highlights_available_splits(tmp_path):
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir()
+    (dataset_dir / "test.jsonl").write_text(json.dumps({"task_id": "demo"}) + "\n", encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError) as excinfo:
+        dataset_mod.resolve_task_file(dataset_dir / "validation.jsonl", split="validation")
+
+    message = str(excinfo.value)
+    assert "Available dataset descriptors" in message
+    assert "test.jsonl" in message
+    assert "Suggestion" in message
+
+
 class _ToyRewardEnv:
     """Utility providing deterministic rewards for GRPO toy experiments."""
 

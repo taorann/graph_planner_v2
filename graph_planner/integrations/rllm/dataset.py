@@ -58,6 +58,40 @@ PREFERRED_INSTANCE_FILENAMES = (
 )
 
 
+SPLIT_ALIASES: dict[str, list[str]] = {
+    "validation": ["val", "dev"],
+    "val": ["validation", "dev"],
+    "dev": ["validation", "val"],
+    "train": ["training"],
+    "training": ["train"],
+    "test": ["evaluation", "eval"],
+    "evaluation": ["test", "eval"],
+    "eval": ["test", "evaluation"],
+}
+
+
+def _discover_available_descriptors(base_dirs: Iterable[Path]) -> dict[str, Path]:
+    """Return a mapping of available dataset stems to their source paths."""
+
+    available: dict[str, Path] = {}
+    for directory in base_dirs:
+        for candidate in sorted(directory.glob("*.json*")):
+            if candidate.is_file() and candidate.suffix in JSON_SUFFIXES:
+                available.setdefault(candidate.stem, candidate)
+
+        instances_root = directory / "instances"
+        if not instances_root.is_dir():
+            continue
+
+        for entry in sorted(instances_root.iterdir()):
+            if entry.is_dir():
+                available.setdefault(entry.name, entry)
+            elif entry.is_file() and entry.suffix in JSON_SUFFIXES:
+                available.setdefault(entry.stem, entry)
+
+    return available
+
+
 def _iter_instance_sources(instance_dir: Path) -> List[Path]:
     sources: List[Path] = []
     seen: set[Path] = set()
@@ -196,17 +230,7 @@ def resolve_task_file(
         stems.append(split.replace("_", "-"))
 
         split_lower = split.lower()
-        alias_map = {
-            "validation": ["val", "dev"],
-            "val": ["validation", "dev"],
-            "dev": ["validation", "val"],
-            "train": ["training"],
-            "training": ["train"],
-            "test": ["evaluation", "eval"],
-            "evaluation": ["test", "eval"],
-            "eval": ["test", "evaluation"],
-        }
-        stems.extend(alias_map.get(split_lower, []))
+        stems.extend(SPLIT_ALIASES.get(split_lower, []))
     stems = _unique(stems)
 
     for directory in base_dirs:
@@ -248,11 +272,43 @@ def resolve_task_file(
             return resolved
 
     attempted_str = "\n  - ".join(str(p) for p in attempted[:8])
-    raise FileNotFoundError(
-        (
-            f"Task descriptor not found: {original}. Checked candidates:\n  - {attempted_str}"
-        )
-    )
+    available = _discover_available_descriptors(base_dirs)
+
+    message_parts = [
+        f"Task descriptor not found: {original}. Checked candidates:\n  - {attempted_str}",
+    ]
+
+    if available:
+        available_list = "\n  - ".join(str(path) for path in list(available.values())[:8])
+        message_parts.append(f"Available dataset descriptors:\n  - {available_list}")
+
+        if split:
+            split_lower = split.lower()
+            available_keys = {key.lower(): key for key in available.keys()}
+            if split_lower not in available_keys:
+                # Prefer a matching alias if present, otherwise highlight the first candidate.
+                alias_candidates = [split_lower]
+                alias_candidates.extend(SPLIT_ALIASES.get(split_lower, []))
+                suggestion_key = None
+                for alias in alias_candidates:
+                    if alias in available_keys:
+                        suggestion_key = available_keys[alias]
+                        break
+
+                if suggestion_key is None and "test" in available_keys:
+                    suggestion_key = available_keys["test"]
+
+                if suggestion_key is None and available:
+                    suggestion_key = next(iter(available.keys()))
+
+                if suggestion_key:
+                    suggestion_path = available[suggestion_key]
+                    message_parts.append(
+                        "Suggestion: update --dataset/--dataset-split to use "
+                        f"'{suggestion_key}' (e.g. {suggestion_path})."
+                    )
+
+    raise FileNotFoundError("\n".join(message_parts))
 
 
 def _coerce_path(value: str | os.PathLike[str], *, base_dir: Path | None = None) -> str:

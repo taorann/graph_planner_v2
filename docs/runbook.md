@@ -21,7 +21,7 @@ PYTHONPATH=. python scripts/prepare_swebench_validation.py \
 - 两个脚本都会读取 Hugging Face token（环境变量 `HF_TOKEN`），必要时可通过 `--hf-token` 显式指定。
 - `prepare_training_datasets.py` 负责写入 `datasets/r2e_gym/train.jsonl`、`datasets/r2e_gym/val.jsonl` 与配套的 `instances/*.json`，并支持 `--r2e-val-size`/`--r2e-val-split` 自定义验证集切分。
 - `prepare_swebench_validation.py` 会优先解析仓库内的 `graph_planner/SWE-bench`（若存在），否则回退至 Hugging Face 数据集，最终在 `datasets/swebench/<split>.jsonl` 与 `datasets/swebench/instances/` 产出验证/测试任务。`--swebench-split` 默认 `validation`，也可改为 `test`。
-- 两个脚本都会生成 docker manifest（如 `datasets/r2e_gym/docker_images.txt`、`datasets/swebench/docker_images_validation.txt`），并在 `--prepull-containers` 时复用 R2E-Gym 的工具并行预拉容器，可用 `--prepull-max-workers/--prepull-retries/--prepull-delay/--prepull-timeout` 调整。
+- 两个脚本都会生成 docker manifest（如 `datasets/r2e_gym/docker_images.txt`、`datasets/swebench/docker_images_{validation,test}.txt`），并在 `--prepull-containers` 时复用 R2E-Gym 的工具并行预拉容器，可用 `--prepull-max-workers/--prepull-retries/--prepull-delay/--prepull-timeout` 调整。
 - 若仅需刷新其中一种数据，可分别带 `--skip-r2e` 或 `--skip-swebench`。
 
 ## 1. 配置加载优先级
@@ -174,20 +174,20 @@ PYTHONPATH=. python scripts/train_graphplanner_rllm.py \
 
 评估脚本使用同一套配置，额外将 `trainer.val_only = True`、`train_batch_size = batch_size`。建议在 YAML 中为评估 run 设定独立 `logging.wandb.run_name`（例如 `planner-grpo-eval`），以便区分训练/验证轨迹。
 
-使用 SWE-bench Verified 验证集进行评测时，可复用训练阶段的 YAML 并显式指定数据与容器清单：
+使用 SWE-bench Verified 数据集进行评测时，可复用训练阶段的 YAML 并显式指定数据与容器清单（示例采用 `test` 切分，对应 Hugging Face 发布的验证基准）：
 
 ```bash
 PYTHONPATH=. python scripts/eval_graphplanner_rllm.py \
   --agent planner \
   --config-file configs/experiments/planner_8g.yaml \
-  --dataset datasets/swebench/validation.jsonl \
-  --docker-manifest datasets/swebench/docker_images_validation.txt \
-  --dataset-split validation \
+  --dataset datasets/swebench/test.jsonl \
+  --docker-manifest datasets/swebench/docker_images_test.txt \
+  --dataset-split test \
   --batch-size 8 \
   --print-config
 ```
 
-如需切换至测试集，只需将 `--dataset` 与 `--dataset-split` 指向相应的 SWE-bench JSONL 与 split 名称。若只想审计配置，可将最后一行改为 `--print-config-only`。
+如需切换到其它 split（例如 `validation` 或 `_verified` 版本），只需将 `--dataset` 与 `--dataset-split` 指向相应的 SWE-bench JSONL 与 split 名称。若只想审计配置，可将最后一行改为 `--print-config-only`。
 
 > **说明**：并行与 GPU 资源设置沿用 YAML（如 `configs/experiments/planner_8g.yaml` 中的 8 卡配置），除非需要在命令行上临时覆写。若希望完全冻结 YAML 并忽略 CLI 覆写，可额外指定 `--yaml-only`；但这样也会忽略 `--dataset`、`--docker-manifest` 等选项，因此仅当 YAML 已包含评估数据与容器清单时再启用。
 
