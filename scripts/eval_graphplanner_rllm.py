@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
@@ -40,6 +41,7 @@ from graph_planner.integrations.rllm import (  # noqa: E402
     GraphPlannerRLLMEnv,
     ensure_dataset_registered,
     load_task_entries,
+    resolve_task_file,
 )
 from scripts.train_graphplanner_rllm import (  # noqa: E402
     DEFAULT_CGM_MODEL_PATH,
@@ -64,7 +66,25 @@ from scripts.train_graphplanner_rllm import (  # noqa: E402
 LOGGER = logging.getLogger(__name__)
 
 
-def _parse_args() -> argparse.Namespace:
+def _collect_specified_cli_args(
+    parser: argparse.ArgumentParser, argv: list[str] | None = None
+) -> set[str]:
+    tokens = list(argv if argv is not None else sys.argv[1:])
+    specified: set[str] = set()
+    for action in parser._actions:
+        if action.dest in {"help", argparse.SUPPRESS}:
+            continue
+        if not action.option_strings:
+            specified.add(action.dest)
+            continue
+        for opt in action.option_strings:
+            if opt in tokens or any(token.startswith(f"{opt}=") for token in tokens):
+                specified.add(action.dest)
+                break
+    return specified
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Evaluate Graph Planner agents with rLLM (validation only)"
     )
@@ -102,7 +122,7 @@ def _parse_args() -> argparse.Namespace:
         "--model-path",
         type=Path,
         default=None,
-        help="Policy checkpoint to evaluate (defaults to models/qwen3-14b-instruct or models/codefuse-cgm).",
+        help="Policy checkpoint to evaluate (defaults to models/Qwen3-14B or models/CodeFuse-CGM).",
     )
     parser.add_argument("--tokenizer-path", type=Path, default=None)
     parser.add_argument("--critic-model-path", type=Path, default=None)
@@ -136,6 +156,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=_default_config_path())
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--print-config", action="store_true")
+    parser.add_argument(
+        "--print-config-only",
+        action="store_true",
+        help="Print the resolved Hydra configuration and exit without launching evaluation.",
+    )
     parser.add_argument("--use-fallback", action="store_true")
     parser.add_argument("--reward-scale", type=float, default=1.0)
     parser.add_argument("--failure-penalty", type=float, default=0.0)
@@ -149,18 +174,23 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--log-to-wandb", action="store_true")
     parser.add_argument("--wandb-offline", action="store_true")
     parser.add_argument("--log-backend", choices=["tensorboard", "none"], default=None)
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    if getattr(args, "print_config_only", False):
+        args.print_config = True
+    args._specified_cli_args = _collect_specified_cli_args(parser, argv)
+    return args
 
 
-def _resolve_eval_dataset(path: Path, *, name: str, split: str) -> tuple[str, int]:
-    rows = load_task_entries(path)
+def _resolve_eval_dataset(path: Path, *, name: str, split: str) -> tuple[Path, str, int]:
+    resolved = resolve_task_file(path, split=split)
+    rows = load_task_entries(resolved)
     if not rows:
-        raise RuntimeError(f"Dataset {path} did not contain any rows")
-    dataset = ensure_dataset_registered(name=name, split=split, path=path)
+        raise RuntimeError(f"Dataset {resolved} did not contain any rows")
+    dataset = ensure_dataset_registered(name=name, split=split, path=resolved)
     verl_path = dataset.get_verl_data_path()
     if not verl_path:
         raise RuntimeError("Dataset registration did not produce a Verl parquet file")
-    return verl_path, len(rows)
+    return resolved, verl_path, len(rows)
 
 
 def main() -> None:
@@ -180,7 +210,7 @@ def main() -> None:
         wandb_cfg["run_name"] = f"{args.agent}-eval"
     run_name = wandb_cfg["run_name"]
 
-    update_args_from_config(args, final_run_cfg)
+    update_args_from_config(args, final_run_cfg, respect_cli=not args.yaml_only)
     _absolutise_args(args)
 
     if args.model_path is None:
@@ -221,11 +251,13 @@ def main() -> None:
     if not dataset_name:
         dataset_name = GRAPH_PLANNER_CGM_DATASET_NAME if args.agent == "cgm" else GRAPH_PLANNER_DATASET_NAME
     eval_dataset_name = f"{dataset_name}_eval"
-    eval_path, sample_count = _resolve_eval_dataset(
+    dataset_jsonl, eval_path, sample_count = _resolve_eval_dataset(
         args.dataset,
         name=eval_dataset_name,
         split=args.dataset_split,
     )
+    args.dataset = dataset_jsonl
+    final_run_cfg.setdefault("paths", {})["dataset_train"] = str(dataset_jsonl)
 
     container_images = _prepare_container_images(args, final_run_cfg)
 
@@ -298,7 +330,8 @@ def main() -> None:
 
     if args.print_config:
         print(OmegaConf.to_yaml(cfg))
-        return
+        if getattr(args, "print_config_only", False):
+            return
 
     output_dir.mkdir(parents=True, exist_ok=True)
 

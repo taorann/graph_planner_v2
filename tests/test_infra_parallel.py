@@ -19,6 +19,37 @@ def test_resolve_parallel_defaults():
     assert cfg.ray_num_cpus == 4
 
 
+def test_resolve_parallel_honours_yaml_overrides():
+    yaml_cfg = {
+        "parallel": {
+            "tensor_parallel_planner": 3,
+            "tensor_parallel_cgm": 2,
+            "replicas": 4,
+            "parallel_agents": 5,
+            "rollout_workers": 6,
+            "workflow_parallel": 7,
+        },
+        "resources": {
+            "num_gpus": 8,
+            "num_nodes": 9,
+            "ray_num_gpus": 10,
+            "ray_num_cpus": 44,
+        },
+    }
+
+    cfg = resolve_parallel(yaml_cfg)
+    assert cfg.tensor_parallel_planner == 3
+    assert cfg.tensor_parallel_cgm == 2
+    assert cfg.replicas == 4
+    assert cfg.parallel_agents == 5
+    assert cfg.rollout_workers == 6
+    assert cfg.workflow_parallel == 7
+    assert cfg.num_gpus == 8
+    assert cfg.num_nodes == 9
+    assert cfg.ray_num_gpus == 10
+    assert cfg.ray_num_cpus == 44
+
+
 def test_resolve_parallel_custom_values():
     merged = {
         "parallel": {

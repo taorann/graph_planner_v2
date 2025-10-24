@@ -45,6 +45,7 @@ __all__ = [
     "CGMRLLMEnv",
     "GRAPH_PLANNER_DATASET_NAME",
     "GRAPH_PLANNER_CGM_DATASET_NAME",
+    "resolve_task_file",
     "load_task_entries",
     "register_dataset_from_file",
     "ensure_dataset_registered",
@@ -67,6 +68,7 @@ def __getattr__(name: str) -> Any:  # pragma: no cover - trivial dispatcher
     if name in {
         "GRAPH_PLANNER_DATASET_NAME",
         "GRAPH_PLANNER_CGM_DATASET_NAME",
+        "resolve_task_file",
         "load_task_entries",
         "register_dataset_from_file",
         "ensure_dataset_registered",
