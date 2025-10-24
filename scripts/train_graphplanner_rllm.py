@@ -696,7 +696,7 @@ def main() -> None:
         wandb_cfg["run_name"] = f"{args.agent}-run"
     run_name = wandb_cfg["run_name"]
 
-    update_args_from_config(args, final_run_cfg)
+    update_args_from_config(args, final_run_cfg, respect_cli=not args.yaml_only)
     _absolutise_args(args)
 
     final_run_cfg.setdefault("io", {})["strict_planner_io"] = bool(args.strict_planner_io)

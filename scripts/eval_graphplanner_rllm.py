@@ -210,7 +210,7 @@ def main() -> None:
         wandb_cfg["run_name"] = f"{args.agent}-eval"
     run_name = wandb_cfg["run_name"]
 
-    update_args_from_config(args, final_run_cfg)
+    update_args_from_config(args, final_run_cfg, respect_cli=not args.yaml_only)
     _absolutise_args(args)
 
     if args.model_path is None:

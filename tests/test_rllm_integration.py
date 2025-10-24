@@ -199,6 +199,36 @@ def test_resolve_task_file_falls_back_to_verified_variant(tmp_path, caplog):
     assert rows[0]["task_id"] == "demo"
 
 
+def test_resolve_task_file_handles_split_aliases(tmp_path):
+    base_dir = tmp_path / "swebench"
+    base_dir.mkdir()
+    alias_file = base_dir / "val.jsonl"
+    alias_file.write_text(json.dumps({"task_id": "alias"}) + "\n", encoding="utf-8")
+
+    resolved = dataset_mod.resolve_task_file(base_dir / "validation.json", split="validation")
+
+    assert resolved == alias_file.resolve()
+
+
+def test_materialise_instances_from_nested_directories(tmp_path, caplog):
+    base_dir = tmp_path / "swebench"
+    instances_dir = base_dir / "instances" / "validation"
+    nested_issue = instances_dir / "ISSUE-1"
+    nested_issue.mkdir(parents=True)
+    metadata = {"task_id": "issue-1", "sandbox": {"docker_image": "image", "workdir": "."}}
+    (nested_issue / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+    with caplog.at_level(logging.INFO):
+        resolved = dataset_mod.resolve_task_file(base_dir / "validation.json", split="validation")
+
+    assert resolved.suffix == ".jsonl"
+    assert "Materialised dataset split" in caplog.text
+
+    rows = dataset_mod.load_task_entries(resolved)
+    assert len(rows) == 1
+    assert rows[0]["task_id"] == "issue-1"
+
+
 def test_resolve_task_file_accepts_directory(tmp_path):
     dataset_dir = tmp_path / "dataset"
     dataset_dir.mkdir()
@@ -208,6 +238,26 @@ def test_resolve_task_file_accepts_directory(tmp_path):
     resolved = dataset_mod.resolve_task_file(dataset_dir, split="test")
 
     assert resolved == test_file.resolve()
+
+
+def test_resolve_task_file_materialises_instances_split(tmp_path):
+    dataset_dir = tmp_path / "dataset"
+    instances_dir = dataset_dir / "instances" / "validation"
+    instances_dir.mkdir(parents=True)
+    instance_payload = {
+        "task_id": "demo-instance",
+        "issue": {"id": "123", "title": "Bug"},
+        "sandbox": {"docker_image": "demo", "workdir": "."},
+    }
+    (instances_dir / "case.json").write_text(json.dumps(instance_payload), encoding="utf-8")
+
+    resolved = dataset_mod.resolve_task_file(dataset_dir, split="validation")
+
+    assert resolved.parent == dataset_dir
+    assert resolved.name.startswith(".auto_validation")
+
+    rows = dataset_mod.load_task_entries(resolved)
+    assert rows and rows[0]["task_id"] == "demo-instance"
 
 
 class _ToyRewardEnv:
