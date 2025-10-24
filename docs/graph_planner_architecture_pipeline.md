@@ -199,9 +199,9 @@ CLI / Scripts / Tests
 
 ### 4.3 Planner / CGM 强化学习（rLLM PPO）
 1. 使用 `register_graphplanner_dataset.py` 或直接在训练脚本中调用 `ensure_dataset_registered` 将 RepoEnv 任务 JSONL 注册到 rLLM 的数据集注册表，获得 Verl parquet 路径。【F:graph_planner/integrations/rllm/dataset.py†L85-L109】【F:scripts/train_graphplanner_rllm.py†L123-L145】
-2. 运行 `PYTHONPATH=. python scripts/train_graphplanner_rllm.py --config-file configs/experiments/planner_debug.yaml --dataset <jsonl> --model-path models/Qwen3-14B --cgm-model-path models/CodeFuse-CGM --print-config`（若需要完全依赖 YAML，可追加 `--yaml-only`）：
+2. 运行 `PYTHONPATH=. python scripts/train_graphplanner_rllm.py --config-file configs/experiments/planner_debug.yaml --dataset <jsonl> --model-path models/Qwen3-14B --cgm-model-path models/CodeFuse-CGM --print-config`（若需要完全依赖 YAML，可追加 `--yaml-only`；如只需打印配置后退出，请改用 `--print-config-only`）：
    - 脚本会先加载内置默认值，再读取 YAML 并按需套用 CLI 覆写（除非启用 `--yaml-only`），期间会注册训练/验证集、写入模型路径、温度、TP 及并行配置，并默认使用 `--seed` 统一设定 Python / NumPy / Torch 随机数，确保可复现性。【F:scripts/train_graphplanner_rllm.py†L70-L220】【F:graph_planner/infra/config.py†L42-L285】
-   - `--output-dir`、`--save-interval`、`--eval-interval` 与 `--resume` 将映射到 `trainer.output_dir/save_freq/test_freq/resume_from`，配合 `--print-config` 可在启动前检查最终 Hydra 配置；`--precision`、`--grad-accum-steps`、`--lr/--weight-decay/--warmup-steps` 等参数直接覆写优化器与调度器设置。【F:scripts/train_graphplanner_rllm.py†L215-L335】
+   - `--output-dir`、`--save-interval`、`--eval-interval` 与 `--resume` 将映射到 `trainer.output_dir/save_freq/test_freq/resume_from`，配合 `--print-config` 可在启动前检查最终 Hydra 配置；若不希望后续继续执行，可改用 `--print-config-only`。`--precision`、`--grad-accum-steps`、`--lr/--weight-decay/--warmup-steps` 等参数直接覆写优化器与调度器设置。【F:scripts/train_graphplanner_rllm.py†L215-L335】
    - 根据 `--agent` 选择 `GraphPlannerRLLMAgent` + `GraphPlannerRLLMEnv` 或 `CGMRLLMAgent` + `CGMRLLMEnv`，并在 Planner 模式下根据 `--cgm-model-path` 设置 CGM 本地推理参数；新增的 `--reward-scale`、`--failure-penalty`、`--step-penalty`、`--timeout-penalty`、`--repo-op-limit`、`--disable-cgm-synthesis` 等选项会通过 `env.env_args` 下发到环境层，调节奖励 shaping 与并发容器行为。【F:scripts/train_graphplanner_rllm.py†L220-L286】【F:graph_planner/integrations/rllm/env.py†L46-L170】【F:graph_planner/integrations/rllm/cgm_env.py†L70-L214】
    - `--log-to-wandb/--wandb-offline` 与 `--log-backend tensorboard` 控制 `trainer.logger`，而 `_validate_parallel_config` 会在 `tensor_parallel`、GPU 数或 Ray 资源不匹配时快速失败并给出修复建议。【F:scripts/train_graphplanner_rllm.py†L200-L336】【F:graph_planner/infra/parallel.py†L70-L134】
    - 脚本会将合并后的 OmegaConf 配置交给 rLLM 的 `AgentPPOTrainer` 执行分布式训练，并把最终结果落到 `outputs/<run>/resolved_config.yaml` 便于复现。【F:scripts/train_graphplanner_rllm.py†L463-L551】
@@ -209,7 +209,7 @@ CLI / Scripts / Tests
    - `GraphPlannerRLLMAgent.update_from_env` 把环境观测转成聊天消息并维护 PPO 轨迹；`update_from_model` 解析模型输出并在失败时触发规则 fallback。【F:graph_planner/integrations/rllm/agent.py†L101-L200】
    - `GraphPlannerRLLMEnv.step` 代理调用 `PlannerEnv.step` 执行动作，记录奖励与终止信号，并在重置时写入唯一 `issue_uid`；`compute_final_reward` 在 episode 结束时检查测试通过情况。【F:graph_planner/integrations/rllm/env.py†L46-L134】
    - 若使用 CGM agent，则 `CGMRLLMEnv` 会直接调用 `_LocalCGMRuntime.generate_patch` 评估补丁质量并反馈奖励，同时生成独立的 issue id。【F:graph_planner/integrations/rllm/cgm_env.py†L70-L197】
-4. 训练日志与模型 checkpoint 由 rLLM / Ray 负责存储，可结合 `--print-config` 输出最终 Hydra 配置进行审计。
+4. 训练日志与模型 checkpoint 由 rLLM / Ray 负责存储，可结合 `--print-config`（或 `--print-config-only`）输出最终 Hydra 配置进行审计。
 
 #### 4.3.1 容器内 Planner+CGM+GRPO 启动流程
 
@@ -245,7 +245,7 @@ CLI / Scripts / Tests
    - `GraphPlannerRLLMAgent` 根据轨迹构造聊天消息并请求 planner 模型生成 `<function=...>` 区块；遇到 Repair 动作时将参数交给文本轨迹修复管线，由环境统一调用 CGM。【F:graph_planner/integrations/rllm/agent.py†L101-L210】【F:graph_planner/env/planner_env.py†L240-L302】
    - `tests/test_rllm_integration.py::test_grpo_step_updates_toy_model` 验证了采集到的 token-level 奖励会经过 Verl 的 `compute_grpo_outcome_advantage` 与 `compute_policy_loss`，执行一次 `optimizer.step()` 后权重发生变化，说明经验确实被用于 GRPO 更新。【F:tests/test_rllm_integration.py†L182-L276】
 5. **结果产出与复现**
-   - 训练中的行动日志、fallback 信息保存在 rLLM 日志目录；若带 `--print-config` 可查看最终 Hydra 配置。使用相同命令与模型路径即可在同一容器中复现完整训练流程。
+   - 训练中的行动日志、fallback 信息保存在 rLLM 日志目录；带上 `--print-config` 可在启动时打印最终 Hydra 配置，同时继续执行训练。若只想审计配置，可改用 `--print-config-only` 在打印后退出。使用相同命令与模型路径即可在同一容器中复现完整训练流程。
 
 #### 4.3.1.1 与「通用 ToolAgent/ToolEnvironment」流程的对比
 
@@ -310,7 +310,7 @@ R2E-Gym 本身提供了 RepoEnv 环境、动作解析与容器运行时等通用
    ```
    - YAML 已包含默认的 batch size、max steps 等字段，可按需在 YAML 中调整；CLI 仍可覆盖关键字段（如上例自定义训练集路径），若想完全依赖 YAML 则追加 `--yaml-only`。
    - 省略 `--cgm-model-path` 即可禁用 CGM；改用 `--agent cgm` 可只训练补丁模型轨迹。
-   - `--print-config` 会在真正启动前打印最终 Hydra 配置；`--ray-address`、`--workflow-parallel`、`--parallel-agents` 等参数用于扩展到多节点或多 GPU。【F:scripts/train_graphplanner_rllm.py†L70-L220】
+   - `--print-config` 会在真正启动前打印最终 Hydra 配置并继续执行；若希望打印后立即退出，可改用 `--print-config-only`。`--ray-address`、`--workflow-parallel`、`--parallel-agents` 等参数用于扩展到多节点或多 GPU。【F:scripts/train_graphplanner_rllm.py†L70-L220】
 
 4. **观察输出**：
    - rLLM 会在当前目录生成 `outputs/`（Hydra 配置、Ray 日志、checkpoint）。
@@ -361,7 +361,7 @@ R2E-Gym 本身提供了 RepoEnv 环境、动作解析与容器运行时等通用
 
 4. **容器隔离**：新的 `issue_uid` 机制为每个并发任务生成独立的子图缓存键，防止 16 个容器同时写 `.aci/subgraphs` 时互相覆盖。【F:graph_planner/integrations/rllm/env.py†L46-L134】【F:graph_planner/integrations/rllm/cgm_env.py†L70-L197】
 
-5. **配置验证**：执行 `--print-config` 可打印最终 Hydra 配置，确认 `num_workers`、`n_parallel_agents`、`ray_init` 等字段已经按照 16 卡并发需求调整。【F:tests/test_rllm_integration.py†L197-L244】
+5. **配置验证**：执行 `--print-config`（或 `--print-config-only`）可打印最终 Hydra 配置，确认 `num_workers`、`n_parallel_agents`、`ray_init` 等字段已经按照 16 卡并发需求调整。【F:tests/test_rllm_integration.py†L197-L244】
 
 #### 4.3.5 验证脚本（evaluation-only）
 
@@ -379,7 +379,7 @@ R2E-Gym 本身提供了 RepoEnv 环境、动作解析与容器运行时等通用
      --print-config
    ```
    - YAML 同样可覆盖批大小、并行度等字段；若想完全复用现有 run，可直接指向 `outputs/<run>/resolved_config.yaml --yaml-only`。
-   - 启动时会打印汇总信息（数据规模、并行度、输出目录）；Hydra 配置中的 `trainer.val_only: true` 使得 `AgentTrainer` 只运行验证阶段，不执行优化步骤。【F:scripts/eval_graphplanner_rllm.py†L117-L171】
+   - 启动时会打印汇总信息（数据规模、并行度、输出目录）；Hydra 配置中的 `trainer.val_only: true` 使得 `AgentTrainer` 只运行验证阶段，不执行优化步骤。若只想打印配置，可改用 `--print-config-only`。【F:scripts/eval_graphplanner_rllm.py†L117-L171】
    - CLI 复用训练脚本的 `_validate_parallel_config` 与 `_sanity_checks`，因此 `tensor-parallel` 与 GPU 数不匹配时会立即报错，避免在 Ray/Verl 阶段才发现资源不足。
 
 ### 4.4 远端 CGM / 本地 fallback
@@ -394,7 +394,7 @@ R2E-Gym 本身提供了 RepoEnv 环境、动作解析与容器运行时等通用
 | 本地 LLM 调试 | `PYTHONPATH=. python scripts/run_rule_agent.py --backend repoenv --ds-json config/r2e_ds_repoenv_sample.json --agent llm --planner-model-path <hf-model>` |
 | CGM 本地推理 | `python - <<'PY'`<br>`from graph_planner.integrations.codefuse_cgm import CodeFuseCGMGenerator, CGMExample;`<br>`gen = CodeFuseCGMGenerator.from_pretrained("<model>");`<br>`example = CGMExample.from_json_file("sample.json");`<br>`print(gen.generate(example).model_dump())`<br>`PY` |
 | CGM 监督微调 | `PYTHONPATH=. python - <<'PY'`<br>`from graph_planner.integrations.codefuse_cgm import CodeFuseCGMTrainer, CGMTrainingConfig;`<br>`cfg = CGMTrainingConfig(model_name="<model>", train_path="train.jsonl", output_dir="runs/cgm");`<br>`CodeFuseCGMTrainer(cfg).train()`<br>`PY` |
-| rLLM PPO 训练 | `PYTHONPATH=. python scripts/train_graphplanner_rllm.py --config-file configs/experiments/planner_debug.yaml --yaml-only --print-config` |
+| rLLM PPO 训练 | `PYTHONPATH=. python scripts/train_graphplanner_rllm.py --config-file configs/experiments/planner_debug.yaml --yaml-only --print-config-only` |
 
 ## 6. 日志与调试建议 / Logging & troubleshooting
 

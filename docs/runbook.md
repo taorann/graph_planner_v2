@@ -103,7 +103,7 @@ PYTHONPATH=. python scripts/train_graphplanner_rllm.py \
   --print-config
 ```
 
-CLI 可继续覆盖 YAML 中的任意字段；最终合并配置会打印在屏幕上，并写入 `outputs/<run_name>/resolved_config.yaml`。
+CLI 可继续覆盖 YAML 中的任意字段；最终合并配置会打印在屏幕上，并写入 `outputs/<run_name>/resolved_config.yaml`。若仅需审计配置后退出，请使用 `--print-config-only`。
 
 ### 3.2 YAML-only 模式
 
@@ -114,7 +114,7 @@ PYTHONPATH=. python scripts/train_graphplanner_rllm.py \
   --print-config
 ```
 
-仅使用 YAML（外加 `--wandb-offline` 的快速切换）；脚本会记录所有被忽略的 CLI 参数名称，方便排查。
+仅使用 YAML（外加 `--wandb-offline` 的快速切换）；脚本会记录所有被忽略的 CLI 参数名称，方便排查。如需单纯验证配置，可将最后一行改为 `--print-config-only`。
 
 ### 3.3 冻结配置复现
 
@@ -165,8 +165,8 @@ PYTHONPATH=. python scripts/train_graphplanner_rllm.py \
 | 场景 | 关键字段 | 命令示例 |
 |------|----------|---------|
 | 单卡调试（Planner + CGM 本地权重） | `tensor_parallel_* = 1`, `parallel_agents = 1`, `rollout_workers = 1`, `num_gpus = 1`, `device_map_* = [0]` | `PYTHONPATH=. python scripts/train_graphplanner_rllm.py --config-file configs/experiments/planner_debug.yaml --yaml-only` |
-| 8×A800（Planner 训练 + CGM 推理） | `tensor_parallel_planner = 4`, `tensor_parallel_cgm = 4`, `parallel_agents = 4`, `rollout_workers = 4`, `num_gpus = 8`, `device_map_planner = [0,1,2,3]`, `device_map_cgm = [4,5,6,7]` | `PYTHONPATH=. python scripts/train_graphplanner_rllm.py --config-file configs/experiments/planner_cgm_8g.yaml --yaml-only --print-config` |
-| 16×A800（Planner 14B + CGM 73B） | `tensor_parallel_planner = 8`, `tensor_parallel_cgm = 8`, `parallel_agents = 8`, `rollout_workers = 8`, `workflow_parallel = 10`, `num_gpus = 16`, `device_map_planner = [0,1,2,3,4,5,6,7]`, `device_map_cgm = [8,9,10,11,12,13,14,15]` | `PYTHONPATH=. python scripts/train_graphplanner_rllm.py --config-file configs/experiments/gp_full_73b14b_16g.yaml --yaml-only --print-config` |
+| 8×A800（Planner 训练 + CGM 推理） | `tensor_parallel_planner = 4`, `tensor_parallel_cgm = 4`, `parallel_agents = 4`, `rollout_workers = 4`, `num_gpus = 8`, `device_map_planner = [0,1,2,3]`, `device_map_cgm = [4,5,6,7]` | `PYTHONPATH=. python scripts/train_graphplanner_rllm.py --config-file configs/experiments/planner_cgm_8g.yaml --yaml-only --print-config-only` |
+| 16×A800（Planner 14B + CGM 73B） | `tensor_parallel_planner = 8`, `tensor_parallel_cgm = 8`, `parallel_agents = 8`, `rollout_workers = 8`, `workflow_parallel = 10`, `num_gpus = 16`, `device_map_planner = [0,1,2,3,4,5,6,7]`, `device_map_cgm = [8,9,10,11,12,13,14,15]` | `PYTHONPATH=. python scripts/train_graphplanner_rllm.py --config-file configs/experiments/gp_full_73b14b_16g.yaml --yaml-only --print-config-only` |
 
 > **注意**：上表中的 YAML 样例需要同时指定 `paths.planner_model: models/Qwen3-14B` 与 `paths.cgm_model: models/CodeFuse-CGM`，仓库已在 `models/` 目录下预留路径。
 
@@ -187,7 +187,7 @@ PYTHONPATH=. python scripts/eval_graphplanner_rllm.py \
   --print-config
 ```
 
-如需切换至测试集，只需将 `--dataset` 与 `--dataset-split` 指向相应的 SWE-bench JSONL 与 split 名称。
+如需切换至测试集，只需将 `--dataset` 与 `--dataset-split` 指向相应的 SWE-bench JSONL 与 split 名称。若只想审计配置，可将最后一行改为 `--print-config-only`。
 
 > **说明**：并行与 GPU 资源设置沿用 YAML（如 `configs/experiments/planner_8g.yaml` 中的 8 卡配置），除非需要在命令行上临时覆写。若希望完全冻结 YAML 并忽略 CLI 覆写，可额外指定 `--yaml-only`；但这样也会忽略 `--dataset`、`--docker-manifest` 等选项，因此仅当 YAML 已包含评估数据与容器清单时再启用。
 
@@ -216,7 +216,7 @@ PYTHONPATH=. python scripts/eval_graphplanner_rllm.py \
   2. 根据 agent 类型自动补全模型权重路径，确定日志输出目录，并将最终配置序列化到 `resolved_config.yaml` 以便复现。
   3. 解析并注册评测数据集（调用 `load_task_entries` / `ensure_dataset_registered`），获取 Verl parquet 路径与样本数量，同时可按需预拉取 docker 镜像。
   4. 载入 rLLM 训练配置，设置 `trainer.val_only = True`、`total_training_steps = 0` 等参数以强制进入纯验证模式，并应用模型、并行、日志等覆写。
-  5. 调用 `_configure_agent_env` 生成 agent/env 构造参数，打印运行摘要，初始化 W&B/Ray/GPU 监控指标后如 `--print-config` 则直接退出。
+  5. 调用 `_configure_agent_env` 生成 agent/env 构造参数，打印运行摘要，初始化 W&B/Ray/GPU 监控指标后如 `--print-config-only` 则直接退出；若仅使用 `--print-config`，配置会打印后继续启动流程。
   6. 执行 `_sanity_checks`，实例化 `rllm.trainer.agent_trainer.AgentTrainer` 并运行 `trainer.train()`（此时仅进行推理 rollout 与指标收集），最后优雅关闭 W&B 句柄。
 - `scripts/validate_contracts.py` / `scripts/validate_patches.py`：协议与补丁快速校验。
 

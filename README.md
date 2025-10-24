@@ -68,10 +68,10 @@ tests/             # FakeSandbox 测试与 CGM 适配器回归
      --config-file configs/experiments/planner_debug.yaml \
      --dataset datasets/r2e_gym/train.jsonl \
      --model-path models/Qwen3-14B \
-     --cgm-model-path models/CodeFuse-CGM \
-     --print-config
-   ```
-  仓库在 `configs/experiments/` 下提供了可直接运行的示例 YAML（单卡调试、8 卡/16 卡配方等）。命令会按“内置默认 < YAML < CLI”优先级合并配置，并在 `outputs/<run_name>/resolved_config.yaml` 中保存最终参数。若 manifest 存在会自动载入；也可通过 `--prepull-containers` 在训练前统一预拉容器。更多示例与 W&B 监控说明见 [`docs/runbook.md`](docs/runbook.md)。
+   --cgm-model-path models/CodeFuse-CGM \
+    --print-config
+  ```
+  仓库在 `configs/experiments/` 下提供了可直接运行的示例 YAML（单卡调试、8 卡/16 卡配方等）。命令会按“内置默认 < YAML < CLI”优先级合并配置，并在 `outputs/<run_name>/resolved_config.yaml` 中保存最终参数。若 manifest 存在会自动载入；也可通过 `--prepull-containers` 在训练前统一预拉容器。若仅需审计配置而不真正启动训练，可改用 `--print-config-only`。更多示例与 W&B 监控说明见 [`docs/runbook.md`](docs/runbook.md)。
 
 5. **合同冒烟检查**
    ```bash

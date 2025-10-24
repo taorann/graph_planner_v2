@@ -242,6 +242,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ray-object-store-memory", type=int, default=None)
     parser.add_argument("--config", type=Path, default=_default_config_path())
     parser.add_argument("--print-config", action="store_true")
+    parser.add_argument(
+        "--print-config-only",
+        action="store_true",
+        help="Print the resolved Hydra configuration and exit without launching training.",
+    )
     parser.add_argument("--use-fallback", action="store_true", help="Enable rule fallback when training planner agent.")
     parser.add_argument(
         "--cgm-instruction",
@@ -271,6 +276,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Alternative logging backend when W&B is disabled.",
     )
     args = parser.parse_args(argv)
+    if getattr(args, "print_config_only", False):
+        args.print_config = True
     args._specified_cli_args = _collect_specified_cli_args(parser, argv)
     if args.agent == "cgm":
         args.disable_cgm_synthesis = True
@@ -822,7 +829,8 @@ def main() -> None:
 
         if args.print_config:
             print(OmegaConf.to_yaml(cfg))
-            return
+            if getattr(args, "print_config_only", False):
+                return
 
         output_dir.mkdir(parents=True, exist_ok=True)
 

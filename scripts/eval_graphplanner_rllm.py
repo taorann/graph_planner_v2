@@ -155,6 +155,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=_default_config_path())
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--print-config", action="store_true")
+    parser.add_argument(
+        "--print-config-only",
+        action="store_true",
+        help="Print the resolved Hydra configuration and exit without launching evaluation.",
+    )
     parser.add_argument("--use-fallback", action="store_true")
     parser.add_argument("--reward-scale", type=float, default=1.0)
     parser.add_argument("--failure-penalty", type=float, default=0.0)
@@ -169,6 +174,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--wandb-offline", action="store_true")
     parser.add_argument("--log-backend", choices=["tensorboard", "none"], default=None)
     args = parser.parse_args(argv)
+    if getattr(args, "print_config_only", False):
+        args.print_config = True
     args._specified_cli_args = _collect_specified_cli_args(parser, argv)
     return args
 
@@ -319,7 +326,8 @@ def main() -> None:
 
     if args.print_config:
         print(OmegaConf.to_yaml(cfg))
-        return
+        if getattr(args, "print_config_only", False):
+            return
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
