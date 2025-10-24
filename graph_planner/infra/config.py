@@ -52,8 +52,8 @@ def _detect_repo_root() -> Path:
 
 REPO_ROOT = _detect_repo_root()
 
-PLANNER_MODEL_DIR = (REPO_ROOT / "models" / "qwen3-14b-instruct").resolve()
-CGM_MODEL_DIR = (REPO_ROOT / "models" / "codefuse-cgm").resolve()
+PLANNER_MODEL_DIR = (REPO_ROOT / "models" / "Qwen3-14B").resolve()
+CGM_MODEL_DIR = (REPO_ROOT / "models" / "CodeFuse-CGM").resolve()
 
 
 # ---------------- dataclasses ----------------
@@ -505,6 +505,9 @@ def _normalise_cli_value(value: Any) -> Any:
 
 
 def _cli_override_entry(namespace: argparse.Namespace, attr: str) -> Any:  # type: ignore[name-defined]
+    specified = getattr(namespace, "_specified_cli_args", None)
+    if specified is not None and attr not in specified:
+        return None
     if not hasattr(namespace, attr):  # pragma: no cover - defensive guard
         return None
     value = getattr(namespace, attr)
@@ -586,12 +589,10 @@ def build_cli_overrides(args: Any, *, mode: str) -> Dict[str, Any]:
     if stop_ids is not None:
         overrides.setdefault("planner_sampling", {})["stop_ids"] = [int(s) for s in stop_ids]
 
-    overrides.setdefault("parallel", {})["tensor_parallel_planner"] = int(
-        getattr(args, "tensor_parallel", 1) or 1
-    )
-    overrides.setdefault("parallel", {})["tensor_parallel_cgm"] = int(
-        getattr(args, "tensor_parallel", 1) or 1
-    )
+    tensor_parallel = _cli_override_entry(args, "tensor_parallel")
+    if tensor_parallel is not None:
+        overrides.setdefault("parallel", {})["tensor_parallel_planner"] = int(tensor_parallel)
+        overrides.setdefault("parallel", {})["tensor_parallel_cgm"] = int(tensor_parallel)
     replicas = _cli_override_entry(args, "rollout_replicas")
     if replicas is not None:
         overrides.setdefault("parallel", {})["replicas"] = int(replicas)
@@ -608,8 +609,12 @@ def build_cli_overrides(args: Any, *, mode: str) -> Dict[str, Any]:
     if workflow_parallel is not None:
         overrides.setdefault("parallel", {})["workflow_parallel"] = int(workflow_parallel)
 
-    overrides.setdefault("resources", {})["num_gpus"] = int(getattr(args, "num_gpus", 1) or 1)
-    overrides.setdefault("resources", {})["num_nodes"] = int(getattr(args, "num_nodes", 1) or 1)
+    num_gpus = _cli_override_entry(args, "num_gpus")
+    if num_gpus is not None:
+        overrides.setdefault("resources", {})["num_gpus"] = int(num_gpus)
+    num_nodes = _cli_override_entry(args, "num_nodes")
+    if num_nodes is not None:
+        overrides.setdefault("resources", {})["num_nodes"] = int(num_nodes)
 
     ray_num_gpus = _cli_override_entry(args, "ray_num_gpus")
     if ray_num_gpus is not None:
