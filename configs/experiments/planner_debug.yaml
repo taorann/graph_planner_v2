@@ -95,4 +95,7 @@ telemetry:
   log_patch_stats: true
   log_planner_parse_errors: true
   log_cgm_errors: true
-verl_overrides: {}
+verl_overrides:
+  trainer:
+    n_gpus_per_node: 1
+    gradient_accumulation_steps: 1

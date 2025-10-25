@@ -8,6 +8,7 @@ English summary
 from __future__ import annotations
 
 import argparse
+import copy
 import logging
 import os
 import sys
@@ -15,7 +16,7 @@ import random
 import warnings
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Tuple
 
 import numpy as np
 from omegaconf import OmegaConf, open_dict
@@ -65,6 +66,8 @@ from graph_planner.runtime.containers import (  # noqa: E402
 
 
 LOGGER = logging.getLogger(__name__)
+
+AgentTrainer = None  # type: ignore[assignment]
 
 REPO_ROOT = Path(
     os.environ.get("GRAPH_PLANNER_ROOT") or Path(__file__).resolve().parent.parent
@@ -131,7 +134,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """解析命令行参数，支持模型/数据集/调度配置。"""
 
     parser = argparse.ArgumentParser(description="Train Graph Planner agents with rLLM PPO")
-    parser.add_argument("--agent", choices=["planner", "cgm"], default="planner")
+    parser.add_argument(
+        "--agent",
+        choices=["planner", "cgm", "both"],
+        default="planner",
+        help=(
+            "Select which agent to train. Use 'planner' for the Graph Planner, "
+            "'cgm' for the Code Graph Modifier, or 'both' to launch planner "
+            "and CGM runs sequentially within a single invocation."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for Python/NumPy/Torch.")
     parser.add_argument(
         "--dataset",
@@ -241,7 +253,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ray-num-gpus", type=int, default=None)
     parser.add_argument("--ray-memory", type=int, default=None)
     parser.add_argument("--ray-object-store-memory", type=int, default=None)
-    parser.add_argument("--config", type=Path, required=True, help="Base trainer config YAML.")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=_default_config_path(),
+        help="Base trainer config YAML.",
+    )
     parser.add_argument(
         "--overrides",
         nargs="*",
@@ -288,8 +305,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args._specified_cli_args = _collect_specified_cli_args(parser, argv)
     args.overrides = list(args.overrides or [])
     args._unknown_overrides = [token for token in unknown if token]
-    if args.agent == "cgm":
-        args.disable_cgm_synthesis = True
     return args
 
 
@@ -358,6 +373,31 @@ def _set(cfg: OmegaConf, key: str, value: Any) -> None:
         return
     with open_dict(cfg):
         OmegaConf.update(cfg, key, _normalise_value(value), merge=True)
+
+
+def _iter_override_items(
+    data: Mapping[str, Any], prefix: str = ""
+) -> Iterable[tuple[str, Any]]:
+    for key, value in data.items():
+        dotted = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, Mapping):
+            yield from _iter_override_items(value, dotted)
+        else:
+            yield dotted, value
+
+
+def _apply_verl_overrides(cfg: OmegaConf, overrides: Mapping[str, Any] | None) -> None:
+    """将 YAML 中的 ``verl_overrides`` 展平并写入 Hydra 配置。"""
+
+    if not overrides:
+        return
+
+    for dotted, value in _iter_override_items(overrides):
+        if value is None:
+            with open_dict(cfg):
+                OmegaConf.update(cfg, dotted, None, merge=True)
+        else:
+            _set(cfg, dotted, value)
 
 
 def _seed_everything(seed: int | None) -> None:
@@ -709,10 +749,23 @@ def _prepare_container_images(args: argparse.Namespace, final_run_cfg: Dict[str,
         LOGGER.warning("Pre-pull requested but no docker images discovered for %s", args.dataset)
 
     return images
-def main() -> None:
-    """脚本入口：解析参数、准备数据集并触发 rLLM 训练。"""
 
-    args = _parse_args()
+
+def _requested_agents(agent_flag: str) -> List[str]:
+    if agent_flag == "both":
+        return ["planner", "cgm"]
+    return [agent_flag]
+
+
+def _prepare_agent_args(base_args: argparse.Namespace, agent: str) -> argparse.Namespace:
+    run_args = copy.deepcopy(base_args)
+    run_args.agent = agent
+    if agent == "cgm":
+        run_args.disable_cgm_synthesis = True
+    return run_args
+
+
+def _run_training(args: argparse.Namespace, *, run_index: int, total_runs: int) -> None:
     _absolutise_args(args)
 
     defaults = default_training_run_config(args.agent)
@@ -723,10 +776,25 @@ def main() -> None:
         cli_overrides = {}
 
     final_run_cfg = merge_run_config(defaults, yaml_cfg, cli_overrides, yaml_only=args.yaml_only)
-    wandb_cfg = final_run_cfg.setdefault("logging", {}).setdefault("wandb", {})
+    logging_cfg = final_run_cfg.setdefault("logging", {})
+    logging_cfg["agent_kind"] = args.agent
+    logging_cfg["multi_agent_index"] = run_index
+    logging_cfg["multi_agent_total"] = total_runs
+
+    wandb_cfg = logging_cfg.setdefault("wandb", {})
     if not wandb_cfg.get("run_name"):
         wandb_cfg["run_name"] = f"{args.agent}-run"
-    run_name = wandb_cfg["run_name"]
+        run_name_user_supplied = False
+    else:
+        run_name_user_supplied = True
+
+    if total_runs > 1 and run_name_user_supplied:
+        current = wandb_cfg.get("run_name") or ""
+        suffix = args.agent
+        if suffix and not current.endswith(f"-{suffix}"):
+            wandb_cfg["run_name"] = f"{current}-{suffix}"
+
+    run_name = wandb_cfg.get("run_name")
 
     update_args_from_config(args, final_run_cfg, respect_cli=not args.yaml_only)
     _absolutise_args(args)
@@ -746,7 +814,7 @@ def main() -> None:
         args.model_path = _resolve_optional_path(args.model_path)
 
     output_base = Path(
-        final_run_cfg.get("logging", {}).get("output_dir")
+        logging_cfg.get("output_dir")
         or getattr(args, "output_dir", None)
         or args.model_path
     )
@@ -755,9 +823,9 @@ def main() -> None:
         run_name = f"{args.agent}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
         wandb_cfg["run_name"] = run_name
     run_dir = (output_base / run_name).resolve()
-    final_run_cfg.setdefault("logging", {})["resolved_run_dir"] = str(run_dir)
+    logging_cfg["resolved_run_dir"] = str(run_dir)
     resolved_cfg_path = run_dir / "resolved_config.yaml"
-    final_run_cfg["logging"]["resolved_config_path"] = str(resolved_cfg_path)
+    logging_cfg["resolved_config_path"] = str(resolved_cfg_path)
     serialise_resolved_config(final_run_cfg, resolved_cfg_path)
     args.output_dir = run_dir
 
@@ -832,6 +900,7 @@ def main() -> None:
     _apply_parallel_overrides(cfg, args)
     output_dir = _apply_training_overrides(cfg, args)
     _apply_logging_overrides(cfg, args)
+    _apply_verl_overrides(cfg, final_run_cfg.get("verl_overrides"))
     agent_cls, agent_args, env_cls, env_args = _configure_agent_env(cfg, args)
 
     if val_path is None:
@@ -883,9 +952,15 @@ def main() -> None:
 
         _sanity_checks(train_path=train_path, val_path=val_path, args=args)
 
-        from rllm.trainer.agent_trainer import AgentTrainer  # noqa: E402
+        global AgentTrainer
+        trainer_cls = AgentTrainer
+        if trainer_cls is None:
+            from rllm.trainer.agent_trainer import AgentTrainer as _AgentTrainer  # noqa: E402
 
-        trainer = AgentTrainer(
+            trainer_cls = _AgentTrainer
+            AgentTrainer = trainer_cls
+
+        trainer = trainer_cls(
             agent_class=agent_cls,
             env_class=env_cls,
             agent_args=agent_args,
@@ -903,6 +978,23 @@ def main() -> None:
                 wandb_run.finish()
             except Exception:
                 pass
+
+
+def main() -> None:
+    """脚本入口：解析参数、准备数据集并触发 rLLM 训练。"""
+
+    parsed = _parse_args()
+    agents = _requested_agents(parsed.agent)
+
+    for index, agent in enumerate(agents):
+        run_args = _prepare_agent_args(parsed, agent)
+        LOGGER.info(
+            "Launching %s training run (%d/%d)",
+            agent,
+            index + 1,
+            len(agents),
+        )
+        _run_training(run_args, run_index=index, total_runs=len(agents))
 
 
 if __name__ == "__main__":
