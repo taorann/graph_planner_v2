@@ -36,6 +36,21 @@ PYTHONPATH=. python scripts/prepare_swebench_validation.py \
 
 最终合并后的配置会写入 `logging.output_dir/run_name/resolved_config.yaml`，并同步到 W&B `config`（`wandb.config.update`）。
 
+### 1.1 CLI → YAML → Hydra 调用链
+
+- **训练脚本主流程**：`train_graphplanner_rllm.py` 会先解析 CLI，并把显式出现的参数记录在 `_collect_specified_cli_args` 的集合里，随后 `_absolutise_args` 将所有路径转换为绝对路径，避免后续覆盖时出现歧义。【F:scripts/train_graphplanner_rllm.py†L70-L128】
+- **运行配置三段合并**：`default_training_run_config()` 提供 dataclass 默认值；`load_run_config_file()` 读取 `--config-file` 指定的 YAML；`build_cli_overrides()` 仅把 CLI 中出现过的字段转成嵌套字典，最后由 `merge_run_config()` 按“默认 → YAML → CLI”顺序得到 `final_run_cfg`，并在 `update_args_from_config()` 中把 YAML/默认值补全回 CLI 命名空间。【F:graph_planner/infra/config.py†L34-L204】
+- **数据集与容器预处理**：解析完 run config 后，脚本会通过 `resolve_task_file()` / `_resolve_dataset()` 找到训练与验证 JSONL，并调用 `ensure_dataset_registered()` 生成 Verl parquet 与 DatasetRegistry 项；若需要还会 `collect_docker_images()` 并写入/读取 `docker_images.txt`。【F:scripts/train_graphplanner_rllm.py†L335-L468】
+- **Hydra 配置注入**：随后 `_load_config()` 会调用 Hydra 的 `initialize_config_dir`/`compose` 来展开 `agent_ppo_trainer.yaml` 内声明的 `defaults`，从而把 Verl 的 `ppo_trainer.yaml` 及其子配置合成为完整的 DictConfig；`_apply_model_overrides()`、`_apply_parallel_overrides()`、`_apply_training_overrides()`、`_apply_logging_overrides()` 分别把 run config 中的模型、并行、训练与日志字段写入 Hydra 配置树；`_configure_agent_env()` 选择 Planner/CGM agent 与 env 类并注入奖励、CGM、禁用选项等额外参数。【F:scripts/train_graphplanner_rllm.py†L297-L506】【F:rllm/rllm/trainer/config/agent_ppo_trainer.yaml†L1-L27】
+- **执行阶段**：完成资源校验后，脚本会把上述 Hydra 配置和 agent/env 构造参数交给 rLLM 的 `AgentTrainer`，最后调用 `trainer.train()` 进入 PPO 训练循环。【F:scripts/train_graphplanner_rllm.py†L750-L909】
+- **评估脚本差异**：`eval_graphplanner_rllm.py` 复用了绝大部分工具函数，但会强制把 Hydra 中的 `trainer.total_training_steps` 置 0、`trainer.val_only` 设为 True，并把 CLI `--batch-size` 写入 `data.train_batch_size`/`data.val_batch_size`，从而在相同配置下执行纯验证流程。【F:scripts/eval_graphplanner_rllm.py†L248-L321】
+
+### 1.2 配置一致性核对
+
+- **CLI 示例**：本 runbook 中的训练命令使用 `--dataset` / `--model-path` / `--cgm-model-path` 等选项，均与 CLI 定义保持一致，默认值也与脚本内的常量（如 `DEFAULT_TRAIN_DATASET_PATH`, `DEFAULT_CGM_MODEL_PATH`）相符。【F:scripts/train_graphplanner_rllm.py†L100-L175】
+- **评估命令**：示例中的 `--batch-size` 会在评估脚本中被同步到 Hydra 的 `data.train_batch_size` 与 `data.val_batch_size`，同时 `--docker-manifest`、`--dataset-split` 等参数均被 `_resolve_eval_dataset()` 正确消费，不会与 YAML 字段冲突。【F:scripts/eval_graphplanner_rllm.py†L107-L153】【F:scripts/eval_graphplanner_rllm.py†L214-L285】
+- **YAML 模板**：`configs/experiments/planner_8g.yaml` 中的字段命名与 `graph_planner.infra.config` 的 dataclass 定义一致（例如 `paths.dataset_train`, `training.grad_accum_steps`, `logging.wandb.watch`），脚本在 `_apply_*_overrides()` 中均设有对应分支，不存在悬空配置；额外的 `verl_overrides.trainer.gradient_accumulation_steps` 也会被透传到 Hydra。【F:graph_planner/infra/config.py†L39-L204】【F:configs/experiments/planner_8g.yaml†L1-L80】
+
 ## 2. YAML 字段总览
 
 YAML 顶层字段与含义如下，所有路径均默认为仓库相对路径：

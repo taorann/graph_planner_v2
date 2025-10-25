@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
 import numpy as np
+from hydra import compose, initialize_config_dir
+from hydra.core.global_hydra import GlobalHydra
 from omegaconf import OmegaConf
 from omegaconf.errors import ConfigKeyError
 
@@ -288,7 +290,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def _load_config(path: Path) -> OmegaConf:
     """从 YAML 文件加载 ``OmegaConf`` 配置。"""
 
-    return OmegaConf.load(str(path))
+    resolved = path.resolve()
+    cfg = OmegaConf.load(str(resolved))
+
+    if "defaults" not in cfg:
+        return cfg
+
+    GlobalHydra.instance().clear()
+    with initialize_config_dir(version_base=None, config_dir=str(resolved.parent)):
+        composed = compose(config_name=resolved.stem)
+    return composed
 
 
 def _key_exists(cfg: OmegaConf, key: str) -> bool:
