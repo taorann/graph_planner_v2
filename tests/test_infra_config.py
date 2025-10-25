@@ -4,6 +4,7 @@ from pathlib import Path
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import yaml
 
 from graph_planner.infra.config import (
@@ -112,7 +113,13 @@ def test_merge_run_config_priority(tmp_path):
     args = _make_args()
 
     cli_overrides = build_cli_overrides(args, mode="train")
-    merged = merge_run_config(defaults, yaml_cfg, cli_overrides, yaml_only=False)
+    merged = merge_run_config(
+        defaults,
+        yaml_cfg,
+        cli_overrides,
+        yaml_only=False,
+        agent="planner",
+    )
 
     assert merged["experiment"]["seed"] == 99  # CLI override wins
     assert merged["training"]["train_batch_size"] == 16
@@ -162,7 +169,13 @@ def test_merge_run_config_yaml_only_blocks_cli(tmp_path):
     args = _make_args()
 
     cli_overrides = build_cli_overrides(args, mode="train")
-    merged = merge_run_config(defaults, yaml_cfg, cli_overrides, yaml_only=True)
+    merged = merge_run_config(
+        defaults,
+        yaml_cfg,
+        cli_overrides,
+        yaml_only=True,
+        agent="planner",
+    )
 
     assert merged["experiment"]["seed"] == 1234
     assert merged["training"]["train_batch_size"] == 8
@@ -170,6 +183,45 @@ def test_merge_run_config_yaml_only_blocks_cli(tmp_path):
     update_args_from_config(args, merged, respect_cli=False)
     assert args.train_batch_size == 8
     assert args.seed == 1234
+
+
+def test_merge_run_config_agent_section_overrides_base():
+    defaults_planner = default_training_run_config("planner")
+    defaults_cgm = default_training_run_config("cgm")
+
+    yaml_cfg = {
+        "resources": {"num_gpus": 4, "ray_num_gpus": 2},
+        "planner": {"resources": {"num_gpus": 2, "ray_num_gpus": 1}},
+        "cgm": {"resources": {"num_gpus": 3, "ray_num_gpus": 5}},
+    }
+
+    merged_planner = merge_run_config(
+        defaults_planner,
+        yaml_cfg,
+        {},
+        yaml_only=False,
+        agent="planner",
+    )
+    merged_cgm = merge_run_config(
+        defaults_cgm,
+        yaml_cfg,
+        {},
+        yaml_only=False,
+        agent="cgm",
+    )
+
+    assert merged_planner["resources"]["num_gpus"] == 2
+    assert merged_planner["resources"]["ray_num_gpus"] == 1
+    assert merged_cgm["resources"]["num_gpus"] == 3
+    assert merged_cgm["resources"]["ray_num_gpus"] == 5
+
+
+def test_merge_run_config_agent_section_requires_mapping():
+    defaults = default_training_run_config("planner")
+    yaml_cfg = {"planner": ["invalid"]}
+
+    with pytest.raises(TypeError):
+        merge_run_config(defaults, yaml_cfg, {}, yaml_only=False, agent="planner")
 
 
 def test_update_args_from_config_keeps_cli_dataset(tmp_path):
