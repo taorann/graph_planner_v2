@@ -60,7 +60,7 @@ from scripts.train_graphplanner_rllm import (  # noqa: E402
     _set,
     _prepare_container_images,
     _validate_parallel_config,
-    _resolve_optional_path,
+    _resolve_model_path,
 )
 
 
@@ -234,7 +234,7 @@ def main() -> None:
         key = "planner_model" if args.agent == "planner" else "cgm_model"
         final_run_cfg.setdefault("paths", {})[key] = str(default_model)
     else:
-        args.model_path = _resolve_optional_path(args.model_path)
+        args.model_path = _resolve_model_path(args.model_path)
 
     output_base = Path(
         final_run_cfg.get("logging", {}).get("output_dir")
