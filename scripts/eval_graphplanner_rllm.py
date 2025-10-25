@@ -50,6 +50,8 @@ from scripts.train_graphplanner_rllm import (  # noqa: E402
     _apply_logging_overrides,
     _apply_model_overrides,
     _apply_parallel_overrides,
+    _apply_training_hyperparameters,
+    _apply_verl_overrides,
     _configure_agent_env,
     _load_config,
     _print_run_summary,
@@ -274,6 +276,8 @@ def main() -> None:
         unknown=getattr(args, "_unknown_overrides", None),
     )
 
+    _apply_training_hyperparameters(cfg, final_run_cfg.get("training"))
+
     _set(cfg, "data.train_files", str(eval_path))
     _set(cfg, "data.val_files", str(eval_path))
     _set(cfg, "data.train_batch_size", int(args.batch_size))
@@ -300,6 +304,7 @@ def main() -> None:
     _apply_model_overrides(cfg, args)
     _apply_parallel_overrides(cfg, args)
     _apply_logging_overrides(cfg, args)
+    _apply_verl_overrides(cfg, final_run_cfg.get("verl_overrides"))
 
     agent_cls, agent_args, env_cls, env_args = _configure_agent_env(cfg, args)
 

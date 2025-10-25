@@ -650,9 +650,53 @@ def test_train_cli_training_overrides(tmp_path, monkeypatch, capsys):
     assert "gradient_accumulation_steps: 3" in output
     assert "optimizer:" in output and "lr: 0.0001" in output
     assert "weight_decay: 0.01" in output
-    assert "scheduler:" in output and "warmup_steps: 5" in output
+    assert "lr_warmup_steps: 5" in output
     assert "early_stop:" in output and "metric: val/test_score/pass@k/graph_planner" in output
     assert "logger:" in output and "wandb" in output
+
+
+def test_yaml_experiment_applies_training_hparams(tmp_path, monkeypatch, capsys):
+    dataset_file = DATASET_FILE
+    assert dataset_file.exists(), "sample dataset missing"
+
+    stub = SimpleNamespace(
+        get_verl_data_path=lambda: str(dataset_file),
+        get_data_path=lambda: str(dataset_file),
+    )
+
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.ensure_dataset_registered", lambda **_: stub)
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.log_metrics", lambda *_, **__: None)
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.make_gpu_snapshot", lambda: (lambda: {}))
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.make_ray_snapshot", lambda: (lambda: {}))
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.init_wandb", lambda **_: None)
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.preflight_check", lambda *_, **__: None)
+
+    def fake_prepare(args, cfg):
+        cfg.setdefault("env", {})["docker_manifest"] = str(tmp_path / "manifest.txt")
+        return []
+
+    monkeypatch.setattr("scripts.train_graphplanner_rllm._prepare_container_images", fake_prepare)
+
+    argv = [
+        "train_graphplanner_rllm.py",
+        "--config-file",
+        "configs/experiments/planner_debug.yaml",
+        "--yaml-only",
+        "--model-path",
+        str(tmp_path / "policy"),
+        "--print-config-only",
+    ]
+    monkeypatch.setattr(sys, "argv", argv, raising=False)
+
+    from scripts import train_graphplanner_rllm as train_mod
+
+    train_mod.main()
+
+    output = capsys.readouterr().out
+    assert "entropy_coeff: 0.01" in output
+    assert "clip_ratio: 0.2" in output
+    assert "enable_gradient_checkpointing: false" in output
+    assert "kl_coef: 0.1" in output
 
 
 def test_eval_cli_print_config(tmp_path, monkeypatch, capsys):
@@ -680,6 +724,8 @@ def test_eval_cli_print_config(tmp_path, monkeypatch, capsys):
         "2",
         "--ray-num-gpus",
         "2",
+        "--config",
+        str(find_in_rllm("trainer", "config", "agent_ppo_trainer.yaml")),
         "--print-config-only",
     ]
     monkeypatch.setattr(sys, "argv", argv, raising=False)
@@ -739,6 +785,8 @@ def test_eval_cli_print_config_runs_trainer(tmp_path, monkeypatch):
         "2",
         "--ray-num-gpus",
         "2",
+        "--config",
+        str(find_in_rllm("trainer", "config", "agent_ppo_trainer.yaml")),
         "--print-config",
     ]
     monkeypatch.setattr(sys, "argv", argv, raising=False)
@@ -912,6 +960,94 @@ def test_train_cli_yaml_only_ignores_overrides(tmp_path, monkeypatch, capsys):
     resolved_cfg = tmp_path / "runs" / "yaml-only" / "resolved_config.yaml"
     saved = yaml.safe_load(resolved_cfg.read_text(encoding="utf-8"))
     assert saved["training"]["train_batch_size"] == 5
+
+
+def test_train_cli_both_agents_runs_sequentially(tmp_path, monkeypatch):
+    dataset_file = DATASET_FILE
+    assert dataset_file.exists(), "sample dataset missing"
+
+    val_dataset = dataset_file.parent / "val.jsonl"
+
+    def fake_register(*, name, split, path):
+        path = Path(path)
+        assert path in {dataset_file, val_dataset}
+        parquet = tmp_path / f"{name}_{split}.parquet"
+        parquet.parent.mkdir(parents=True, exist_ok=True)
+        parquet.touch()
+        return SimpleNamespace(
+            get_verl_data_path=lambda p=parquet: str(p),
+            get_data_path=lambda p=parquet: str(p.with_suffix(".jsonl")),
+        )
+
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.ensure_dataset_registered", fake_register)
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.load_task_entries", lambda *_: [{"id": "demo"}])
+    monkeypatch.setattr(
+        "scripts.train_graphplanner_rllm.collect_docker_images",
+        lambda **_: DockerImageCollection(images=[], missing=0, inspected=0),
+    )
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.write_docker_manifest", lambda path, images: Path(path))
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.log_metrics", lambda *_, **__: None)
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.make_gpu_snapshot", lambda: (lambda: {}))
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.make_ray_snapshot", lambda: (lambda: {}))
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.init_wandb", lambda **_: None)
+
+    from scripts import train_graphplanner_rllm as train_mod
+
+    trainer_runs: list[tuple[str, str | None]] = []
+
+    class DummyTrainer:
+        def __init__(self, *, agent_class, env_class, **kwargs):
+            trainer_runs.append((agent_class.__name__, getattr(env_class, "__name__", None)))
+
+        def train(self):
+            return None
+
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.AgentTrainer", DummyTrainer)
+
+    yaml_cfg = {
+        "logging": {
+            "output_dir": str(tmp_path / "runs"),
+            "wandb": {"enabled": True, "run_name": "combo"},
+        }
+    }
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(yaml_cfg), encoding="utf-8")
+
+    argv = [
+        "train_graphplanner_rllm.py",
+        "--agent",
+        "both",
+        "--dataset",
+        str(dataset_file),
+        "--config-file",
+        str(cfg_path),
+        "--model-path",
+        str(tmp_path / "policy"),
+        "--tensor-parallel",
+        "1",
+        "--num-gpus",
+        "2",
+        "--ray-num-gpus",
+        "2",
+        "--ray-num-cpus",
+        "4",
+        "--config",
+        str(train_mod._default_config_path()),
+    ]
+
+    monkeypatch.setenv("WANDB_MODE", "offline")
+    monkeypatch.setattr(sys, "argv", argv, raising=False)
+
+    train_mod.main()
+
+    assert [name for name, _ in trainer_runs] == ["GraphPlannerRLLMAgent", "CGMRLLMAgent"]
+
+    planner_run = tmp_path / "runs" / "combo-planner"
+    cgm_run = tmp_path / "runs" / "combo-cgm"
+    assert planner_run.is_dir()
+    assert cgm_run.is_dir()
+    assert (planner_run / "resolved_config.yaml").is_file()
+    assert (cgm_run / "resolved_config.yaml").is_file()
 
 
 def test_train_cli_prepull_containers(tmp_path, monkeypatch, capsys):
