@@ -39,7 +39,7 @@ PYTHONPATH=. python scripts/prepare_swebench_validation.py \
 ### 1.1 CLI → YAML → Hydra 调用链
 
 - **训练脚本主流程**：`train_graphplanner_rllm.py` 会先解析 CLI，并把显式出现的参数记录在 `_collect_specified_cli_args` 的集合里，随后 `_absolutise_args` 将所有路径转换为绝对路径，避免后续覆盖时出现歧义。【F:scripts/train_graphplanner_rllm.py†L70-L128】
-- **运行配置三段合并**：`default_training_run_config()` 提供 dataclass 默认值；`load_run_config_file()` 读取 `--config-file` 指定的 YAML；`build_cli_overrides()` 仅把 CLI 中出现过的字段转成嵌套字典，最后由 `merge_run_config()` 按“默认 → YAML → CLI”顺序得到 `final_run_cfg`，并在 `update_args_from_config()` 中把 YAML/默认值补全回 CLI 命名空间。【F:graph_planner/infra/config.py†L34-L204】
+- **运行配置三段合并**：`default_training_run_config()` 提供 dataclass 默认值；`load_run_config_file()` 读取 `--config-file` 指定的 YAML；`build_cli_overrides()` 仅把 CLI 中出现过的字段转成嵌套字典，最后由 `merge_run_config()` 按“默认 → YAML → CLI”顺序得到 `final_run_cfg`，并在 `update_args_from_config()` 中把 YAML/默认值补全回 CLI 命名空间。【F:graph_planner/infra/config.py†L34-L204】若 YAML 额外提供 `planner:` / `cgm:` 子段，`merge_run_config()` 会根据当前 `--agent` 只挑选对应的子配置再参与合并，方便在双代理顺序训练时分别指定资源与并行度。【F:graph_planner/infra/config.py†L699-L722】
 - **数据集与容器预处理**：解析完 run config 后，脚本会通过 `resolve_task_file()` / `_resolve_dataset()` 找到训练与验证 JSONL，并调用 `ensure_dataset_registered()` 生成 Verl parquet 与 DatasetRegistry 项；若需要还会 `collect_docker_images()` 并写入/读取 `docker_images.txt`。【F:scripts/train_graphplanner_rllm.py†L335-L468】
 - **Hydra 配置注入**：随后 `_load_config()` 会调用 Hydra 的 `initialize_config_dir`/`compose` 来展开 `agent_ppo_trainer.yaml` 内声明的 `defaults`，从而把 Verl 的 `ppo_trainer.yaml` 及其子配置合成为完整的 DictConfig；`_apply_model_overrides()`、`_apply_parallel_overrides()`、`_apply_training_overrides()`、`_apply_logging_overrides()` 分别把 run config 中的模型、并行、训练与日志字段写入 Hydra 配置树；`_configure_agent_env()` 选择 Planner/CGM agent 与 env 类并注入奖励、CGM、禁用选项等额外参数。【F:scripts/train_graphplanner_rllm.py†L297-L506】【F:rllm/rllm/trainer/config/agent_ppo_trainer.yaml†L1-L27】
 - **执行阶段**：完成资源校验后，脚本会把上述 Hydra 配置和 agent/env 构造参数交给 rLLM 的 `AgentTrainer`，最后调用 `trainer.train()` 进入 PPO 训练循环。【F:scripts/train_graphplanner_rllm.py†L750-L909】
@@ -67,6 +67,7 @@ YAML 顶层字段与含义如下，所有路径均默认为仓库相对路径：
 | `parallel` | `tensor_parallel_planner`, `tensor_parallel_cgm`, `replicas`, `parallel_agents`, `rollout_workers`, `workflow_parallel` | 模型并行与 rollout 并发 |
 | `resources` | `num_gpus`, `num_nodes`, `ray_num_gpus`, `ray_num_cpus`, `ray_memory`, `ray_object_store_memory` | 物理/ Ray 资源预算 |
 | `logging` | `wandb.*`, `log_backend`, `output_dir`, `save_interval`, `eval_interval` | 日志与输出目录；`wandb.watch` 支持 `{enabled, log, log_freq}` |
+| `planner` / `cgm` | 与上表一致 | 可选的代理专属覆盖；若存在仅在对应代理运行时生效 |
 | `telemetry` | `log_gpu`, `log_ray`, `log_patch_stats`, `log_planner_parse_errors`, `log_cgm_errors` | 监控开关 |
 | `verl_overrides` | 任意 Hydra key | 直接透传到 Verl/rLLM 配置 |
 
@@ -180,6 +181,7 @@ PYTHONPATH=. python scripts/train_graphplanner_rllm.py \
 | 场景 | 关键字段 | 命令示例 |
 |------|----------|---------|
 | 单卡调试（Planner + CGM 本地权重） | `tensor_parallel_* = 1`, `parallel_agents = 1`, `rollout_workers = 1`, `num_gpus = 1`, `device_map_* = [0]` | `PYTHONPATH=. python scripts/train_graphplanner_rllm.py --config-file configs/experiments/planner_debug.yaml --yaml-only` |
+| 4×A800 烟雾测试（Planner + CGM 各 2 卡） | `tensor_parallel_planner = 2`, `tensor_parallel_cgm = 2`, `parallel_agents = 2`, `rollout_workers = 2`, `num_gpus = 4`, `device_map_planner = [0,1]`, `device_map_cgm = [2,3]` | `PYTHONPATH=. python scripts/train_graphplanner_rllm.py --config-file configs/experiments/test4g.yaml --yaml-only --print-config-only` |
 | 8×A800（Planner 训练 + CGM 推理） | `tensor_parallel_planner = 4`, `tensor_parallel_cgm = 4`, `parallel_agents = 4`, `rollout_workers = 4`, `num_gpus = 8`, `device_map_planner = [0,1,2,3]`, `device_map_cgm = [4,5,6,7]` | `PYTHONPATH=. python scripts/train_graphplanner_rllm.py --config-file configs/experiments/planner_cgm_8g.yaml --yaml-only --print-config-only` |
 | 16×A800（Planner 14B + CGM 73B） | `tensor_parallel_planner = 8`, `tensor_parallel_cgm = 8`, `parallel_agents = 8`, `rollout_workers = 8`, `workflow_parallel = 10`, `num_gpus = 16`, `device_map_planner = [0,1,2,3,4,5,6,7]`, `device_map_cgm = [8,9,10,11,12,13,14,15]` | `PYTHONPATH=. python scripts/train_graphplanner_rllm.py --config-file configs/experiments/gp_full_73b14b_16g.yaml --yaml-only --print-config-only` |
 

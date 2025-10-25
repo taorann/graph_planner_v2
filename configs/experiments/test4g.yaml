@@ -1,7 +1,7 @@
 experiment:
-  name: planner-debug
-  seed: 42
-  notes: "Single GPU debug launch"
+  name: planner-cgm-test4g
+  seed: 1234
+  notes: "Planner+CGM smoke test on 4 GPUs"
 paths:
   dataset_train: datasets/r2e_gym/train.jsonl
   dataset_val: datasets/r2e_gym/val.jsonl
@@ -12,9 +12,9 @@ paths:
 backends:
   planner_backend: local
   cgm_backend: local
-  dtype: float16
-  device_map_planner: [0]
-  device_map_cgm: [0]
+  dtype: bfloat16
+  device_map_planner: [0,1]
+  device_map_cgm: [2,3]
   max_gpu_memory: null
 planner_sampling:
   temperature: 0.2
@@ -36,19 +36,19 @@ cgm_generation:
   do_sample: false
 training:
   total_epochs: 1
-  train_batch_size: 1
-  grad_accum_steps: 1
-  precision: fp16
-  lr: 5.0e-05
-  weight_decay: 0.0
-  warmup_steps: 0
-  gradient_checkpointing: false
+  train_batch_size: 2
+  grad_accum_steps: 4
+  precision: bf16
+  lr: 3.0e-05
+  weight_decay: 0.01
+  warmup_steps: 200
+  gradient_checkpointing: true
   clip_grad_norm: 1.0
   kl_coef: 0.1
   entropy_coef: 0.01
   value_coef: 1.0
   clip_coef: 0.2
-  target_kl: null
+  target_kl: 0.15
   total_steps: null
   resume_from: null
 env:
@@ -57,51 +57,51 @@ env:
   failure_penalty: -1.0
   step_penalty: -0.05
   timeout_penalty: -0.5
-  repo_op_limit: 32
+  repo_op_limit: 48
   disable_cgm_synthesis: false
-  apply_patches: false
+  apply_patches: true
 parallel:
-  tensor_parallel_planner: 1
-  tensor_parallel_cgm: 1
+  tensor_parallel_planner: 2
+  tensor_parallel_cgm: 2
   replicas: 1
-  parallel_agents: 1
-  rollout_workers: 1
-  workflow_parallel: 1
+  parallel_agents: 2
+  rollout_workers: 2
+  workflow_parallel: 2
 resources:
-  num_gpus: 1
+  num_gpus: 4
   num_nodes: 1
-  ray_num_gpus: 1
-  ray_num_cpus: 4
+  ray_num_gpus: 4
+  ray_num_cpus: 16
   ray_memory: null
   ray_object_store_memory: null
 logging:
   wandb:
-    enabled: false
-    offline: true
+    enabled: true
+    offline: false
     project: graph-planner
     entity: null
-    run_name: planner-debug
+    run_name: planner-cgm-test4g
     watch:
-      enabled: false
+      enabled: true
       log: gradients
       log_freq: 200
   log_backend: wandb
   output_dir: outputs
-  save_interval: 200
-  eval_interval: 200
+  save_interval: 500
+  eval_interval: 500
 telemetry:
-  log_gpu: false
-  log_ray: false
+  log_gpu: true
+  log_ray: true
   log_patch_stats: true
   log_planner_parse_errors: true
   log_cgm_errors: true
 verl_overrides:
   trainer:
-    n_gpus_per_node: 1
-    gradient_accumulation_steps: 1
+    n_gpus_per_node: 4
+    gradient_accumulation_steps: 4
   actor_rollout_ref:
     model:
-      enable_gradient_checkpointing: false
+      enable_gradient_checkpointing: true
     actor:
       grad_clip: 1.0
       entropy_coeff: 0.01
@@ -111,19 +111,20 @@ verl_overrides:
       policy_loss:
         ppo_kl_coef: 0.1
       optim:
-        lr: 5.0e-05
-        weight_decay: 0.0
-        lr_warmup_steps: 0
+        lr: 3.0e-05
+        weight_decay: 0.01
+        lr_warmup_steps: 200
     rollout:
-      dtype: float16
+      dtype: bfloat16
   critic:
     grad_clip: 1.0
     optim:
-      lr: 5.0e-05
-      weight_decay: 0.0
-      lr_warmup_steps: 0
+      lr: 3.0e-05
+      weight_decay: 0.01
+      lr_warmup_steps: 200
     model:
-      enable_gradient_checkpointing: false
+      enable_gradient_checkpointing: true
   algorithm:
     kl_ctrl:
       kl_coef: 0.1
+      target_kl: 0.15

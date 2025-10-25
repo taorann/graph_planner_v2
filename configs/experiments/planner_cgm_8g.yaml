@@ -6,9 +6,9 @@ paths:
   dataset_train: datasets/r2e_gym/train.jsonl
   dataset_val: datasets/r2e_gym/val.jsonl
   planner_model: models/Qwen3-14B
-  planner_tokenizer: null
+  planner_tokenizer: models/Qwen3-14B
   cgm_model: models/CodeFuse-CGM
-  cgm_tokenizer: null
+  cgm_tokenizer: models/CodeFuse-CGM
 backends:
   planner_backend: local
   cgm_backend: local
@@ -99,3 +99,32 @@ verl_overrides:
   trainer:
     n_gpus_per_node: 8
     gradient_accumulation_steps: 4
+  actor_rollout_ref:
+    model:
+      enable_gradient_checkpointing: true
+    actor:
+      grad_clip: 1.0
+      entropy_coeff: 0.01
+      clip_ratio: 0.2
+      clip_ratio_low: 0.2
+      clip_ratio_high: 0.2
+      policy_loss:
+        ppo_kl_coef: 0.1
+      optim:
+        lr: 3.0e-05
+        weight_decay: 0.01
+        lr_warmup_steps: 200
+    rollout:
+      dtype: bfloat16
+  critic:
+    grad_clip: 1.0
+    optim:
+      lr: 3.0e-05
+      weight_decay: 0.01
+      lr_warmup_steps: 200
+    model:
+      enable_gradient_checkpointing: true
+  algorithm:
+    kl_ctrl:
+      kl_coef: 0.1
+      target_kl: 0.15
