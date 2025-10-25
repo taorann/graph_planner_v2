@@ -20,7 +20,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 import numpy as np
 from hydra import compose, initialize_config_dir
 from hydra.core.global_hydra import GlobalHydra
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 from omegaconf.errors import ConfigKeyError
 
 try:  # pragma: no cover - torch is an optional dependency for docs CI
@@ -328,7 +328,8 @@ def _set_if_exists(cfg: OmegaConf, key: str, value: Any) -> None:
     if value is None:
         return
     if _key_exists(cfg, key):
-        OmegaConf.update(cfg, key, _normalise_value(value), merge=False)
+        with open_dict(cfg):
+            OmegaConf.update(cfg, key, _normalise_value(value), merge=False)
 
 
 def _set(cfg: OmegaConf, key: str, value: Any) -> None:
@@ -336,7 +337,8 @@ def _set(cfg: OmegaConf, key: str, value: Any) -> None:
 
     if value is None:
         return
-    OmegaConf.update(cfg, key, _normalise_value(value), merge=True)
+    with open_dict(cfg):
+        OmegaConf.update(cfg, key, _normalise_value(value), merge=True)
 
 
 def _seed_everything(seed: int | None) -> None:
