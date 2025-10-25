@@ -94,27 +94,32 @@ def _resolve_optional_path(value: Path | str | None) -> Path | None:
     return Path(value).expanduser().resolve()
 
 
-def _resolve_model_path(value: Path | str | None) -> Path | None:
+def _resolve_model_path(value: Path | str | None) -> str | None:
     """Resolve model-related paths supporting absolute or repo-relative values."""
 
     if value is None:
         return None
 
-    raw = Path(value).expanduser()
-    if raw.is_absolute():
-        return raw.resolve()
+    raw_path = Path(value).expanduser()
 
-    cwd_candidate = (Path.cwd() / raw).resolve()
-    if cwd_candidate.exists():
-        return cwd_candidate
+    if raw_path.is_absolute():
+        # ``Path.resolve`` canonicalises symlinks when the target exists but, on
+        # some shared filesystems, strict resolution can unexpectedly fail if a
+        # mounted path is only visible to remote workers.  We therefore only
+        # collapse the path when it can be confirmed locally, otherwise we keep
+        # the user's absolute string verbatim so it can still be interpreted on
+        # Ray workers.
+        return str(raw_path.resolve()) if raw_path.exists() else str(raw_path)
 
-    repo_candidate = (REPO_ROOT / raw).resolve()
-    if repo_candidate.exists():
-        return repo_candidate
+    for base in (Path.cwd(), REPO_ROOT):
+        candidate = (base / raw_path).expanduser()
+        if candidate.exists():
+            return str(candidate.resolve())
 
-    # Fall back to the repository-relative candidate so downstream users obtain
-    # a deterministic absolute path even if the directory does not exist yet.
-    return repo_candidate
+    # If we cannot resolve the path relative to known roots we return the raw
+    # string.  This allows callers to provide Hugging Face repository IDs or
+    # other identifiers that remote workers know how to resolve.
+    return str(value)
 
 
 def _absolutise_args(args: argparse.Namespace) -> None:
