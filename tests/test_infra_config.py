@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -250,3 +249,24 @@ def test_load_run_config_file_roundtrip(tmp_path):
 
     loaded = load_run_config_file(path)
     assert loaded == yaml_cfg
+
+
+def test_experiment_presets_use_local_model_assets():
+    presets_dir = Path(__file__).resolve().parents[1] / "configs" / "experiments"
+    expected = {
+        "planner_model": "models/Qwen3-14B",
+        "planner_tokenizer": "models/Qwen3-14B",
+        "cgm_model": "models/CodeFuse-CGM",
+        "cgm_tokenizer": "models/CodeFuse-CGM",
+    }
+
+    found_files = list(sorted(presets_dir.glob("*.yaml")))
+    assert found_files, "no experiment presets discovered"
+
+    for preset in found_files:
+        data = yaml.safe_load(preset.read_text(encoding="utf-8")) or {}
+        paths = data.get("paths", {})
+        for key, expected_value in expected.items():
+            assert (
+                paths.get(key) == expected_value
+            ), f"{preset.name} should set {key} to {expected_value}"
