@@ -650,9 +650,53 @@ def test_train_cli_training_overrides(tmp_path, monkeypatch, capsys):
     assert "gradient_accumulation_steps: 3" in output
     assert "optimizer:" in output and "lr: 0.0001" in output
     assert "weight_decay: 0.01" in output
-    assert "scheduler:" in output and "warmup_steps: 5" in output
+    assert "lr_warmup_steps: 5" in output
     assert "early_stop:" in output and "metric: val/test_score/pass@k/graph_planner" in output
     assert "logger:" in output and "wandb" in output
+
+
+def test_yaml_experiment_applies_training_hparams(tmp_path, monkeypatch, capsys):
+    dataset_file = DATASET_FILE
+    assert dataset_file.exists(), "sample dataset missing"
+
+    stub = SimpleNamespace(
+        get_verl_data_path=lambda: str(dataset_file),
+        get_data_path=lambda: str(dataset_file),
+    )
+
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.ensure_dataset_registered", lambda **_: stub)
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.log_metrics", lambda *_, **__: None)
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.make_gpu_snapshot", lambda: (lambda: {}))
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.make_ray_snapshot", lambda: (lambda: {}))
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.init_wandb", lambda **_: None)
+    monkeypatch.setattr("scripts.train_graphplanner_rllm.preflight_check", lambda *_, **__: None)
+
+    def fake_prepare(args, cfg):
+        cfg.setdefault("env", {})["docker_manifest"] = str(tmp_path / "manifest.txt")
+        return []
+
+    monkeypatch.setattr("scripts.train_graphplanner_rllm._prepare_container_images", fake_prepare)
+
+    argv = [
+        "train_graphplanner_rllm.py",
+        "--config-file",
+        "configs/experiments/planner_debug.yaml",
+        "--yaml-only",
+        "--model-path",
+        str(tmp_path / "policy"),
+        "--print-config-only",
+    ]
+    monkeypatch.setattr(sys, "argv", argv, raising=False)
+
+    from scripts import train_graphplanner_rllm as train_mod
+
+    train_mod.main()
+
+    output = capsys.readouterr().out
+    assert "entropy_coeff: 0.01" in output
+    assert "clip_ratio: 0.2" in output
+    assert "enable_gradient_checkpointing: false" in output
+    assert "kl_coef: 0.1" in output
 
 
 def test_eval_cli_print_config(tmp_path, monkeypatch, capsys):
@@ -680,6 +724,8 @@ def test_eval_cli_print_config(tmp_path, monkeypatch, capsys):
         "2",
         "--ray-num-gpus",
         "2",
+        "--config",
+        str(find_in_rllm("trainer", "config", "agent_ppo_trainer.yaml")),
         "--print-config-only",
     ]
     monkeypatch.setattr(sys, "argv", argv, raising=False)
@@ -739,6 +785,8 @@ def test_eval_cli_print_config_runs_trainer(tmp_path, monkeypatch):
         "2",
         "--ray-num-gpus",
         "2",
+        "--config",
+        str(find_in_rllm("trainer", "config", "agent_ppo_trainer.yaml")),
         "--print-config",
     ]
     monkeypatch.setattr(sys, "argv", argv, raising=False)

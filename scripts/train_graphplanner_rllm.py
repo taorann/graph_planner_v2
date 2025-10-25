@@ -449,6 +449,63 @@ def _resolve_dataset(
     return train_path, val_path, len(train_rows), len(val_rows)
 
 
+def _apply_training_hyperparameters(
+    cfg: OmegaConf, training_cfg: Mapping[str, Any] | None
+) -> None:
+    """Map high-level training config into Verl/rLLM optimizer knobs."""
+
+    if not training_cfg:
+        return
+
+    def _set_cast(path: str, value: Any, cast: type | None = None) -> None:
+        if value is None:
+            return
+        _set(cfg, path, cast(value) if cast else value)
+
+    _set_cast("trainer.gradient_accumulation_steps", training_cfg.get("grad_accum_steps"), int)
+
+    lr = training_cfg.get("lr")
+    _set_cast("actor_rollout_ref.actor.optim.lr", lr, float)
+    _set_cast("critic.optim.lr", lr, float)
+
+    weight_decay = training_cfg.get("weight_decay")
+    _set_cast("actor_rollout_ref.actor.optim.weight_decay", weight_decay, float)
+    _set_cast("critic.optim.weight_decay", weight_decay, float)
+
+    warmup_steps = training_cfg.get("warmup_steps")
+    _set_cast("actor_rollout_ref.actor.optim.lr_warmup_steps", warmup_steps, int)
+    _set_cast("critic.optim.lr_warmup_steps", warmup_steps, int)
+
+    total_steps = training_cfg.get("total_steps")
+    _set_cast("actor_rollout_ref.actor.optim.total_training_steps", total_steps, int)
+    _set_cast("critic.optim.total_training_steps", total_steps, int)
+
+    clip_norm = training_cfg.get("clip_grad_norm")
+    _set_cast("actor_rollout_ref.actor.grad_clip", clip_norm, float)
+    _set_cast("critic.grad_clip", clip_norm, float)
+
+    grad_ckpt = training_cfg.get("gradient_checkpointing")
+    if grad_ckpt is not None:
+        flag = bool(grad_ckpt)
+        _set(cfg, "actor_rollout_ref.model.enable_gradient_checkpointing", flag)
+        _set(cfg, "critic.model.enable_gradient_checkpointing", flag)
+
+    entropy = training_cfg.get("entropy_coef")
+    _set_cast("actor_rollout_ref.actor.entropy_coeff", entropy, float)
+
+    clip_coef = training_cfg.get("clip_coef")
+    _set_cast("actor_rollout_ref.actor.clip_ratio", clip_coef, float)
+    _set_cast("actor_rollout_ref.actor.clip_ratio_low", clip_coef, float)
+    _set_cast("actor_rollout_ref.actor.clip_ratio_high", clip_coef, float)
+
+    kl_coef = training_cfg.get("kl_coef")
+    _set_cast("algorithm.kl_ctrl.kl_coef", kl_coef, float)
+    _set_cast("actor_rollout_ref.actor.policy_loss.ppo_kl_coef", kl_coef, float)
+
+    target_kl = training_cfg.get("target_kl")
+    _set_cast("algorithm.kl_ctrl.target_kl", target_kl, float)
+
+
 def _apply_model_overrides(cfg: OmegaConf, args: argparse.Namespace) -> None:
     """根据命令行参数注入模型/采样相关配置。"""
 
@@ -868,6 +925,8 @@ def _run_training(args: argparse.Namespace, *, run_index: int, total_runs: int) 
         overrides=args.overrides,
         unknown=getattr(args, "_unknown_overrides", None),
     )
+
+    _apply_training_hyperparameters(cfg, final_run_cfg.get("training"))
 
     _set(cfg, "data.train_files", str(train_path))
     if val_path is None:
