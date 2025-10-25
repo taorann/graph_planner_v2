@@ -18,7 +18,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
 import numpy as np
-from omegaconf import OmegaConf
+from hydra import compose, initialize_config_dir
+from hydra.core.global_hydra import GlobalHydra
+from omegaconf import OmegaConf, open_dict
 from omegaconf.errors import ConfigKeyError
 
 try:  # pragma: no cover - torch is an optional dependency for docs CI
@@ -288,7 +290,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def _load_config(path: Path) -> OmegaConf:
     """从 YAML 文件加载 ``OmegaConf`` 配置。"""
 
-    return OmegaConf.load(str(path))
+    resolved = path.resolve()
+    cfg = OmegaConf.load(str(resolved))
+
+    if "defaults" not in cfg:
+        return cfg
+
+    GlobalHydra.instance().clear()
+    with initialize_config_dir(version_base=None, config_dir=str(resolved.parent)):
+        composed = compose(config_name=resolved.stem)
+    return composed
 
 
 def _key_exists(cfg: OmegaConf, key: str) -> bool:
@@ -317,7 +328,8 @@ def _set_if_exists(cfg: OmegaConf, key: str, value: Any) -> None:
     if value is None:
         return
     if _key_exists(cfg, key):
-        OmegaConf.update(cfg, key, _normalise_value(value), merge=False)
+        with open_dict(cfg):
+            OmegaConf.update(cfg, key, _normalise_value(value), merge=False)
 
 
 def _set(cfg: OmegaConf, key: str, value: Any) -> None:
@@ -325,7 +337,8 @@ def _set(cfg: OmegaConf, key: str, value: Any) -> None:
 
     if value is None:
         return
-    OmegaConf.update(cfg, key, _normalise_value(value), merge=True)
+    with open_dict(cfg):
+        OmegaConf.update(cfg, key, _normalise_value(value), merge=True)
 
 
 def _seed_everything(seed: int | None) -> None:
