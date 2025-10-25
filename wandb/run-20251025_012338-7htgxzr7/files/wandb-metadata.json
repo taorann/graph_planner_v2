@@ -1,0 +1,88 @@
+{
+  "os": "Linux-5.4.210-4-velinux1-amd64-x86_64-with-glibc2.35",
+  "python": "CPython 3.10.18",
+  "startedAt": "2025-10-25T01:23:38.488283Z",
+  "args": [
+    "--agent",
+    "planner",
+    "--config-file",
+    "configs/experiments/test4g.yaml",
+    "--dataset",
+    "datasets/swebench/test.jsonl",
+    "--docker-manifest",
+    "datasets/swebench/docker_images_validation.txt",
+    "--dataset-split",
+    "test",
+    "--batch-size",
+    "4",
+    "--print-config"
+  ],
+  "program": "/map-vepfs/taoran/graph_planner/scripts/eval_graphplanner_rllm.py",
+  "codePath": "scripts/eval_graphplanner_rllm.py",
+  "codePathLocal": "scripts/eval_graphplanner_rllm.py",
+  "git": {
+    "remote": "https://github.com/taorann/graph_planner.git",
+    "commit": "750ea0ca9752bf227ed989f453d0ce58f0c11440"
+  },
+  "email": "heolucky@163.com",
+  "root": "/map-vepfs/taoran/graph_planner",
+  "host": "di-20250214115134-466rr",
+  "executable": "/map-vepfs/taoran/envs/taoran/bin/python",
+  "cpu_count": 64,
+  "cpu_count_logical": 109,
+  "gpu": "NVIDIA A800-SXM4-80GB",
+  "gpu_count": 8,
+  "disk": {
+    "/": {
+      "total": "134145380352",
+      "used": "74604912640"
+    }
+  },
+  "memory": {
+    "total": "2019574153216"
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA A800-SXM4-80GB",
+      "architecture": "Ampere",
+      "uuid": "GPU-71fbe7a1-2095-21af-e5ea-5ddfae373141"
+    },
+    {
+      "name": "NVIDIA A800-SXM4-80GB",
+      "architecture": "Ampere",
+      "uuid": "GPU-869c74a9-9819-3657-73a2-0ed9ffb6fad8"
+    },
+    {
+      "name": "NVIDIA A800-SXM4-80GB",
+      "architecture": "Ampere",
+      "uuid": "GPU-aa562954-6708-c666-fae1-29bb449ef6fd"
+    },
+    {
+      "name": "NVIDIA A800-SXM4-80GB",
+      "architecture": "Ampere",
+      "uuid": "GPU-523f15f9-d6a6-673d-73d1-ece3037f0843"
+    },
+    {
+      "name": "NVIDIA A800-SXM4-80GB",
+      "architecture": "Ampere",
+      "uuid": "GPU-b1f17eba-3ad6-33a6-b970-eb974b6ffd00"
+    },
+    {
+      "name": "NVIDIA A800-SXM4-80GB",
+      "architecture": "Ampere",
+      "uuid": "GPU-ec48ac9f-0475-6ef3-b2af-fac224a27a2c"
+    },
+    {
+      "name": "NVIDIA A800-SXM4-80GB",
+      "architecture": "Ampere",
+      "uuid": "GPU-782e81c6-60bf-c3e2-46ab-f27fe212476c"
+    },
+    {
+      "name": "NVIDIA A800-SXM4-80GB",
+      "architecture": "Ampere",
+      "uuid": "GPU-2ef9295b-be2a-e446-ae8a-052fe1568b37"
+    }
+  ],
+  "cudaVersion": "12.4",
+  "writerId": "s2u92cc4pvweoyjtzc3m5f6uou36lj62"
+}

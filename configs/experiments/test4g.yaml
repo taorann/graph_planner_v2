@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 experiment:
   name: planner-cgm-test4g
   seed: 1234
@@ -128,3 +129,108 @@ verl_overrides:
     kl_ctrl:
       kl_coef: *kl
       target_kl: *target_kl
+=======
+# configs/experiments/test4g.yaml
+
+common:
+  # 统一的环境与 Ray
+  env_class: your_pkg.envs.repo_repair:RepoRepairEnv
+  agent_class: your_pkg.agents.planner:PlannerAgent     # planner 默认；cgm 会单独覆盖
+  ray_init:
+    address: null
+    num_cpus: 16
+    num_gpus: 4
+    _system_config:
+      object_spilling_config: null
+
+  # 训练存档
+  trainer:
+    save_freq: 1000
+    test_freq: 1000
+
+  # 数据（可被各角色覆盖）
+  data:
+    train_files: /abs/path/r2e_gym_train.parquet
+    val_files:   /abs/path/r2e_gym_val.parquet
+    max_prompt_length: 4096
+    max_response_length: 768
+
+# ---- planner 角色（14B）----
+planner:
+  resource:
+    num_gpus: 2
+  agent_class: your_pkg.agents.planner:PlannerAgent
+  env_class: your_pkg.envs.repo_repair:RepoRepairEnv
+
+  data:
+    train_files: /abs/path/r2e_gym_train.parquet
+    val_files:   /abs/path/r2e_gym_val.parquet
+    max_prompt_length: 8192
+    max_response_length: 1024
+
+  actor_rollout_ref:
+    model:
+      path: Qwen/Qwen2.5-14B-Instruct
+      trust_remote_code: true
+      enable_gradient_checkpointing: true
+    actor:
+      ppo_micro_batch_size_per_gpu: 1
+      ppo_mini_batch_size: 64
+      optim:
+        lr: 5.0e-6
+        total_training_steps: 10000
+    rollout:
+      name: hf          # 4卡并行双训时建议先用 HF，避免起多个 vLLM 进程
+      temperature: 1.0
+      top_p: 1.0
+      n: 1
+
+  agent:
+    n_parallel_agents: 16
+    max_steps: 10
+    use_stepwise_advantage: true
+
+# ---- CGM 角色（73B，建议 LoRA）----
+cgm:
+  resource:
+    num_gpus: 2
+  agent_class: your_pkg.agents.cgm:CGMAgent   # 需要你实现的 CGM agent 类
+  env_class: your_pkg.envs.repo_repair:RepoRepairEnv
+
+  data:
+    train_files: /abs/path/r2e_gym_train.parquet
+    val_files:   /abs/path/r2e_gym_val.parquet
+    max_prompt_length: 4096
+    max_response_length: 512
+
+  actor_rollout_ref:
+    model:
+      path: Qwen/Qwen2.5-72B-Instruct
+      trust_remote_code: true
+      enable_gradient_checkpointing: true
+      lora_rank: 16            # 建议 LoRA 以适配 2×A800
+      lora_alpha: 32
+      lora_dropout: 0.05
+      target_modules: all-linear
+    actor:
+      ppo_micro_batch_size_per_gpu: 1
+      ppo_mini_batch_size: 32
+      optim:
+        lr: 2.0e-6
+        total_training_steps: 8000
+    rollout:
+      name: hf
+      temperature: 1.0
+      top_p: 1.0
+      n: 1
+
+  agent:
+    n_parallel_agents: 8
+    max_steps: 8
+
+# （可选）再放一层覆盖
+# planner:
+#   role_overrides: {}
+# cgm:
+#   role_overrides: {}
+>>>>>>> 3245369 (	new file:   configs/experiments/test4g.yaml)

@@ -1,0 +1,264 @@
+hydra:
+  searchpath:
+  - pkg://verl.trainer.config
+defaults:
+- ppo_trainer
+- _self_
+actor_rollout_ref:
+  rollout:
+    mode: async
+    agent:
+      num_workers: 2
+    val_kwargs:
+      do_sample: true
+    temperature: 0.2
+    top_p: 0.95
+    tensor_model_parallel_size: 2
+    'n': 1
+    max_prompt_length: 4096
+    max_response_length: 512
+  model:
+    path: /map-vepfs/taoran/graph_planner/models/qwen3-14b
+    tokenizer_path: /map-vepfs/taoran/graph_planner/models/qwen3-14b
+data:
+  gen_batch_size: ${mul:${data.train_batch_size},${rllm.rejection_sample.multiplier}}
+  train_files: /map-vepfs/taoran/graph_planner/rllm/rllm/data/datasets/graph_planner_repoenv_eval/test_verl.parquet
+  val_files: /map-vepfs/taoran/graph_planner/rllm/rllm/data/datasets/graph_planner_repoenv_eval/test_verl.parquet
+  train_batch_size: 4
+  val_batch_size: 4
+  shuffle: false
+  max_prompt_length: 4096
+  max_response_length: 512
+rllm:
+  agent:
+    name: graph_planner_repoenv
+    max_steps: 20
+    trajectory_timeout: null
+    overlong_filter: false
+    agent_args: {}
+    engine_args:
+      n_parallel_agents: 2
+      max_workers: 64
+  env:
+    name: graph_planner_repoenv
+    env_args: {}
+  workflow:
+    use_workflow: false
+    name: single_turn_workflow
+    workflow_args:
+      agent_cls: null
+      agent_args: {}
+      env_cls: null
+      env_args: {}
+      timeout: 1000000.0
+      gamma: 0.0
+      reward_bonus_coeff: 0.0
+    n_parallel_tasks: 2
+    retry_limit: 3
+  disable_thinking: false
+  accumulate_reasoning: false
+  mask_truncated_samples: false
+  stepwise_advantage:
+    enable: false
+    mode: broadcast
+    normalize_by_steps: false
+  compact_filtering:
+    enable: false
+    mask_max_prompt_length_exceeded: true
+    mask_max_response_length_exceeded: true
+    mask_env_done: false
+    mask_max_turns_exceeded: true
+    mask_timeout: true
+    mask_unknown: false
+    mask_error: true
+  rejection_sample:
+    enable: false
+    multiplier: 1
+fireworks:
+  deployment_id: null
+  model_id_prefix: test-model
+  concurrency: 32
+trainer:
+  project_name: graph-planner
+  experiment_name: test4g
+  n_gpus_per_node: 4
+  total_epochs: 0
+  total_training_steps: 0
+  val_before_train: true
+  val_only: true
+  test_freq: -1
+  save_freq: -1
+  output_dir: /map-vepfs/taoran/graph_planner/outputs/test4g
+  default_local_dir: /map-vepfs/taoran/graph_planner/outputs/test4g
+  nnodes: 1
+  logger:
+  - console
+  - wandb
+critic:
+  model:
+    path: /map-vepfs/taoran/graph_planner/models/qwen3-14b
+    tokenizer_path: /map-vepfs/taoran/graph_planner/models/qwen3-14b
+ray_init:
+  num_cpus: 16
+  num_gpus: 4
+agent:
+  name: graph_planner_repoenv
+  max_steps: 6
+env:
+  name: graph_planner_repoenv
+  env_args:
+    max_steps: 6
+2025-10-25 01:23:48,430	INFO worker.py:1918 -- Started a local Ray instance. View the dashboard at [1m[32m127.0.0.1:8265 [39m[22m
+[36m(pid=1247657)[0m /map-vepfs/taoran/envs/taoran/lib/python3.10/site-packages/transformers/utils/hub.py:111: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+[36m(pid=1247657)[0m   warnings.warn(
+
+[36m(TaskRunner pid=1247657)[0m TaskRunner hostname: di-20250214115134-466rr, PID: 1247657
+[36m(TaskRunner pid=1247657)[0m {'actor_rollout_ref': {'model': {'path': '/map-vepfs/taoran/graph_planner/models/qwen3-14b',
+[36m(TaskRunner pid=1247657)[0m                                  'tokenizer_path': '/map-vepfs/taoran/graph_planner/models/qwen3-14b'},
+[36m(TaskRunner pid=1247657)[0m                        'rollout': {'agent': {'num_workers': 2},
+[36m(TaskRunner pid=1247657)[0m                                    'max_prompt_length': 4096,
+[36m(TaskRunner pid=1247657)[0m                                    'max_response_length': 512,
+[36m(TaskRunner pid=1247657)[0m                                    'mode': 'async',
+[36m(TaskRunner pid=1247657)[0m                                    'n': 1,
+[36m(TaskRunner pid=1247657)[0m                                    'temperature': 0.2,
+[36m(TaskRunner pid=1247657)[0m                                    'tensor_model_parallel_size': 2,
+[36m(TaskRunner pid=1247657)[0m                                    'top_p': 0.95,
+[36m(TaskRunner pid=1247657)[0m                                    'val_kwargs': {'do_sample': True}}},
+[36m(TaskRunner pid=1247657)[0m  'agent': {'max_steps': 6, 'name': 'graph_planner_repoenv'},
+[36m(TaskRunner pid=1247657)[0m  'critic': {'model': {'path': '/map-vepfs/taoran/graph_planner/models/qwen3-14b',
+[36m(TaskRunner pid=1247657)[0m                       'tokenizer_path': '/map-vepfs/taoran/graph_planner/models/qwen3-14b'}},
+[36m(TaskRunner pid=1247657)[0m  'data': {'gen_batch_size': 4,
+[36m(TaskRunner pid=1247657)[0m           'max_prompt_length': 4096,
+[36m(TaskRunner pid=1247657)[0m           'max_response_length': 512,
+[36m(TaskRunner pid=1247657)[0m           'shuffle': False,
+[36m(TaskRunner pid=1247657)[0m           'train_batch_size': 4,
+[36m(TaskRunner pid=1247657)[0m           'train_files': '/map-vepfs/taoran/graph_planner/rllm/rllm/data/datasets/graph_planner_repoenv_eval/test_verl.parquet',
+[36m(TaskRunner pid=1247657)[0m           'val_batch_size': 4,
+[36m(TaskRunner pid=1247657)[0m           'val_files': '/map-vepfs/taoran/graph_planner/rllm/rllm/data/datasets/graph_planner_repoenv_eval/test_verl.parquet'},
+[36m(TaskRunner pid=1247657)[0m  'defaults': ['ppo_trainer', '_self_'],
+[36m(TaskRunner pid=1247657)[0m  'env': {'env_args': {'max_steps': 6}, 'name': 'graph_planner_repoenv'},
+[36m(TaskRunner pid=1247657)[0m  'fireworks': {'concurrency': 32,
+[36m(TaskRunner pid=1247657)[0m                'deployment_id': None,
+[36m(TaskRunner pid=1247657)[0m                'model_id_prefix': 'test-model'},
+[36m(TaskRunner pid=1247657)[0m  'hydra': {'searchpath': ['pkg://verl.trainer.config']},
+[36m(TaskRunner pid=1247657)[0m  'ray_init': {'num_cpus': 16, 'num_gpus': 4},
+[36m(TaskRunner pid=1247657)[0m  'rllm': {'accumulate_reasoning': False,
+[36m(TaskRunner pid=1247657)[0m           'agent': {'agent_args': {},
+[36m(TaskRunner pid=1247657)[0m                     'engine_args': {'max_workers': 64, 'n_parallel_agents': 2},
+[36m(TaskRunner pid=1247657)[0m                     'max_steps': 20,
+[36m(TaskRunner pid=1247657)[0m                     'name': 'graph_planner_repoenv',
+[36m(TaskRunner pid=1247657)[0m                     'overlong_filter': False,
+[36m(TaskRunner pid=1247657)[0m                     'trajectory_timeout': None},
+[36m(TaskRunner pid=1247657)[0m           'compact_filtering': {'enable': False,
+[36m(TaskRunner pid=1247657)[0m                                 'mask_env_done': False,
+[36m(TaskRunner pid=1247657)[0m                                 'mask_error': True,
+[36m(TaskRunner pid=1247657)[0m                                 'mask_max_prompt_length_exceeded': True,
+[36m(TaskRunner pid=1247657)[0m                                 'mask_max_response_length_exceeded': True,
+[36m(TaskRunner pid=1247657)[0m                                 'mask_max_turns_exceeded': True,
+[36m(TaskRunner pid=1247657)[0m                                 'mask_timeout': True,
+[36m(TaskRunner pid=1247657)[0m                                 'mask_unknown': False},
+[36m(TaskRunner pid=1247657)[0m           'disable_thinking': False,
+[36m(TaskRunner pid=1247657)[0m           'env': {'env_args': {}, 'name': 'graph_planner_repoenv'},
+[36m(TaskRunner pid=1247657)[0m           'mask_truncated_samples': False,
+[36m(TaskRunner pid=1247657)[0m           'rejection_sample': {'enable': False, 'multiplier': 1},
+[36m(TaskRunner pid=1247657)[0m           'stepwise_advantage': {'enable': False,
+[36m(TaskRunner pid=1247657)[0m                                  'mode': 'broadcast',
+[36m(TaskRunner pid=1247657)[0m                                  'normalize_by_steps': False},
+[36m(TaskRunner pid=1247657)[0m           'workflow': {'n_parallel_tasks': 2,
+[36m(TaskRunner pid=1247657)[0m                        'name': 'single_turn_workflow',
+[36m(TaskRunner pid=1247657)[0m                        'retry_limit': 3,
+[36m(TaskRunner pid=1247657)[0m                        'use_workflow': False,
+[36m(TaskRunner pid=1247657)[0m                        'workflow_args': {'agent_args': {},
+[36m(TaskRunner pid=1247657)[0m                                          'agent_cls': None,
+[36m(TaskRunner pid=1247657)[0m                                          'env_args': {},
+[36m(TaskRunner pid=1247657)[0m                                          'env_cls': None,
+[36m(TaskRunner pid=1247657)[0m                                          'gamma': 0.0,
+[36m(TaskRunner pid=1247657)[0m                                          'reward_bonus_coeff': 0.0,
+[36m(TaskRunner pid=1247657)[0m                                          'timeout': 1000000.0}}},
+[36m(TaskRunner pid=1247657)[0m  'trainer': {'default_local_dir': '/map-vepfs/taoran/graph_planner/outputs/test4g',
+[36m(TaskRunner pid=1247657)[0m              'experiment_name': 'test4g',
+[36m(TaskRunner pid=1247657)[0m              'logger': ['console', 'wandb'],
+[36m(TaskRunner pid=1247657)[0m              'n_gpus_per_node': 4,
+[36m(TaskRunner pid=1247657)[0m              'nnodes': 1,
+[36m(TaskRunner pid=1247657)[0m              'output_dir': '/map-vepfs/taoran/graph_planner/outputs/test4g',
+[36m(TaskRunner pid=1247657)[0m              'project_name': 'graph-planner',
+[36m(TaskRunner pid=1247657)[0m              'save_freq': -1,
+[36m(TaskRunner pid=1247657)[0m              'test_freq': -1,
+[36m(TaskRunner pid=1247657)[0m              'total_epochs': 0,
+[36m(TaskRunner pid=1247657)[0m              'total_training_steps': 0,
+[36m(TaskRunner pid=1247657)[0m              'val_before_train': True,
+[36m(TaskRunner pid=1247657)[0m              'val_only': True}}
+Traceback (most recent call last):
+  File "/map-vepfs/taoran/graph_planner/scripts/eval_graphplanner_rllm.py", line 363, in <module>
+    main()
+  File "/map-vepfs/taoran/graph_planner/scripts/eval_graphplanner_rllm.py", line 353, in main
+    trainer.train()
+  File "/map-vepfs/taoran/graph_planner/rllm/rllm/trainer/agent_trainer.py", line 80, in train
+    ray.get(
+  File "/map-vepfs/taoran/envs/taoran/lib/python3.10/site-packages/ray/_private/auto_init_hook.py", line 22, in auto_init_wrapper
+    return fn(*args, **kwargs)
+  File "/map-vepfs/taoran/envs/taoran/lib/python3.10/site-packages/ray/_private/client_mode_hook.py", line 104, in wrapper
+    return func(*args, **kwargs)
+  File "/map-vepfs/taoran/envs/taoran/lib/python3.10/site-packages/ray/_private/worker.py", line 2858, in get
+    values, debugger_breakpoint = worker.get_objects(object_refs, timeout=timeout)
+  File "/map-vepfs/taoran/envs/taoran/lib/python3.10/site-packages/ray/_private/worker.py", line 958, in get_objects
+    raise value.as_instanceof_cause()
+ray.exceptions.RayTaskError(ConfigAttributeError): [36mray::TaskRunner.run()[39m (pid=1247657, ip=192.168.0.70, actor_id=caaa0d024acf9b4dbd0da4b801000000, repr=<rllm.trainer.verl.train_agent_ppo.TaskRunner object at 0x7f2e6773bc10>)
+  File "/map-vepfs/taoran/graph_planner/rllm/rllm/trainer/verl/train_agent_ppo.py", line 97, in run
+    if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
+  File "/root/.local/lib/python3.10/site-packages/omegaconf/dictconfig.py", line 355, in __getattr__
+    self._format_and_raise(
+  File "/root/.local/lib/python3.10/site-packages/omegaconf/base.py", line 231, in _format_and_raise
+    format_and_raise(
+  File "/root/.local/lib/python3.10/site-packages/omegaconf/_utils.py", line 899, in format_and_raise
+    _raise(ex, cause)
+  File "/root/.local/lib/python3.10/site-packages/omegaconf/_utils.py", line 797, in _raise
+    raise ex.with_traceback(sys.exc_info()[2])  # set env var OC_CAUSE=1 for full trace
+  File "/root/.local/lib/python3.10/site-packages/omegaconf/dictconfig.py", line 351, in __getattr__
+    return self._get_impl(
+  File "/root/.local/lib/python3.10/site-packages/omegaconf/dictconfig.py", line 442, in _get_impl
+    node = self._get_child(
+  File "/root/.local/lib/python3.10/site-packages/omegaconf/basecontainer.py", line 73, in _get_child
+    child = self._get_node(
+  File "/root/.local/lib/python3.10/site-packages/omegaconf/dictconfig.py", line 480, in _get_node
+    raise ConfigKeyError(f"Missing key {key!s}")
+omegaconf.errors.ConfigAttributeError: Missing key actor
+    full_key: actor_rollout_ref.actor
+    object_type=dict
+Traceback (most recent call last):
+  File "/map-vepfs/taoran/graph_planner/scripts/eval_graphplanner_rllm.py", line 363, in <module>
+    main()
+  File "/map-vepfs/taoran/graph_planner/scripts/eval_graphplanner_rllm.py", line 353, in main
+    trainer.train()
+  File "/map-vepfs/taoran/graph_planner/rllm/rllm/trainer/agent_trainer.py", line 80, in train
+    ray.get(
+  File "/map-vepfs/taoran/envs/taoran/lib/python3.10/site-packages/ray/_private/auto_init_hook.py", line 22, in auto_init_wrapper
+    return fn(*args, **kwargs)
+  File "/map-vepfs/taoran/envs/taoran/lib/python3.10/site-packages/ray/_private/client_mode_hook.py", line 104, in wrapper
+    return func(*args, **kwargs)
+  File "/map-vepfs/taoran/envs/taoran/lib/python3.10/site-packages/ray/_private/worker.py", line 2858, in get
+    values, debugger_breakpoint = worker.get_objects(object_refs, timeout=timeout)
+  File "/map-vepfs/taoran/envs/taoran/lib/python3.10/site-packages/ray/_private/worker.py", line 958, in get_objects
+    raise value.as_instanceof_cause()
+ray.exceptions.RayTaskError(ConfigAttributeError): [36mray::TaskRunner.run()[39m (pid=1247657, ip=192.168.0.70, actor_id=caaa0d024acf9b4dbd0da4b801000000, repr=<rllm.trainer.verl.train_agent_ppo.TaskRunner object at 0x7f2e6773bc10>)
+  File "/map-vepfs/taoran/graph_planner/rllm/rllm/trainer/verl/train_agent_ppo.py", line 97, in run
+    if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
+  File "/root/.local/lib/python3.10/site-packages/omegaconf/dictconfig.py", line 355, in __getattr__
+    self._format_and_raise(
+  File "/root/.local/lib/python3.10/site-packages/omegaconf/base.py", line 231, in _format_and_raise
+    format_and_raise(
+  File "/root/.local/lib/python3.10/site-packages/omegaconf/_utils.py", line 899, in format_and_raise
+    _raise(ex, cause)
+  File "/root/.local/lib/python3.10/site-packages/omegaconf/_utils.py", line 797, in _raise
+    raise ex.with_traceback(sys.exc_info()[2])  # set env var OC_CAUSE=1 for full trace
+  File "/root/.local/lib/python3.10/site-packages/omegaconf/dictconfig.py", line 351, in __getattr__
+    return self._get_impl(
+  File "/root/.local/lib/python3.10/site-packages/omegaconf/dictconfig.py", line 442, in _get_impl
+    node = self._get_child(
+  File "/root/.local/lib/python3.10/site-packages/omegaconf/basecontainer.py", line 73, in _get_child
+    child = self._get_node(
+  File "/root/.local/lib/python3.10/site-packages/omegaconf/dictconfig.py", line 480, in _get_node
+    raise ConfigKeyError(f"Missing key {key!s}")
+omegaconf.errors.ConfigAttributeError: Missing key actor
+    full_key: actor_rollout_ref.actor
+    object_type=dict

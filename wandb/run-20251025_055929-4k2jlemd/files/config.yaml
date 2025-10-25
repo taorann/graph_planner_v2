@@ -1,0 +1,234 @@
+_wandb:
+    value:
+        cli_version: 0.21.1
+        e:
+            xr6sel7355vv4nlpdar2tj3ta7a61z5j:
+                args:
+                    - --agent
+                    - planner
+                    - --config-file
+                    - configs/experiments/test4g.yaml
+                    - --dataset
+                    - datasets/swebench/test.jsonl
+                    - --docker-manifest
+                    - datasets/swebench/docker_images_validation.txt
+                    - --dataset-split
+                    - test
+                    - --batch-size
+                    - "4"
+                    - --print-config
+                codePath: scripts/eval_graphplanner_rllm.py
+                codePathLocal: scripts/eval_graphplanner_rllm.py
+                cpu_count: 64
+                cpu_count_logical: 109
+                cudaVersion: "12.4"
+                disk:
+                    /:
+                        total: "134145380352"
+                        used: "74839896064"
+                email: heolucky@163.com
+                executable: /map-vepfs/taoran/envs/taoran/bin/python
+                git:
+                    commit: 5d380cd8321b11a0d89faa60885127adcec7272d
+                    remote: https://github.com/taorann/graph_planner.git
+                gpu: NVIDIA A800-SXM4-80GB
+                gpu_count: 8
+                gpu_nvidia:
+                    - architecture: Ampere
+                      name: NVIDIA A800-SXM4-80GB
+                      uuid: GPU-71fbe7a1-2095-21af-e5ea-5ddfae373141
+                    - architecture: Ampere
+                      name: NVIDIA A800-SXM4-80GB
+                      uuid: GPU-869c74a9-9819-3657-73a2-0ed9ffb6fad8
+                    - architecture: Ampere
+                      name: NVIDIA A800-SXM4-80GB
+                      uuid: GPU-aa562954-6708-c666-fae1-29bb449ef6fd
+                    - architecture: Ampere
+                      name: NVIDIA A800-SXM4-80GB
+                      uuid: GPU-523f15f9-d6a6-673d-73d1-ece3037f0843
+                    - architecture: Ampere
+                      name: NVIDIA A800-SXM4-80GB
+                      uuid: GPU-b1f17eba-3ad6-33a6-b970-eb974b6ffd00
+                    - architecture: Ampere
+                      name: NVIDIA A800-SXM4-80GB
+                      uuid: GPU-ec48ac9f-0475-6ef3-b2af-fac224a27a2c
+                    - architecture: Ampere
+                      name: NVIDIA A800-SXM4-80GB
+                      uuid: GPU-782e81c6-60bf-c3e2-46ab-f27fe212476c
+                    - architecture: Ampere
+                      name: NVIDIA A800-SXM4-80GB
+                      uuid: GPU-2ef9295b-be2a-e446-ae8a-052fe1568b37
+                host: di-20250214115134-466rr
+                memory:
+                    total: "2019574153216"
+                os: Linux-5.4.210-4-velinux1-amd64-x86_64-with-glibc2.35
+                program: /map-vepfs/taoran/graph_planner/scripts/eval_graphplanner_rllm.py
+                python: CPython 3.10.18
+                root: /map-vepfs/taoran/graph_planner
+                startedAt: "2025-10-25T05:59:29.633414Z"
+                writerId: xr6sel7355vv4nlpdar2tj3ta7a61z5j
+        m: []
+        python_version: 3.10.18
+        t:
+            "1":
+                - 1
+                - 5
+                - 11
+                - 30
+                - 41
+                - 49
+                - 50
+                - 51
+                - 53
+                - 71
+                - 95
+                - 105
+            "2":
+                - 1
+                - 5
+                - 11
+                - 30
+                - 41
+                - 49
+                - 50
+                - 51
+                - 53
+                - 71
+                - 95
+                - 105
+            "3":
+                - 1
+                - 13
+                - 61
+            "4": 3.10.18
+            "5": 0.21.1
+            "6": 4.56.0
+            "8":
+                - 2
+            "12": 0.21.1
+            "13": linux-x86_64
+backends:
+    value:
+        cgm_backend: local
+        device_map_cgm:
+            - 6
+            - 7
+        device_map_planner:
+            - 4
+            - 5
+        dtype: bfloat16
+        max_gpu_memory: null
+        planner_backend: local
+cgm_generation:
+    value:
+        do_sample: false
+        max_new_tokens: 1024
+        num_return_sequences: 1
+        temperature: 0.2
+        top_k: 40
+        top_p: 0.9
+env:
+    value:
+        apply_patches: true
+        disable_cgm_synthesis: false
+        docker_manifest: /map-vepfs/taoran/graph_planner/datasets/swebench/docker_images_validation.txt
+        failure_penalty: -1
+        max_steps: 6
+        prepull_containers: false
+        prepull_delay: null
+        prepull_max_workers: null
+        prepull_retries: null
+        prepull_timeout: null
+        repo_op_limit: 64
+        reward_scale: 1
+        step_penalty: -0.05
+        timeout_penalty: -0.5
+experiment:
+    value:
+        name: test4g
+        notes: Planner GRPO with 4 GPUs
+        seed: 1234
+logging:
+    value:
+        eval_interval: 500
+        log_backend: wandb
+        output_dir: outputs
+        resolved_config_path: /map-vepfs/taoran/graph_planner/outputs/test4g/resolved_config.yaml
+        resolved_run_dir: /map-vepfs/taoran/graph_planner/outputs/test4g
+        save_interval: 500
+        wandb:
+            enabled: true
+            entity: null
+            offline: false
+            project: graph-planner
+            run_name: test4g
+            watch:
+                enabled: true
+                log: gradients
+                log_freq: 200
+parallel:
+    value:
+        parallel_agents: 2
+        replicas: 1
+        rollout_workers: 2
+        tensor_parallel_cgm: 2
+        tensor_parallel_planner: 2
+        workflow_parallel: 2
+paths:
+    value:
+        cgm_model: /map-vepfs/taoran/CodeFuse-CGM/infra_model
+        cgm_tokenizer: null
+        dataset_train: /map-vepfs/taoran/graph_planner/datasets/swebench/test.jsonl
+        dataset_val: datasets/r2e_gym/val.jsonl
+        planner_model: models/qwen3-14b
+        planner_tokenizer: null
+planner_sampling:
+    value:
+        do_sample: false
+        max_input_tokens: 4096
+        max_new_tokens: 512
+        repetition_penalty: 1
+        stop: []
+        stop_ids: []
+        stop_on_invalid_json: true
+        temperature: 0.2
+        top_k: 50
+        top_p: 0.95
+resources:
+    value:
+        num_gpus: 4
+        num_nodes: 1
+        ray_memory: null
+        ray_num_cpus: 16
+        ray_num_gpus: 4
+        ray_object_store_memory: null
+telemetry:
+    value:
+        log_cgm_errors: true
+        log_gpu: true
+        log_patch_stats: true
+        log_planner_parse_errors: true
+        log_ray: true
+training:
+    value:
+        clip_coef: 0.2
+        clip_grad_norm: 1
+        entropy_coef: 0.01
+        grad_accum_steps: 8
+        gradient_checkpointing: true
+        kl_coef: 0.1
+        lr: 3e-05
+        precision: bf16
+        resume_from: null
+        target_kl: 0.15
+        total_epochs: 1
+        total_steps: null
+        train_batch_size: 4
+        value_coef: 1
+        warmup_steps: 200
+        weight_decay: 0.01
+verl_overrides:
+    value:
+        trainer:
+            gradient_accumulation_steps: 4
+            n_gpus_per_node: 4

@@ -1,0 +1,59 @@
+experiment:
+  name: planner-8g
+  seed: 1234
+
+paths:
+  dataset_train: datasets/r2e_gym/train.jsonl
+  dataset_val:   datasets/r2e_gym/val.jsonl
+  planner_model: models/qwen3-14b-instruct
+  planner_tokenizer: null
+  cgm_model:     models/codefuse-cgm
+  cgm_tokenizer: null
+
+backends:
+  planner_backend: local
+  cgm_backend: local
+  dtype: bfloat16
+  device_map_planner: [0,1,2,3]   # Planner 用前4卡
+  device_map_cgm:     [4,5,6,7]   # CGM 用后4卡
+
+training:
+  total_epochs: 1
+  train_batch_size: 4
+  grad_accum_steps: 8
+  precision: bf16
+  lr: 3.0e-5
+  weight_decay: 0.01
+  warmup_steps: 200
+  gradient_checkpointing: true
+  clip_grad_norm: 1.0
+  # GRPO/PPO
+  kl_coef: 0.1
+  entropy_coef: 0.01
+  value_coef: 1.0
+  clip_coef: 0.2
+  target_kl: 0.15
+
+env:
+  max_steps: 6
+  reward_scale: 1.0
+  failure_penalty: -1.0
+  step_penalty: -0.05
+  timeout_penalty: -0.5
+  repo_op_limit: 64
+  disable_cgm_synthesis: false
+  apply_patches: true
+
+parallel:
+  tensor_parallel_planner: 4
+  tensor_parallel_cgm: 4
+  replicas: 1
+  parallel_agents: 4
+  rollout_workers: 4
+  workflow_parallel: 4
+
+resources:
+  num_gpus: 8
+  num_nodes: 1
+  ray_num_gpus: 8
+  ray_num_cpus: 32   # >= rollout_workers * 4
