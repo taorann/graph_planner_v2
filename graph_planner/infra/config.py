@@ -701,9 +701,25 @@ def merge_run_config(
     cli_overrides: Mapping[str, Any],
     *,
     yaml_only: bool,
+    agent: Optional[str] = None,
 ) -> Dict[str, Any]:
     merged = _deepcopy_dict(defaults)
-    _deep_update(merged, yaml_cfg or {})
+    yaml_copy = _deepcopy_dict(yaml_cfg or {})
+
+    agent_section: Dict[str, Any] = {}
+    if agent and agent in yaml_copy:
+        section = yaml_copy.pop(agent)
+        if section is None:
+            agent_section = {}
+        elif isinstance(section, Mapping):
+            agent_section = _deepcopy_dict(section)
+        else:
+            raise TypeError(f"Agent-specific config for '{agent}' must be a mapping")
+
+    _deep_update(merged, yaml_copy)
+    if agent_section:
+        _deep_update(merged, agent_section)
+
     if not yaml_only:
         _deep_update(merged, cli_overrides or {})
     return merged

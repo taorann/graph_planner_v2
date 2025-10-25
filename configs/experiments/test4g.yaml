@@ -1,7 +1,7 @@
 experiment:
-  name: gp-full-73b14b-16g
-  seed: 2024
-  notes: "Planner 14B + CGM 73B across 16 A800s with high-concurrency tuning"
+  name: planner-cgm-test4g
+  seed: 1234
+  notes: "Planner+CGM smoke test on 4 GPUs"
 paths:
   dataset_train: datasets/r2e_gym/train.jsonl
   dataset_val: datasets/r2e_gym/val.jsonl
@@ -13,8 +13,8 @@ backends:
   planner_backend: local
   cgm_backend: local
   dtype: bfloat16
-  device_map_planner: [0,1,2,3,4,5,6,7]
-  device_map_cgm: [8,9,10,11,12,13,14,15]
+  device_map_planner: [0,1]
+  device_map_cgm: [2,3]
   max_gpu_memory: null
 planner_sampling:
   temperature: 0.2
@@ -28,27 +28,27 @@ planner_sampling:
   stop_ids: []
   stop_on_invalid_json: true
 cgm_generation:
-  temperature: 0.15
+  temperature: 0.2
   top_p: 0.9
   top_k: 40
-  max_new_tokens: 1024
+  max_new_tokens: 768
   num_return_sequences: 1
   do_sample: false
 training:
   total_epochs: 1
-  train_batch_size: 16
+  train_batch_size: 2
   grad_accum_steps: &grad_accum 4
   precision: bf16
-  lr: &lr 2.5e-05
+  lr: &lr 3.0e-05
   weight_decay: &weight_decay 0.01
-  warmup_steps: &warmup 400
+  warmup_steps: &warmup 200
   gradient_checkpointing: &grad_ckpt true
-  clip_grad_norm: &grad_clip 0.5
-  kl_coef: &kl 0.08
+  clip_grad_norm: &grad_clip 1.0
+  kl_coef: &kl 0.1
   entropy_coef: &entropy 0.01
   value_coef: 1.0
   clip_coef: &clip 0.2
-  target_kl: &target_kl 0.1
+  target_kl: &target_kl 0.15
   total_steps: null
   resume_from: null
 env:
@@ -57,21 +57,21 @@ env:
   failure_penalty: -1.0
   step_penalty: -0.05
   timeout_penalty: -0.5
-  repo_op_limit: 64
+  repo_op_limit: 48
   disable_cgm_synthesis: false
   apply_patches: true
 parallel:
-  tensor_parallel_planner: 8
-  tensor_parallel_cgm: 8
+  tensor_parallel_planner: 2
+  tensor_parallel_cgm: 2
   replicas: 1
-  parallel_agents: 8
-  rollout_workers: 8
-  workflow_parallel: 10
+  parallel_agents: 2
+  rollout_workers: 2
+  workflow_parallel: 2
 resources:
-  num_gpus: 16
+  num_gpus: 4
   num_nodes: 1
-  ray_num_gpus: 16
-  ray_num_cpus: 128
+  ray_num_gpus: 4
+  ray_num_cpus: 16
   ray_memory: null
   ray_object_store_memory: null
 logging:
@@ -80,15 +80,15 @@ logging:
     offline: false
     project: graph-planner
     entity: null
-    run_name: gp-full-73b14b-16g
+    run_name: planner-cgm-test4g
     watch:
-      enabled: false
+      enabled: true
       log: gradients
       log_freq: 200
   log_backend: wandb
   output_dir: outputs
-  save_interval: 1000
-  eval_interval: 1000
+  save_interval: 500
+  eval_interval: 500
 telemetry:
   log_gpu: true
   log_ray: true
@@ -97,11 +97,8 @@ telemetry:
   log_cgm_errors: true
 verl_overrides:
   trainer:
-    n_gpus_per_node: 16
+    n_gpus_per_node: 4
     gradient_accumulation_steps: *grad_accum
-    logger:
-      wandb:
-        project: graph-planner
   actor_rollout_ref:
     model:
       enable_gradient_checkpointing: *grad_ckpt
