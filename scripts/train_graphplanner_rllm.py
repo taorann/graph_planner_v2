@@ -18,8 +18,6 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
 import numpy as np
-from hydra import compose, initialize_config_dir
-from hydra.core.global_hydra import GlobalHydra
 from omegaconf import OmegaConf, open_dict
 from omegaconf.errors import ConfigKeyError
 
@@ -243,7 +241,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ray-num-gpus", type=int, default=None)
     parser.add_argument("--ray-memory", type=int, default=None)
     parser.add_argument("--ray-object-store-memory", type=int, default=None)
-    parser.add_argument("--config", type=Path, default=_default_config_path())
+    parser.add_argument("--config", type=Path, required=True, help="Base trainer config YAML.")
+    parser.add_argument(
+        "--overrides",
+        nargs="*",
+        default=None,
+        help="Optional OmegaConf-style dotlist overrides (space separated).",
+    )
     parser.add_argument("--print-config", action="store_true")
     parser.add_argument(
         "--print-config-only",
@@ -278,28 +282,43 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Alternative logging backend when W&B is disabled.",
     )
-    args = parser.parse_args(argv)
+    args, unknown = parser.parse_known_args(argv)
     if getattr(args, "print_config_only", False):
         args.print_config = True
     args._specified_cli_args = _collect_specified_cli_args(parser, argv)
+    args.overrides = list(args.overrides or [])
+    args._unknown_overrides = [token for token in unknown if token]
     if args.agent == "cgm":
         args.disable_cgm_synthesis = True
     return args
 
 
-def _load_config(path: Path) -> OmegaConf:
-    """从 YAML 文件加载 ``OmegaConf`` 配置。"""
+def _load_config(
+    path: Path,
+    overrides: list[str] | None = None,
+    unknown: list[str] | None = None,
+) -> OmegaConf:
+    """从 YAML 文件加载 ``OmegaConf`` 配置并应用 dotlist 覆盖。"""
 
     resolved = path.resolve()
     cfg = OmegaConf.load(str(resolved))
+    OmegaConf.set_struct(cfg, False)
 
-    if "defaults" not in cfg:
-        return cfg
+    merged: list[str] = []
+    for values in (overrides or [], unknown or []):
+        for item in values:
+            if not item:
+                continue
+            cleaned = item.lstrip("+")
+            if cleaned.startswith("--"):
+                cleaned = cleaned[2:]
+            if cleaned:
+                merged.append(cleaned)
 
-    GlobalHydra.instance().clear()
-    with initialize_config_dir(version_base=None, config_dir=str(resolved.parent)):
-        composed = compose(config_name=resolved.stem)
-    return composed
+    if merged:
+        cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(merged))
+    print(f"[CFG] Applied {len(merged)} override(s)")
+    return cfg
 
 
 def _key_exists(cfg: OmegaConf, key: str) -> bool:
@@ -776,7 +795,11 @@ def main() -> None:
 
     container_images = _prepare_container_images(args, final_run_cfg)
 
-    cfg = _load_config(args.config)
+    cfg = _load_config(
+        args.config,
+        overrides=args.overrides,
+        unknown=getattr(args, "_unknown_overrides", None),
+    )
 
     _set(cfg, "data.train_files", str(train_path))
     if val_path is None:

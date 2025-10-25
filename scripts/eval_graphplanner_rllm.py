@@ -51,7 +51,6 @@ from scripts.train_graphplanner_rllm import (  # noqa: E402
     _apply_model_overrides,
     _apply_parallel_overrides,
     _configure_agent_env,
-    _default_config_path,
     _load_config,
     _print_run_summary,
     _sanity_checks,
@@ -153,7 +152,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ray-num-gpus", type=int, default=None)
     parser.add_argument("--ray-memory", type=int, default=None)
     parser.add_argument("--ray-object-store-memory", type=int, default=None)
-    parser.add_argument("--config", type=Path, default=_default_config_path())
+    parser.add_argument("--config", type=Path, required=True, help="Base trainer config YAML.")
+    parser.add_argument(
+        "--overrides",
+        nargs="*",
+        default=None,
+        help="Optional OmegaConf-style dotlist overrides (space separated).",
+    )
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--print-config", action="store_true")
     parser.add_argument(
@@ -174,10 +179,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--log-to-wandb", action="store_true")
     parser.add_argument("--wandb-offline", action="store_true")
     parser.add_argument("--log-backend", choices=["tensorboard", "none"], default=None)
-    args = parser.parse_args(argv)
+    args, unknown = parser.parse_known_args(argv)
     if getattr(args, "print_config_only", False):
         args.print_config = True
     args._specified_cli_args = _collect_specified_cli_args(parser, argv)
+    args.overrides = list(args.overrides or [])
+    args._unknown_overrides = [token for token in unknown if token]
     return args
 
 
@@ -261,7 +268,11 @@ def main() -> None:
 
     container_images = _prepare_container_images(args, final_run_cfg)
 
-    cfg = _load_config(args.config)
+    cfg = _load_config(
+        args.config,
+        overrides=args.overrides,
+        unknown=getattr(args, "_unknown_overrides", None),
+    )
 
     _set(cfg, "data.train_files", str(eval_path))
     _set(cfg, "data.val_files", str(eval_path))
