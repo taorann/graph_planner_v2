@@ -832,7 +832,13 @@ def _run_training(args: argparse.Namespace, *, run_index: int, total_runs: int) 
         LOGGER.info("--yaml-only enabled; ignoring CLI overrides: %s", sorted(cli_overrides.keys()))
         cli_overrides = {}
 
-    final_run_cfg = merge_run_config(defaults, yaml_cfg, cli_overrides, yaml_only=args.yaml_only)
+    final_run_cfg = merge_run_config(
+        defaults,
+        yaml_cfg,
+        cli_overrides,
+        yaml_only=args.yaml_only,
+        agent=args.agent,
+    )
     logging_cfg = final_run_cfg.setdefault("logging", {})
     logging_cfg["agent_kind"] = args.agent
     logging_cfg["multi_agent_index"] = run_index

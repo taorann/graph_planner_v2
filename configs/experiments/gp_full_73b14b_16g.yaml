@@ -6,9 +6,9 @@ paths:
   dataset_train: datasets/r2e_gym/train.jsonl
   dataset_val: datasets/r2e_gym/val.jsonl
   planner_model: models/Qwen3-14B
-  planner_tokenizer: null
+  planner_tokenizer: models/Qwen3-14B
   cgm_model: models/CodeFuse-CGM
-  cgm_tokenizer: null
+  cgm_tokenizer: models/CodeFuse-CGM
 backends:
   planner_backend: local
   cgm_backend: local
