@@ -78,10 +78,48 @@ DEFAULT_CGM_MODEL_PATH = (REPO_ROOT / "models" / "CodeFuse-CGM").resolve()
 DEFAULT_TRAIN_DATASET_PATH = (REPO_ROOT / "datasets" / "r2e_gym" / "train.jsonl").resolve()
 
 
+_MODEL_PATH_FIELDS = {
+    "model_path",
+    "tokenizer_path",
+    "critic_model_path",
+    "critic_tokenizer_path",
+    "cgm_model_path",
+    "cgm_tokenizer_path",
+}
+
+
 def _resolve_optional_path(value: Path | str | None) -> Path | None:
     if value is None:
         return None
     return Path(value).expanduser().resolve()
+
+
+def _resolve_model_path(value: Path | str | None) -> str | None:
+    """Resolve model-related paths supporting absolute or repo-relative values."""
+
+    if value is None:
+        return None
+
+    raw_path = Path(value).expanduser()
+
+    if raw_path.is_absolute():
+        # ``Path.resolve`` canonicalises symlinks when the target exists but, on
+        # some shared filesystems, strict resolution can unexpectedly fail if a
+        # mounted path is only visible to remote workers.  We therefore only
+        # collapse the path when it can be confirmed locally, otherwise we keep
+        # the user's absolute string verbatim so it can still be interpreted on
+        # Ray workers.
+        return str(raw_path.resolve()) if raw_path.exists() else str(raw_path)
+
+    for base in (Path.cwd(), REPO_ROOT):
+        candidate = (base / raw_path).expanduser()
+        if candidate.exists():
+            return str(candidate.resolve())
+
+    # If we cannot resolve the path relative to known roots we return the raw
+    # string.  This allows callers to provide Hugging Face repository IDs or
+    # other identifiers that remote workers know how to resolve.
+    return str(value)
 
 
 def _absolutise_args(args: argparse.Namespace) -> None:
@@ -101,7 +139,8 @@ def _absolutise_args(args: argparse.Namespace) -> None:
         "config",
     ]:
         if hasattr(args, field):
-            resolved = _resolve_optional_path(getattr(args, field))
+            resolver = _resolve_model_path if field in _MODEL_PATH_FIELDS else _resolve_optional_path
+            resolved = resolver(getattr(args, field))
             if resolved is not None:
                 setattr(args, field, resolved)
 
@@ -874,7 +913,7 @@ def _run_training(args: argparse.Namespace, *, run_index: int, total_runs: int) 
         key = "planner_model" if args.agent == "planner" else "cgm_model"
         final_run_cfg.setdefault("paths", {})[key] = str(default_model)
     else:
-        args.model_path = _resolve_optional_path(args.model_path)
+        args.model_path = _resolve_model_path(args.model_path)
 
     output_base = Path(
         logging_cfg.get("output_dir")
