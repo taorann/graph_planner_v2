@@ -1,7 +1,7 @@
 """评估 Graph Planner/CGM 代理在 rLLM 上的推理表现（仅验证，不更新参数）。
 
 English summary
-    Runs the rLLM PPO pipeline in validation-only mode so we can collect
+    Runs the rLLM GRPO pipeline in validation-only mode so we can collect
     pass@k, success rate, and trajectory statistics without performing any
     optimisation steps.
 """
@@ -88,7 +88,7 @@ def _collect_specified_cli_args(
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Evaluate Graph Planner agents with rLLM (validation only)"
+        description="Evaluate Graph Planner agents with rLLM GRPO (validation only)"
     )
     parser.add_argument("--agent", choices=["planner", "cgm"], default="planner")
     parser.add_argument(

@@ -2,7 +2,7 @@
 
 English summary
     Provides a thin CLI that prepares datasets, config overrides and agent/env
-    wiring before delegating to rLLM's PPO trainer.
+    wiring before delegating to rLLM's GRPO-capable trainer.
 """
 
 from __future__ import annotations
@@ -76,6 +76,9 @@ REPO_ROOT = Path(
 DEFAULT_PLANNER_MODEL_PATH = (REPO_ROOT / "models" / "Qwen3-14B").resolve()
 DEFAULT_CGM_MODEL_PATH = (REPO_ROOT / "models" / "CodeFuse-CGM").resolve()
 DEFAULT_TRAIN_DATASET_PATH = (REPO_ROOT / "datasets" / "r2e_gym" / "train.jsonl").resolve()
+
+SWEBENCH_RULE_REWARD_PATH = find_in_rllm("rllm", "rewards", "code_utils", "swebench.py")
+SWEBENCH_RULE_REWARD_FN = "swebench_check_correctness"
 
 
 _MODEL_PATH_FIELDS = {
@@ -172,7 +175,7 @@ def _collect_specified_cli_args(
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """解析命令行参数，支持模型/数据集/调度配置。"""
 
-    parser = argparse.ArgumentParser(description="Train Graph Planner agents with rLLM PPO")
+    parser = argparse.ArgumentParser(description="Train Graph Planner agents with rLLM GRPO")
     parser.add_argument(
         "--agent",
         choices=["planner", "cgm", "both"],
@@ -414,22 +417,54 @@ def _set(cfg: OmegaConf, key: str, value: Any) -> None:
         OmegaConf.update(cfg, key, _normalise_value(value), merge=True)
 
 
-def _ensure_required_verl_flags(cfg: OmegaConf) -> None:
-    """填充 Verl 训练所需但部分配置缺失的布尔开关。"""
+def _ensure_mapping(cfg: OmegaConf, key: str) -> None:
+    """Ensure a nested mapping exists in the configuration."""
 
-    required_defaults: dict[str, bool] = {
-        "actor_rollout_ref.actor.use_kl_loss": False,
+    if _key_exists(cfg, key):
+        return
+    _set(cfg, key, {})
+
+
+def _ensure_default(cfg: OmegaConf, key: str, value: Any) -> None:
+    """Set ``key`` to ``value`` when the configuration does not provide it."""
+
+    try:
+        current = OmegaConf.select(cfg, key, throw_on_missing=True)
+    except (ConfigKeyError, AttributeError, ValueError):
+        current = None
+
+    if current is None:
+        _set(cfg, key, value)
+
+
+def _ensure_required_verl_flags(cfg: OmegaConf) -> None:
+    """Backfill Verl config so runs default to GRPO with rule-based rewards."""
+
+    required_defaults: dict[str, Any] = {
         "algorithm.use_kl_in_reward": False,
     }
 
     for dotted, default in required_defaults.items():
-        try:
-            current = OmegaConf.select(cfg, dotted, throw_on_missing=True)
-        except (ConfigKeyError, AttributeError, ValueError):
-            current = None
+        _ensure_default(cfg, dotted, default)
 
-        if current is None:
-            _set(cfg, dotted, default)
+    # Force GRPO toggles regardless of their values in the base PPO template.
+    _set(cfg, "algorithm.adv_estimator", "grpo")
+    _set(cfg, "actor_rollout_ref.actor.use_kl_loss", True)
+
+    _ensure_mapping(cfg, "reward_model")
+    _ensure_mapping(cfg, "reward_model.sandbox_fusion")
+    _ensure_mapping(cfg, "reward_model.reward_kwargs")
+
+    _ensure_default(cfg, "reward_model.enable", False)
+    _ensure_default(cfg, "reward_model.reward_manager", "naive")
+    _ensure_default(cfg, "reward_model.sandbox_fusion.url", None)
+    _ensure_default(cfg, "reward_model.sandbox_fusion.max_concurrent", 64)
+    _ensure_default(cfg, "reward_model.sandbox_fusion.memory_limit_mb", 1024)
+
+    # Force a rule-based reward path so Verl never attempts to load an HF RM.
+    _ensure_mapping(cfg, "custom_reward_function")
+    _set(cfg, "custom_reward_function.path", str(SWEBENCH_RULE_REWARD_PATH))
+    _set(cfg, "custom_reward_function.name", SWEBENCH_RULE_REWARD_FN)
 
 
 def _iter_override_items(
@@ -557,6 +592,7 @@ def _apply_training_hyperparameters(
 
     kl_coef = training_cfg.get("kl_coef")
     _set_cast("algorithm.kl_ctrl.kl_coef", kl_coef, float)
+    _set_cast("actor_rollout_ref.actor.kl_loss_coef", kl_coef, float)
     _set_cast("actor_rollout_ref.actor.policy_loss.ppo_kl_coef", kl_coef, float)
 
     target_kl = training_cfg.get("target_kl")
@@ -1123,4 +1159,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
