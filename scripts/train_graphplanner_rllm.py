@@ -2,7 +2,7 @@
 
 English summary
     Provides a thin CLI that prepares datasets, config overrides and agent/env
-    wiring before delegating to rLLM's PPO trainer.
+    wiring before delegating to rLLM's GRPO-capable trainer.
 """
 
 from __future__ import annotations
@@ -77,11 +77,52 @@ DEFAULT_PLANNER_MODEL_PATH = (REPO_ROOT / "models" / "Qwen3-14B").resolve()
 DEFAULT_CGM_MODEL_PATH = (REPO_ROOT / "models" / "CodeFuse-CGM").resolve()
 DEFAULT_TRAIN_DATASET_PATH = (REPO_ROOT / "datasets" / "r2e_gym" / "train.jsonl").resolve()
 
+SWEBENCH_RULE_REWARD_PATH = find_in_rllm("rllm", "rewards", "code_utils", "swebench.py")
+SWEBENCH_RULE_REWARD_FN = "swebench_check_correctness"
+
+
+_MODEL_PATH_FIELDS = {
+    "model_path",
+    "tokenizer_path",
+    "critic_model_path",
+    "critic_tokenizer_path",
+    "cgm_model_path",
+    "cgm_tokenizer_path",
+}
+
 
 def _resolve_optional_path(value: Path | str | None) -> Path | None:
     if value is None:
         return None
     return Path(value).expanduser().resolve()
+
+
+def _resolve_model_path(value: Path | str | None) -> str | None:
+    """Resolve model-related paths supporting absolute or repo-relative values."""
+
+    if value is None:
+        return None
+
+    raw_path = Path(value).expanduser()
+
+    if raw_path.is_absolute():
+        # ``Path.resolve`` canonicalises symlinks when the target exists but, on
+        # some shared filesystems, strict resolution can unexpectedly fail if a
+        # mounted path is only visible to remote workers.  We therefore only
+        # collapse the path when it can be confirmed locally, otherwise we keep
+        # the user's absolute string verbatim so it can still be interpreted on
+        # Ray workers.
+        return str(raw_path.resolve()) if raw_path.exists() else str(raw_path)
+
+    for base in (Path.cwd(), REPO_ROOT):
+        candidate = (base / raw_path).expanduser()
+        if candidate.exists():
+            return str(candidate.resolve())
+
+    # If we cannot resolve the path relative to known roots we return the raw
+    # string.  This allows callers to provide Hugging Face repository IDs or
+    # other identifiers that remote workers know how to resolve.
+    return str(value)
 
 
 def _absolutise_args(args: argparse.Namespace) -> None:
@@ -101,7 +142,8 @@ def _absolutise_args(args: argparse.Namespace) -> None:
         "config",
     ]:
         if hasattr(args, field):
-            resolved = _resolve_optional_path(getattr(args, field))
+            resolver = _resolve_model_path if field in _MODEL_PATH_FIELDS else _resolve_optional_path
+            resolved = resolver(getattr(args, field))
             if resolved is not None:
                 setattr(args, field, resolved)
 
@@ -133,7 +175,7 @@ def _collect_specified_cli_args(
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """解析命令行参数，支持模型/数据集/调度配置。"""
 
-    parser = argparse.ArgumentParser(description="Train Graph Planner agents with rLLM PPO")
+    parser = argparse.ArgumentParser(description="Train Graph Planner agents with rLLM GRPO")
     parser.add_argument(
         "--agent",
         choices=["planner", "cgm", "both"],
@@ -375,6 +417,57 @@ def _set(cfg: OmegaConf, key: str, value: Any) -> None:
         OmegaConf.update(cfg, key, _normalise_value(value), merge=True)
 
 
+def _ensure_mapping(cfg: OmegaConf, key: str) -> None:
+    """Ensure a nested mapping exists in the configuration."""
+
+    if _key_exists(cfg, key):
+        return
+    _set(cfg, key, {})
+
+
+def _ensure_default(cfg: OmegaConf, key: str, value: Any) -> None:
+    """Set ``key`` to ``value`` when the configuration does not provide it."""
+
+    try:
+        current = OmegaConf.select(cfg, key, throw_on_missing=True)
+    except (ConfigKeyError, AttributeError, ValueError):
+        current = None
+
+    if current is None:
+        _set(cfg, key, value)
+
+
+def _ensure_required_verl_flags(cfg: OmegaConf) -> None:
+    """Backfill Verl config so runs default to GRPO with rule-based rewards."""
+
+    required_defaults: dict[str, Any] = {
+        "algorithm.use_kl_in_reward": False,
+        "data.reward_fn_key": "data_source",
+    }
+
+    for dotted, default in required_defaults.items():
+        _ensure_default(cfg, dotted, default)
+
+    # Force GRPO toggles regardless of their values in the base PPO template.
+    _set(cfg, "algorithm.adv_estimator", "grpo")
+    _set(cfg, "actor_rollout_ref.actor.use_kl_loss", True)
+
+    _ensure_mapping(cfg, "reward_model")
+    _ensure_mapping(cfg, "reward_model.sandbox_fusion")
+    _ensure_mapping(cfg, "reward_model.reward_kwargs")
+
+    _ensure_default(cfg, "reward_model.enable", False)
+    _ensure_default(cfg, "reward_model.reward_manager", "naive")
+    _ensure_default(cfg, "reward_model.sandbox_fusion.url", None)
+    _ensure_default(cfg, "reward_model.sandbox_fusion.max_concurrent", 64)
+    _ensure_default(cfg, "reward_model.sandbox_fusion.memory_limit_mb", 1024)
+
+    # Force a rule-based reward path so Verl never attempts to load an HF RM.
+    _ensure_mapping(cfg, "custom_reward_function")
+    _set(cfg, "custom_reward_function.path", str(SWEBENCH_RULE_REWARD_PATH))
+    _set(cfg, "custom_reward_function.name", SWEBENCH_RULE_REWARD_FN)
+
+
 def _iter_override_items(
     data: Mapping[str, Any], prefix: str = ""
 ) -> Iterable[tuple[str, Any]]:
@@ -500,6 +593,7 @@ def _apply_training_hyperparameters(
 
     kl_coef = training_cfg.get("kl_coef")
     _set_cast("algorithm.kl_ctrl.kl_coef", kl_coef, float)
+    _set_cast("actor_rollout_ref.actor.kl_loss_coef", kl_coef, float)
     _set_cast("actor_rollout_ref.actor.policy_loss.ppo_kl_coef", kl_coef, float)
 
     target_kl = training_cfg.get("target_kl")
@@ -874,7 +968,7 @@ def _run_training(args: argparse.Namespace, *, run_index: int, total_runs: int) 
         key = "planner_model" if args.agent == "planner" else "cgm_model"
         final_run_cfg.setdefault("paths", {})[key] = str(default_model)
     else:
-        args.model_path = _resolve_optional_path(args.model_path)
+        args.model_path = _resolve_model_path(args.model_path)
 
     output_base = Path(
         logging_cfg.get("output_dir")
@@ -931,6 +1025,8 @@ def _run_training(args: argparse.Namespace, *, run_index: int, total_runs: int) 
         overrides=args.overrides,
         unknown=getattr(args, "_unknown_overrides", None),
     )
+
+    _ensure_required_verl_flags(cfg)
 
     _apply_training_hyperparameters(cfg, final_run_cfg.get("training"))
 
@@ -1064,4 +1160,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
