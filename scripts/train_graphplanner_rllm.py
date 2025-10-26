@@ -391,6 +391,20 @@ def _key_exists(cfg: OmegaConf, key: str) -> bool:
     return True
 
 
+def _get_int(cfg: OmegaConf, key: str) -> int | None:
+    """Safely fetch an integer value from the OmegaConf mapping."""
+
+    if not _key_exists(cfg, key):
+        return None
+    value = OmegaConf.select(cfg, key)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _normalise_value(value: Any) -> Any:
     """将 ``Path`` 等类型转换成 YAML 友好的值。"""
 
@@ -472,6 +486,45 @@ def _ensure_required_verl_flags(cfg: OmegaConf) -> None:
     _set(cfg, "custom_reward_function.path", str(SWEBENCH_RULE_REWARD_PATH))
     _set(cfg, "custom_reward_function.name", SWEBENCH_RULE_REWARD_FN)
 
+
+def _ensure_batch_size_defaults(cfg: OmegaConf) -> None:
+    """Ensure PPO micro/mini batch sizes never conflict with configured train batch."""
+
+    train_batch = _get_int(cfg, "data.train_batch_size")
+    if not train_batch or train_batch <= 0:
+        return
+
+    actor_mini = _get_int(cfg, "actor_rollout_ref.actor.ppo_mini_batch_size")
+    if actor_mini is None or actor_mini > train_batch:
+        _set(cfg, "actor_rollout_ref.actor.ppo_mini_batch_size", train_batch)
+
+    critic_mini = _get_int(cfg, "critic.ppo_mini_batch_size")
+    if critic_mini is None or critic_mini > train_batch:
+        _set(cfg, "critic.ppo_mini_batch_size", train_batch)
+
+    def _ensure_micro(per_gpu_key: str, global_key: str | None = None) -> None:
+        per_gpu_val = _get_int(cfg, per_gpu_key)
+        global_val = _get_int(cfg, global_key) if global_key else None
+        if per_gpu_val is None and global_val is None:
+            fallback = min(train_batch, _get_int(cfg, "actor_rollout_ref.actor.ppo_mini_batch_size") or train_batch)
+            _set(cfg, per_gpu_key, max(1, fallback))
+
+    _ensure_micro("actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu", "actor_rollout_ref.actor.ppo_micro_batch_size")
+    _ensure_micro("critic.ppo_micro_batch_size_per_gpu", "critic.ppo_micro_batch_size")
+
+    # Reference and rollout share the same log-prob batch controls; prefer actor micro as baseline.
+    log_prob_micro = _get_int(cfg, "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu")
+    for key, legacy in [
+        ("actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu", "actor_rollout_ref.ref.log_prob_micro_batch_size"),
+        (
+            "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu",
+            "actor_rollout_ref.rollout.log_prob_micro_batch_size",
+        ),
+    ]:
+        per_gpu_val = _get_int(cfg, key)
+        legacy_val = _get_int(cfg, legacy)
+        if per_gpu_val is None and legacy_val is None:
+            _set(cfg, key, max(1, log_prob_micro or train_batch))
 
 def _iter_override_items(
     data: Mapping[str, Any], prefix: str = ""
@@ -560,6 +613,9 @@ def _apply_training_hyperparameters(
             return
         _set(cfg, path, cast(value) if cast else value)
 
+    train_batch = training_cfg.get("train_batch_size")
+    _set_cast("data.train_batch_size", train_batch, int)
+
     _set_cast("trainer.gradient_accumulation_steps", training_cfg.get("grad_accum_steps"), int)
 
     lr = training_cfg.get("lr")
@@ -603,6 +659,31 @@ def _apply_training_hyperparameters(
 
     target_kl = training_cfg.get("target_kl")
     _set_cast("algorithm.kl_ctrl.target_kl", target_kl, float)
+
+    ppo_mini = training_cfg.get("ppo_mini_batch_size")
+    _set_cast("actor_rollout_ref.actor.ppo_mini_batch_size", ppo_mini, int)
+    _set_cast("critic.ppo_mini_batch_size", ppo_mini, int)
+
+    actor_micro = training_cfg.get("ppo_micro_batch_size_per_gpu")
+    if actor_micro is None:
+        actor_micro = training_cfg.get("ppo_micro_batch_size")
+    _set_cast("actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu", actor_micro, int)
+    _set_cast("critic.ppo_micro_batch_size_per_gpu", actor_micro, int)
+
+    ref_micro = training_cfg.get("ref_log_prob_micro_batch_size_per_gpu")
+    if ref_micro is None:
+        ref_micro = training_cfg.get("ref_log_prob_micro_batch_size")
+    rollout_micro = training_cfg.get("rollout_log_prob_micro_batch_size_per_gpu")
+    if rollout_micro is None:
+        rollout_micro = training_cfg.get("rollout_log_prob_micro_batch_size")
+
+    if ref_micro is None:
+        ref_micro = actor_micro
+    if rollout_micro is None:
+        rollout_micro = actor_micro
+
+    _set_cast("actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu", ref_micro, int)
+    _set_cast("actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu", rollout_micro, int)
 
 
 def _apply_model_overrides(cfg: OmegaConf, args: argparse.Namespace) -> None:
@@ -1050,6 +1131,7 @@ def _run_training(args: argparse.Namespace, *, run_index: int, total_runs: int) 
     if args.val_batch_size is not None:
         _set(cfg, "data.val_batch_size", int(args.val_batch_size))
     _set(cfg, "data.shuffle", False)
+    _ensure_batch_size_defaults(cfg)
     _set(cfg, "io.strict_planner_io", bool(args.strict_planner_io))
 
     if args.project_name:

@@ -53,6 +53,7 @@ from scripts.train_graphplanner_rllm import (  # noqa: E402
     _apply_training_hyperparameters,
     _apply_verl_overrides,
     _configure_agent_env,
+    _ensure_batch_size_defaults,
     _ensure_required_verl_flags,
     _load_config,
     _print_run_summary,
@@ -292,6 +293,7 @@ def main() -> None:
     _set(cfg, "data.train_batch_size", int(args.batch_size))
     _set(cfg, "data.val_batch_size", int(args.batch_size))
     _set(cfg, "data.shuffle", False)
+    _ensure_batch_size_defaults(cfg)
 
     if args.project_name:
         _set(cfg, "trainer.project_name", args.project_name)
