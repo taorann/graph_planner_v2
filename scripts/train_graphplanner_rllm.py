@@ -405,6 +405,17 @@ def _get_int(cfg: OmegaConf, key: str) -> int | None:
         return None
 
 
+def _coerce_int(value: Any) -> int | None:
+    """Best-effort conversion of arbitrary values to integers."""
+
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _normalise_value(value: Any) -> Any:
     """将 ``Path`` 等类型转换成 YAML 友好的值。"""
 
@@ -525,6 +536,20 @@ def _ensure_batch_size_defaults(cfg: OmegaConf) -> None:
         legacy_val = _get_int(cfg, legacy)
         if per_gpu_val is None and legacy_val is None:
             _set(cfg, key, max(1, log_prob_micro or train_batch))
+
+
+def _resolve_effective_batch_size(requested: int | None, dataset_rows: int) -> tuple[int, bool]:
+    """Return a batch size that will not drop every sample from the dataset."""
+
+    if dataset_rows <= 0:
+        raise ValueError("Dataset must contain at least one row for training")
+
+    if requested is None or requested <= 0:
+        return max(1, dataset_rows), False
+
+    effective = max(1, min(requested, dataset_rows))
+    return effective, effective != requested
+
 
 def _iter_override_items(
     data: Mapping[str, Any], prefix: str = ""
@@ -1127,7 +1152,23 @@ def _run_training(args: argparse.Namespace, *, run_index: int, total_runs: int) 
     else:
         effective_val_path = val_path
     _set(cfg, "data.val_files", str(effective_val_path))
-    _set(cfg, "data.train_batch_size", int(args.train_batch_size))
+
+    requested_train_batch = _coerce_int(getattr(args, "train_batch_size", None))
+    if requested_train_batch is None:
+        requested_train_batch = _coerce_int(final_run_cfg.get("training", {}).get("train_batch_size"))
+
+    effective_train_batch, capped_batch = _resolve_effective_batch_size(requested_train_batch, train_rows)
+    if capped_batch:
+        LOGGER.warning(
+            "Requested train batch size %s exceeds dataset size (%s); capping to %s to avoid empty dataloader.",
+            requested_train_batch,
+            train_rows,
+            effective_train_batch,
+        )
+
+    args.train_batch_size = effective_train_batch
+    final_run_cfg.setdefault("training", {})["train_batch_size"] = effective_train_batch
+    _set(cfg, "data.train_batch_size", effective_train_batch)
     if args.val_batch_size is not None:
         _set(cfg, "data.val_batch_size", int(args.val_batch_size))
     _set(cfg, "data.shuffle", False)
@@ -1149,6 +1190,7 @@ def _run_training(args: argparse.Namespace, *, run_index: int, total_runs: int) 
     output_dir = _apply_training_overrides(cfg, args)
     _apply_logging_overrides(cfg, args)
     _apply_verl_overrides(cfg, final_run_cfg.get("verl_overrides"))
+    serialise_resolved_config(final_run_cfg, resolved_cfg_path)
     agent_cls, agent_args, env_cls, env_args = _configure_agent_env(cfg, args)
 
     if val_path is None:

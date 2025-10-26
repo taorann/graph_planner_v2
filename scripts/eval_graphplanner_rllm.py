@@ -52,6 +52,7 @@ from scripts.train_graphplanner_rllm import (  # noqa: E402
     _apply_parallel_overrides,
     _apply_training_hyperparameters,
     _apply_verl_overrides,
+    _coerce_int,
     _configure_agent_env,
     _ensure_batch_size_defaults,
     _ensure_required_verl_flags,
@@ -60,6 +61,7 @@ from scripts.train_graphplanner_rllm import (  # noqa: E402
     _sanity_checks,
     _seed_everything,
     _set,
+    _resolve_effective_batch_size,
     _prepare_container_images,
     _validate_parallel_config,
     _resolve_model_path,
@@ -290,8 +292,21 @@ def main() -> None:
 
     _set(cfg, "data.train_files", str(eval_path))
     _set(cfg, "data.val_files", str(eval_path))
-    _set(cfg, "data.train_batch_size", int(args.batch_size))
-    _set(cfg, "data.val_batch_size", int(args.batch_size))
+
+    requested_batch = _coerce_int(getattr(args, "batch_size", None))
+    effective_batch, capped_batch = _resolve_effective_batch_size(requested_batch, sample_count)
+    if capped_batch:
+        LOGGER.warning(
+            "Requested evaluation batch size %s exceeds dataset size (%s); capping to %s to avoid empty dataloader.",
+            requested_batch,
+            sample_count,
+            effective_batch,
+        )
+
+    args.batch_size = effective_batch
+    final_run_cfg.setdefault("training", {})["train_batch_size"] = effective_batch
+    _set(cfg, "data.train_batch_size", effective_batch)
+    _set(cfg, "data.val_batch_size", effective_batch)
     _set(cfg, "data.shuffle", False)
     _ensure_batch_size_defaults(cfg)
 
@@ -316,6 +331,7 @@ def main() -> None:
     _apply_parallel_overrides(cfg, args)
     _apply_logging_overrides(cfg, args)
     _apply_verl_overrides(cfg, final_run_cfg.get("verl_overrides"))
+    serialise_resolved_config(final_run_cfg, resolved_cfg_path)
 
     agent_cls, agent_args, env_cls, env_args = _configure_agent_env(cfg, args)
 
