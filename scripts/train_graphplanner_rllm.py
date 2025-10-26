@@ -442,6 +442,7 @@ def _ensure_required_verl_flags(cfg: OmegaConf) -> None:
 
     required_defaults: dict[str, Any] = {
         "algorithm.use_kl_in_reward": False,
+        "data.reward_fn_key": "data_source",
     }
 
     for dotted, default in required_defaults.items():
