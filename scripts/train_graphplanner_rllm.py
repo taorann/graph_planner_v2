@@ -2,7 +2,7 @@
 
 English summary
     Provides a thin CLI that prepares datasets, config overrides and agent/env
-    wiring before delegating to rLLM's PPO trainer.
+    wiring before delegating to rLLM's GRPO-capable trainer.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import copy
 import logging
+import math
 import os
 import sys
 import random
@@ -19,6 +20,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Tuple
 
 import numpy as np
+from hydra import compose, initialize_config_dir
+from hydra.core.global_hydra import GlobalHydra
 from omegaconf import OmegaConf, open_dict
 from omegaconf.errors import ConfigKeyError
 
@@ -77,11 +80,52 @@ DEFAULT_PLANNER_MODEL_PATH = (REPO_ROOT / "models" / "Qwen3-14B").resolve()
 DEFAULT_CGM_MODEL_PATH = (REPO_ROOT / "models" / "CodeFuse-CGM").resolve()
 DEFAULT_TRAIN_DATASET_PATH = (REPO_ROOT / "datasets" / "r2e_gym" / "train.jsonl").resolve()
 
+SWEBENCH_RULE_REWARD_PATH = find_in_rllm("rllm", "rewards", "code_utils", "swebench.py")
+SWEBENCH_RULE_REWARD_FN = "swebench_check_correctness"
+
+
+_MODEL_PATH_FIELDS = {
+    "model_path",
+    "tokenizer_path",
+    "critic_model_path",
+    "critic_tokenizer_path",
+    "cgm_model_path",
+    "cgm_tokenizer_path",
+}
+
 
 def _resolve_optional_path(value: Path | str | None) -> Path | None:
     if value is None:
         return None
     return Path(value).expanduser().resolve()
+
+
+def _resolve_model_path(value: Path | str | None) -> str | None:
+    """Resolve model-related paths supporting absolute or repo-relative values."""
+
+    if value is None:
+        return None
+
+    raw_path = Path(value).expanduser()
+
+    if raw_path.is_absolute():
+        # ``Path.resolve`` canonicalises symlinks when the target exists but, on
+        # some shared filesystems, strict resolution can unexpectedly fail if a
+        # mounted path is only visible to remote workers.  We therefore only
+        # collapse the path when it can be confirmed locally, otherwise we keep
+        # the user's absolute string verbatim so it can still be interpreted on
+        # Ray workers.
+        return str(raw_path.resolve()) if raw_path.exists() else str(raw_path)
+
+    for base in (Path.cwd(), REPO_ROOT):
+        candidate = (base / raw_path).expanduser()
+        if candidate.exists():
+            return str(candidate.resolve())
+
+    # If we cannot resolve the path relative to known roots we return the raw
+    # string.  This allows callers to provide Hugging Face repository IDs or
+    # other identifiers that remote workers know how to resolve.
+    return str(value)
 
 
 def _absolutise_args(args: argparse.Namespace) -> None:
@@ -101,7 +145,8 @@ def _absolutise_args(args: argparse.Namespace) -> None:
         "config",
     ]:
         if hasattr(args, field):
-            resolved = _resolve_optional_path(getattr(args, field))
+            resolver = _resolve_model_path if field in _MODEL_PATH_FIELDS else _resolve_optional_path
+            resolved = resolver(getattr(args, field))
             if resolved is not None:
                 setattr(args, field, resolved)
 
@@ -133,7 +178,7 @@ def _collect_specified_cli_args(
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """解析命令行参数，支持模型/数据集/调度配置。"""
 
-    parser = argparse.ArgumentParser(description="Train Graph Planner agents with rLLM PPO")
+    parser = argparse.ArgumentParser(description="Train Graph Planner agents with rLLM GRPO")
     parser.add_argument(
         "--agent",
         choices=["planner", "cgm", "both"],
@@ -316,8 +361,6 @@ def _load_config(
     """从 YAML 文件加载 ``OmegaConf`` 配置并应用 dotlist 覆盖。"""
 
     resolved = path.resolve()
-    cfg = OmegaConf.load(str(resolved))
-    OmegaConf.set_struct(cfg, False)
 
     merged: list[str] = []
     for values in (overrides or [], unknown or []):
@@ -330,8 +373,11 @@ def _load_config(
             if cleaned:
                 merged.append(cleaned)
 
-    if merged:
-        cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(merged))
+    if GlobalHydra.instance().is_initialized():
+        GlobalHydra.instance().clear()
+    with initialize_config_dir(version_base=None, config_dir=str(resolved.parent)):
+        cfg = compose(config_name=resolved.stem, overrides=merged)
+    OmegaConf.set_struct(cfg, False)
     print(f"[CFG] Applied {len(merged)} override(s)")
     return cfg
 
@@ -344,6 +390,31 @@ def _key_exists(cfg: OmegaConf, key: str) -> bool:
     except (ConfigKeyError, AttributeError, ValueError):
         return False
     return True
+
+
+def _get_int(cfg: OmegaConf, key: str) -> int | None:
+    """Safely fetch an integer value from the OmegaConf mapping."""
+
+    if not _key_exists(cfg, key):
+        return None
+    value = OmegaConf.select(cfg, key)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_int(value: Any) -> int | None:
+    """Best-effort conversion of arbitrary values to integers."""
+
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalise_value(value: Any) -> Any:
@@ -373,6 +444,173 @@ def _set(cfg: OmegaConf, key: str, value: Any) -> None:
         return
     with open_dict(cfg):
         OmegaConf.update(cfg, key, _normalise_value(value), merge=True)
+
+
+def _update_dict_path(mapping: Dict[str, Any], dotted: str, value: Any) -> None:
+    """Ensure ``mapping`` mirrors an OmegaConf dotted path assignment."""
+
+    keys = dotted.split(".")
+    cursor: Dict[str, Any] = mapping
+    for key in keys[:-1]:
+        cursor = cursor.setdefault(key, {})  # type: ignore[assignment]
+    cursor[keys[-1]] = value
+
+
+def _ensure_mapping(cfg: OmegaConf, key: str) -> None:
+    """Ensure a nested mapping exists in the configuration."""
+
+    if _key_exists(cfg, key):
+        return
+    _set(cfg, key, {})
+
+
+def _ensure_default(cfg: OmegaConf, key: str, value: Any) -> None:
+    """Set ``key`` to ``value`` when the configuration does not provide it."""
+
+    try:
+        current = OmegaConf.select(cfg, key, throw_on_missing=True)
+    except (ConfigKeyError, AttributeError, ValueError):
+        current = None
+
+    if current is None:
+        _set(cfg, key, value)
+
+
+def _ensure_required_verl_flags(cfg: OmegaConf) -> None:
+    """Backfill Verl config so runs default to GRPO with rule-based rewards."""
+
+    required_defaults: dict[str, Any] = {
+        "algorithm.use_kl_in_reward": False,
+        "data.reward_fn_key": "data_source",
+        "actor_rollout_ref.hybrid_engine": True,
+        "actor_rollout_ref.rollout.mode": "async",
+    }
+
+    for dotted, default in required_defaults.items():
+        _ensure_default(cfg, dotted, default)
+
+    # Force GRPO toggles regardless of their values in the base PPO template.
+    _set(cfg, "algorithm.adv_estimator", "grpo")
+    _set(cfg, "actor_rollout_ref.actor.use_kl_loss", True)
+
+    _ensure_mapping(cfg, "reward_model")
+    _ensure_mapping(cfg, "reward_model.sandbox_fusion")
+    _ensure_mapping(cfg, "reward_model.reward_kwargs")
+
+    _ensure_default(cfg, "reward_model.enable", False)
+    _ensure_default(cfg, "reward_model.reward_manager", "naive")
+    _ensure_default(cfg, "reward_model.sandbox_fusion.url", None)
+    _ensure_default(cfg, "reward_model.sandbox_fusion.max_concurrent", 64)
+    _ensure_default(cfg, "reward_model.sandbox_fusion.memory_limit_mb", 1024)
+
+    # Force a rule-based reward path so Verl never attempts to load an HF RM.
+    _ensure_mapping(cfg, "custom_reward_function")
+    _set(cfg, "custom_reward_function.path", str(SWEBENCH_RULE_REWARD_PATH))
+    _set(cfg, "custom_reward_function.name", SWEBENCH_RULE_REWARD_FN)
+
+
+def _ensure_batch_size_defaults(cfg: OmegaConf) -> None:
+    """Ensure PPO micro/mini batch sizes never conflict with configured train batch."""
+
+    train_batch = _get_int(cfg, "data.train_batch_size")
+    if not train_batch or train_batch <= 0:
+        return
+
+    actor_mini = _get_int(cfg, "actor_rollout_ref.actor.ppo_mini_batch_size")
+    if actor_mini is None or actor_mini > train_batch:
+        _set(cfg, "actor_rollout_ref.actor.ppo_mini_batch_size", train_batch)
+
+    critic_mini = _get_int(cfg, "critic.ppo_mini_batch_size")
+    if critic_mini is None or critic_mini > train_batch:
+        _set(cfg, "critic.ppo_mini_batch_size", train_batch)
+
+    def _ensure_micro(per_gpu_key: str, global_key: str | None = None) -> None:
+        per_gpu_val = _get_int(cfg, per_gpu_key)
+        global_val = _get_int(cfg, global_key) if global_key else None
+        if per_gpu_val is None and global_val is None:
+            fallback = min(train_batch, _get_int(cfg, "actor_rollout_ref.actor.ppo_mini_batch_size") or train_batch)
+            _set(cfg, per_gpu_key, max(1, fallback))
+
+    _ensure_micro("actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu", "actor_rollout_ref.actor.ppo_micro_batch_size")
+    _ensure_micro("critic.ppo_micro_batch_size_per_gpu", "critic.ppo_micro_batch_size")
+
+    # Reference and rollout share the same log-prob batch controls; prefer actor micro as baseline.
+    log_prob_micro = _get_int(cfg, "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu")
+    for key, legacy in [
+        ("actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu", "actor_rollout_ref.ref.log_prob_micro_batch_size"),
+        (
+            "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu",
+            "actor_rollout_ref.rollout.log_prob_micro_batch_size",
+        ),
+    ]:
+        per_gpu_val = _get_int(cfg, key)
+        legacy_val = _get_int(cfg, legacy)
+        if per_gpu_val is None and legacy_val is None:
+            _set(cfg, key, max(1, log_prob_micro or train_batch))
+
+
+def _ensure_rollout_batch_alignment(cfg: OmegaConf) -> int | None:
+    """Guarantee the effective GRPO train batch divides cleanly across GPUs."""
+
+    train_batch = _get_int(cfg, "data.train_batch_size")
+    if not train_batch or train_batch <= 0:
+        return None
+
+    rollout_n = _get_int(cfg, "actor_rollout_ref.rollout.n") or 1
+    n_gpus_per_node = max(1, _get_int(cfg, "trainer.n_gpus_per_node") or 1)
+    nnodes = max(1, _get_int(cfg, "trainer.nnodes") or 1)
+    total_gpus = max(1, n_gpus_per_node * nnodes)
+
+    actor_strategy = None
+    if _key_exists(cfg, "actor_rollout_ref.actor.strategy"):
+        actor_strategy = OmegaConf.select(cfg, "actor_rollout_ref.actor.strategy")
+
+    minimal_batch = total_gpus
+    if actor_strategy == "megatron":
+        tensor_mp = max(1, _get_int(cfg, "actor_rollout_ref.actor.megatron.tensor_model_parallel_size") or 1)
+        pipeline_mp = max(1, _get_int(cfg, "actor_rollout_ref.actor.megatron.pipeline_model_parallel_size") or 1)
+        context_mp = max(1, _get_int(cfg, "actor_rollout_ref.actor.megatron.context_parallel_size") or 1)
+        model_parallel = max(1, tensor_mp * pipeline_mp)
+        data_parallel = max(1, total_gpus // max(1, model_parallel * context_mp))
+        micro = _get_int(cfg, "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu") or 1
+        minimal_batch = max(1, data_parallel * micro)
+
+    current_real = train_batch * max(1, rollout_n)
+    if current_real % minimal_batch == 0:
+        return None
+
+    required_step = max(1, minimal_batch // math.gcd(train_batch, minimal_batch))
+    base_n = max(1, rollout_n)
+    if base_n % required_step == 0:
+        new_n = base_n
+    else:
+        new_n = ((base_n + required_step - 1) // required_step) * required_step
+
+    if new_n == base_n:
+        return None
+
+    LOGGER.warning(
+        "real_train_batch_size (%s) is not divisible by minimal batch %s; increasing rollout replicas from %s to %s.",
+        current_real,
+        minimal_batch,
+        base_n,
+        new_n,
+    )
+    _set(cfg, "actor_rollout_ref.rollout.n", int(new_n))
+    return int(new_n)
+
+
+def _resolve_effective_batch_size(requested: int | None, dataset_rows: int) -> tuple[int, bool]:
+    """Return a batch size that will not drop every sample from the dataset."""
+
+    if dataset_rows <= 0:
+        raise ValueError("Dataset must contain at least one row for training")
+
+    if requested is None or requested <= 0:
+        return max(1, dataset_rows), False
+
+    effective = max(1, min(requested, dataset_rows))
+    return effective, effective != requested
 
 
 def _iter_override_items(
@@ -462,6 +700,9 @@ def _apply_training_hyperparameters(
             return
         _set(cfg, path, cast(value) if cast else value)
 
+    train_batch = training_cfg.get("train_batch_size")
+    _set_cast("data.train_batch_size", train_batch, int)
+
     _set_cast("trainer.gradient_accumulation_steps", training_cfg.get("grad_accum_steps"), int)
 
     lr = training_cfg.get("lr")
@@ -500,10 +741,36 @@ def _apply_training_hyperparameters(
 
     kl_coef = training_cfg.get("kl_coef")
     _set_cast("algorithm.kl_ctrl.kl_coef", kl_coef, float)
+    _set_cast("actor_rollout_ref.actor.kl_loss_coef", kl_coef, float)
     _set_cast("actor_rollout_ref.actor.policy_loss.ppo_kl_coef", kl_coef, float)
 
     target_kl = training_cfg.get("target_kl")
     _set_cast("algorithm.kl_ctrl.target_kl", target_kl, float)
+
+    ppo_mini = training_cfg.get("ppo_mini_batch_size")
+    _set_cast("actor_rollout_ref.actor.ppo_mini_batch_size", ppo_mini, int)
+    _set_cast("critic.ppo_mini_batch_size", ppo_mini, int)
+
+    actor_micro = training_cfg.get("ppo_micro_batch_size_per_gpu")
+    if actor_micro is None:
+        actor_micro = training_cfg.get("ppo_micro_batch_size")
+    _set_cast("actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu", actor_micro, int)
+    _set_cast("critic.ppo_micro_batch_size_per_gpu", actor_micro, int)
+
+    ref_micro = training_cfg.get("ref_log_prob_micro_batch_size_per_gpu")
+    if ref_micro is None:
+        ref_micro = training_cfg.get("ref_log_prob_micro_batch_size")
+    rollout_micro = training_cfg.get("rollout_log_prob_micro_batch_size_per_gpu")
+    if rollout_micro is None:
+        rollout_micro = training_cfg.get("rollout_log_prob_micro_batch_size")
+
+    if ref_micro is None:
+        ref_micro = actor_micro
+    if rollout_micro is None:
+        rollout_micro = actor_micro
+
+    _set_cast("actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu", ref_micro, int)
+    _set_cast("actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu", rollout_micro, int)
 
 
 def _apply_model_overrides(cfg: OmegaConf, args: argparse.Namespace) -> None:
@@ -874,7 +1141,7 @@ def _run_training(args: argparse.Namespace, *, run_index: int, total_runs: int) 
         key = "planner_model" if args.agent == "planner" else "cgm_model"
         final_run_cfg.setdefault("paths", {})[key] = str(default_model)
     else:
-        args.model_path = _resolve_optional_path(args.model_path)
+        args.model_path = _resolve_model_path(args.model_path)
 
     output_base = Path(
         logging_cfg.get("output_dir")
@@ -932,6 +1199,9 @@ def _run_training(args: argparse.Namespace, *, run_index: int, total_runs: int) 
         unknown=getattr(args, "_unknown_overrides", None),
     )
 
+    _ensure_required_verl_flags(cfg)
+    _apply_verl_overrides(cfg, final_run_cfg.get("verl_overrides"))
+
     _apply_training_hyperparameters(cfg, final_run_cfg.get("training"))
 
     _set(cfg, "data.train_files", str(train_path))
@@ -945,10 +1215,27 @@ def _run_training(args: argparse.Namespace, *, run_index: int, total_runs: int) 
     else:
         effective_val_path = val_path
     _set(cfg, "data.val_files", str(effective_val_path))
-    _set(cfg, "data.train_batch_size", int(args.train_batch_size))
+
+    requested_train_batch = _coerce_int(getattr(args, "train_batch_size", None))
+    if requested_train_batch is None:
+        requested_train_batch = _coerce_int(final_run_cfg.get("training", {}).get("train_batch_size"))
+
+    effective_train_batch, capped_batch = _resolve_effective_batch_size(requested_train_batch, train_rows)
+    if capped_batch:
+        LOGGER.warning(
+            "Requested train batch size %s exceeds dataset size (%s); capping to %s to avoid empty dataloader.",
+            requested_train_batch,
+            train_rows,
+            effective_train_batch,
+        )
+
+    args.train_batch_size = effective_train_batch
+    final_run_cfg.setdefault("training", {})["train_batch_size"] = effective_train_batch
+    _set(cfg, "data.train_batch_size", effective_train_batch)
     if args.val_batch_size is not None:
         _set(cfg, "data.val_batch_size", int(args.val_batch_size))
     _set(cfg, "data.shuffle", False)
+    _ensure_batch_size_defaults(cfg)
     _set(cfg, "io.strict_planner_io", bool(args.strict_planner_io))
 
     if args.project_name:
@@ -959,13 +1246,22 @@ def _run_training(args: argparse.Namespace, *, run_index: int, total_runs: int) 
     _set(cfg, "trainer.total_epochs", int(args.total_epochs))
     if args.total_steps:
         _set(cfg, "trainer.total_training_steps", int(args.total_steps))
-    _set(cfg, "trainer.n_gpus_per_node", int(args.num_gpus))
+    gpu_count = int(args.num_gpus)
+    _set(cfg, "trainer.n_gpus_per_node", gpu_count)
+    final_run_cfg.setdefault("verl_overrides", {}).setdefault("trainer", {})[
+        "n_gpus_per_node"
+    ] = gpu_count
 
     _apply_model_overrides(cfg, args)
     _apply_parallel_overrides(cfg, args)
     output_dir = _apply_training_overrides(cfg, args)
     _apply_logging_overrides(cfg, args)
-    _apply_verl_overrides(cfg, final_run_cfg.get("verl_overrides"))
+    rollout_adjustment = _ensure_rollout_batch_alignment(cfg)
+    if rollout_adjustment is not None:
+        args.rollout_replicas = rollout_adjustment
+        overrides = final_run_cfg.setdefault("verl_overrides", {})
+        _update_dict_path(overrides, "actor_rollout_ref.rollout.n", rollout_adjustment)
+    serialise_resolved_config(final_run_cfg, resolved_cfg_path)
     agent_cls, agent_args, env_cls, env_args = _configure_agent_env(cfg, args)
 
     if val_path is None:
@@ -1064,4 +1360,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

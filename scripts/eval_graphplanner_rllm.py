@@ -1,7 +1,7 @@
 """评估 Graph Planner/CGM 代理在 rLLM 上的推理表现（仅验证，不更新参数）。
 
 English summary
-    Runs the rLLM PPO pipeline in validation-only mode so we can collect
+    Runs the rLLM GRPO pipeline in validation-only mode so we can collect
     pass@k, success rate, and trajectory statistics without performing any
     optimisation steps.
 """
@@ -52,15 +52,21 @@ from scripts.train_graphplanner_rllm import (  # noqa: E402
     _apply_parallel_overrides,
     _apply_training_hyperparameters,
     _apply_verl_overrides,
+    _coerce_int,
     _configure_agent_env,
+    _ensure_batch_size_defaults,
+    _ensure_rollout_batch_alignment,
+    _ensure_required_verl_flags,
+    _update_dict_path,
     _load_config,
     _print_run_summary,
     _sanity_checks,
     _seed_everything,
     _set,
+    _resolve_effective_batch_size,
     _prepare_container_images,
     _validate_parallel_config,
-    _resolve_optional_path,
+    _resolve_model_path,
 )
 
 
@@ -87,7 +93,7 @@ def _collect_specified_cli_args(
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Evaluate Graph Planner agents with rLLM (validation only)"
+        description="Evaluate Graph Planner agents with rLLM GRPO (validation only)"
     )
     parser.add_argument("--agent", choices=["planner", "cgm"], default="planner")
     parser.add_argument(
@@ -234,7 +240,7 @@ def main() -> None:
         key = "planner_model" if args.agent == "planner" else "cgm_model"
         final_run_cfg.setdefault("paths", {})[key] = str(default_model)
     else:
-        args.model_path = _resolve_optional_path(args.model_path)
+        args.model_path = _resolve_model_path(args.model_path)
 
     output_base = Path(
         final_run_cfg.get("logging", {}).get("output_dir")
@@ -282,20 +288,41 @@ def main() -> None:
         unknown=getattr(args, "_unknown_overrides", None),
     )
 
+    _ensure_required_verl_flags(cfg)
+    _apply_verl_overrides(cfg, final_run_cfg.get("verl_overrides"))
+
     _apply_training_hyperparameters(cfg, final_run_cfg.get("training"))
 
     _set(cfg, "data.train_files", str(eval_path))
     _set(cfg, "data.val_files", str(eval_path))
-    _set(cfg, "data.train_batch_size", int(args.batch_size))
-    _set(cfg, "data.val_batch_size", int(args.batch_size))
+
+    requested_batch = _coerce_int(getattr(args, "batch_size", None))
+    effective_batch, capped_batch = _resolve_effective_batch_size(requested_batch, sample_count)
+    if capped_batch:
+        LOGGER.warning(
+            "Requested evaluation batch size %s exceeds dataset size (%s); capping to %s to avoid empty dataloader.",
+            requested_batch,
+            sample_count,
+            effective_batch,
+        )
+
+    args.batch_size = effective_batch
+    final_run_cfg.setdefault("training", {})["train_batch_size"] = effective_batch
+    _set(cfg, "data.train_batch_size", effective_batch)
+    _set(cfg, "data.val_batch_size", effective_batch)
     _set(cfg, "data.shuffle", False)
+    _ensure_batch_size_defaults(cfg)
 
     if args.project_name:
         _set(cfg, "trainer.project_name", args.project_name)
     if args.experiment_name:
         _set(cfg, "trainer.experiment_name", args.experiment_name)
 
-    _set(cfg, "trainer.n_gpus_per_node", int(args.num_gpus))
+    gpu_count = int(args.num_gpus)
+    _set(cfg, "trainer.n_gpus_per_node", gpu_count)
+    final_run_cfg.setdefault("verl_overrides", {}).setdefault("trainer", {})[
+        "n_gpus_per_node"
+    ] = gpu_count
     _set(cfg, "trainer.total_epochs", 0)
     _set(cfg, "trainer.total_training_steps", 0)
     _set(cfg, "trainer.val_before_train", True)
@@ -310,7 +337,12 @@ def main() -> None:
     _apply_model_overrides(cfg, args)
     _apply_parallel_overrides(cfg, args)
     _apply_logging_overrides(cfg, args)
-    _apply_verl_overrides(cfg, final_run_cfg.get("verl_overrides"))
+    rollout_adjustment = _ensure_rollout_batch_alignment(cfg)
+    if rollout_adjustment is not None:
+        args.rollout_replicas = rollout_adjustment
+        overrides = final_run_cfg.setdefault("verl_overrides", {})
+        _update_dict_path(overrides, "actor_rollout_ref.rollout.n", rollout_adjustment)
+    serialise_resolved_config(final_run_cfg, resolved_cfg_path)
 
     agent_cls, agent_args, env_cls, env_args = _configure_agent_env(cfg, args)
 
