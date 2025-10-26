@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import copy
 import logging
+import math
 import os
 import sys
 import random
@@ -445,6 +446,16 @@ def _set(cfg: OmegaConf, key: str, value: Any) -> None:
         OmegaConf.update(cfg, key, _normalise_value(value), merge=True)
 
 
+def _update_dict_path(mapping: Dict[str, Any], dotted: str, value: Any) -> None:
+    """Ensure ``mapping`` mirrors an OmegaConf dotted path assignment."""
+
+    keys = dotted.split(".")
+    cursor: Dict[str, Any] = mapping
+    for key in keys[:-1]:
+        cursor = cursor.setdefault(key, {})  # type: ignore[assignment]
+    cursor[keys[-1]] = value
+
+
 def _ensure_mapping(cfg: OmegaConf, key: str) -> None:
     """Ensure a nested mapping exists in the configuration."""
 
@@ -536,6 +547,57 @@ def _ensure_batch_size_defaults(cfg: OmegaConf) -> None:
         legacy_val = _get_int(cfg, legacy)
         if per_gpu_val is None and legacy_val is None:
             _set(cfg, key, max(1, log_prob_micro or train_batch))
+
+
+def _ensure_rollout_batch_alignment(cfg: OmegaConf) -> int | None:
+    """Guarantee the effective GRPO train batch divides cleanly across GPUs."""
+
+    train_batch = _get_int(cfg, "data.train_batch_size")
+    if not train_batch or train_batch <= 0:
+        return None
+
+    rollout_n = _get_int(cfg, "actor_rollout_ref.rollout.n") or 1
+    n_gpus_per_node = max(1, _get_int(cfg, "trainer.n_gpus_per_node") or 1)
+    nnodes = max(1, _get_int(cfg, "trainer.nnodes") or 1)
+    total_gpus = max(1, n_gpus_per_node * nnodes)
+
+    actor_strategy = None
+    if _key_exists(cfg, "actor_rollout_ref.actor.strategy"):
+        actor_strategy = OmegaConf.select(cfg, "actor_rollout_ref.actor.strategy")
+
+    minimal_batch = total_gpus
+    if actor_strategy == "megatron":
+        tensor_mp = max(1, _get_int(cfg, "actor_rollout_ref.actor.megatron.tensor_model_parallel_size") or 1)
+        pipeline_mp = max(1, _get_int(cfg, "actor_rollout_ref.actor.megatron.pipeline_model_parallel_size") or 1)
+        context_mp = max(1, _get_int(cfg, "actor_rollout_ref.actor.megatron.context_parallel_size") or 1)
+        model_parallel = max(1, tensor_mp * pipeline_mp)
+        data_parallel = max(1, total_gpus // max(1, model_parallel * context_mp))
+        micro = _get_int(cfg, "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu") or 1
+        minimal_batch = max(1, data_parallel * micro)
+
+    current_real = train_batch * max(1, rollout_n)
+    if current_real % minimal_batch == 0:
+        return None
+
+    required_step = max(1, minimal_batch // math.gcd(train_batch, minimal_batch))
+    base_n = max(1, rollout_n)
+    if base_n % required_step == 0:
+        new_n = base_n
+    else:
+        new_n = ((base_n + required_step - 1) // required_step) * required_step
+
+    if new_n == base_n:
+        return None
+
+    LOGGER.warning(
+        "real_train_batch_size (%s) is not divisible by minimal batch %s; increasing rollout replicas from %s to %s.",
+        current_real,
+        minimal_batch,
+        base_n,
+        new_n,
+    )
+    _set(cfg, "actor_rollout_ref.rollout.n", int(new_n))
+    return int(new_n)
 
 
 def _resolve_effective_batch_size(requested: int | None, dataset_rows: int) -> tuple[int, bool]:
@@ -1138,6 +1200,7 @@ def _run_training(args: argparse.Namespace, *, run_index: int, total_runs: int) 
     )
 
     _ensure_required_verl_flags(cfg)
+    _apply_verl_overrides(cfg, final_run_cfg.get("verl_overrides"))
 
     _apply_training_hyperparameters(cfg, final_run_cfg.get("training"))
 
@@ -1183,13 +1246,21 @@ def _run_training(args: argparse.Namespace, *, run_index: int, total_runs: int) 
     _set(cfg, "trainer.total_epochs", int(args.total_epochs))
     if args.total_steps:
         _set(cfg, "trainer.total_training_steps", int(args.total_steps))
-    _set(cfg, "trainer.n_gpus_per_node", int(args.num_gpus))
+    gpu_count = int(args.num_gpus)
+    _set(cfg, "trainer.n_gpus_per_node", gpu_count)
+    final_run_cfg.setdefault("verl_overrides", {}).setdefault("trainer", {})[
+        "n_gpus_per_node"
+    ] = gpu_count
 
     _apply_model_overrides(cfg, args)
     _apply_parallel_overrides(cfg, args)
     output_dir = _apply_training_overrides(cfg, args)
     _apply_logging_overrides(cfg, args)
-    _apply_verl_overrides(cfg, final_run_cfg.get("verl_overrides"))
+    rollout_adjustment = _ensure_rollout_batch_alignment(cfg)
+    if rollout_adjustment is not None:
+        args.rollout_replicas = rollout_adjustment
+        overrides = final_run_cfg.setdefault("verl_overrides", {})
+        _update_dict_path(overrides, "actor_rollout_ref.rollout.n", rollout_adjustment)
     serialise_resolved_config(final_run_cfg, resolved_cfg_path)
     agent_cls, agent_args, env_cls, env_args = _configure_agent_env(cfg, args)
 

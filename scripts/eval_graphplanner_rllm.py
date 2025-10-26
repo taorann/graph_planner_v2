@@ -55,7 +55,9 @@ from scripts.train_graphplanner_rllm import (  # noqa: E402
     _coerce_int,
     _configure_agent_env,
     _ensure_batch_size_defaults,
+    _ensure_rollout_batch_alignment,
     _ensure_required_verl_flags,
+    _update_dict_path,
     _load_config,
     _print_run_summary,
     _sanity_checks,
@@ -287,6 +289,7 @@ def main() -> None:
     )
 
     _ensure_required_verl_flags(cfg)
+    _apply_verl_overrides(cfg, final_run_cfg.get("verl_overrides"))
 
     _apply_training_hyperparameters(cfg, final_run_cfg.get("training"))
 
@@ -315,7 +318,11 @@ def main() -> None:
     if args.experiment_name:
         _set(cfg, "trainer.experiment_name", args.experiment_name)
 
-    _set(cfg, "trainer.n_gpus_per_node", int(args.num_gpus))
+    gpu_count = int(args.num_gpus)
+    _set(cfg, "trainer.n_gpus_per_node", gpu_count)
+    final_run_cfg.setdefault("verl_overrides", {}).setdefault("trainer", {})[
+        "n_gpus_per_node"
+    ] = gpu_count
     _set(cfg, "trainer.total_epochs", 0)
     _set(cfg, "trainer.total_training_steps", 0)
     _set(cfg, "trainer.val_before_train", True)
@@ -330,7 +337,11 @@ def main() -> None:
     _apply_model_overrides(cfg, args)
     _apply_parallel_overrides(cfg, args)
     _apply_logging_overrides(cfg, args)
-    _apply_verl_overrides(cfg, final_run_cfg.get("verl_overrides"))
+    rollout_adjustment = _ensure_rollout_batch_alignment(cfg)
+    if rollout_adjustment is not None:
+        args.rollout_replicas = rollout_adjustment
+        overrides = final_run_cfg.setdefault("verl_overrides", {})
+        _update_dict_path(overrides, "actor_rollout_ref.rollout.n", rollout_adjustment)
     serialise_resolved_config(final_run_cfg, resolved_cfg_path)
 
     agent_cls, agent_args, env_cls, env_args = _configure_agent_env(cfg, args)
