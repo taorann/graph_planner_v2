@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Tuple
 
 import numpy as np
+from hydra import compose, initialize_config_dir
+from hydra.core.global_hydra import GlobalHydra
 from omegaconf import OmegaConf, open_dict
 from omegaconf.errors import ConfigKeyError
 
@@ -358,8 +360,6 @@ def _load_config(
     """从 YAML 文件加载 ``OmegaConf`` 配置并应用 dotlist 覆盖。"""
 
     resolved = path.resolve()
-    cfg = OmegaConf.load(str(resolved))
-    OmegaConf.set_struct(cfg, False)
 
     merged: list[str] = []
     for values in (overrides or [], unknown or []):
@@ -372,8 +372,11 @@ def _load_config(
             if cleaned:
                 merged.append(cleaned)
 
-    if merged:
-        cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(merged))
+    if GlobalHydra.instance().is_initialized():
+        GlobalHydra.instance().clear()
+    with initialize_config_dir(version_base=None, config_dir=str(resolved.parent)):
+        cfg = compose(config_name=resolved.stem, overrides=merged)
+    OmegaConf.set_struct(cfg, False)
     print(f"[CFG] Applied {len(merged)} override(s)")
     return cfg
 
@@ -443,6 +446,8 @@ def _ensure_required_verl_flags(cfg: OmegaConf) -> None:
     required_defaults: dict[str, Any] = {
         "algorithm.use_kl_in_reward": False,
         "data.reward_fn_key": "data_source",
+        "actor_rollout_ref.hybrid_engine": True,
+        "actor_rollout_ref.rollout.mode": "async",
     }
 
     for dotted, default in required_defaults.items():
