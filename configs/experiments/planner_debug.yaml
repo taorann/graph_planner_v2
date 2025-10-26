@@ -103,6 +103,8 @@ verl_overrides:
     model:
       enable_gradient_checkpointing: false
     actor:
+      strategy: fsdp
+      use_kl_loss: false
       grad_clip: 1.0
       entropy_coeff: 0.01
       clip_ratio: 0.2
@@ -115,7 +117,10 @@ verl_overrides:
         weight_decay: 0.0
         lr_warmup_steps: 0
     rollout:
+      strategy: fsdp
       dtype: float16
+    ref:
+      strategy: fsdp
   critic:
     grad_clip: 1.0
     optim:
@@ -125,5 +130,6 @@ verl_overrides:
     model:
       enable_gradient_checkpointing: false
   algorithm:
+    use_kl_in_reward: false
     kl_ctrl:
       kl_coef: 0.1

@@ -414,6 +414,24 @@ def _set(cfg: OmegaConf, key: str, value: Any) -> None:
         OmegaConf.update(cfg, key, _normalise_value(value), merge=True)
 
 
+def _ensure_required_verl_flags(cfg: OmegaConf) -> None:
+    """填充 Verl 训练所需但部分配置缺失的布尔开关。"""
+
+    required_defaults: dict[str, bool] = {
+        "actor_rollout_ref.actor.use_kl_loss": False,
+        "algorithm.use_kl_in_reward": False,
+    }
+
+    for dotted, default in required_defaults.items():
+        try:
+            current = OmegaConf.select(cfg, dotted, throw_on_missing=True)
+        except (ConfigKeyError, AttributeError, ValueError):
+            current = None
+
+        if current is None:
+            _set(cfg, dotted, default)
+
+
 def _iter_override_items(
     data: Mapping[str, Any], prefix: str = ""
 ) -> Iterable[tuple[str, Any]]:
@@ -970,6 +988,8 @@ def _run_training(args: argparse.Namespace, *, run_index: int, total_runs: int) 
         overrides=args.overrides,
         unknown=getattr(args, "_unknown_overrides", None),
     )
+
+    _ensure_required_verl_flags(cfg)
 
     _apply_training_hyperparameters(cfg, final_run_cfg.get("training"))
 

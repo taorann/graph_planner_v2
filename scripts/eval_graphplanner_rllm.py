@@ -53,6 +53,7 @@ from scripts.train_graphplanner_rllm import (  # noqa: E402
     _apply_training_hyperparameters,
     _apply_verl_overrides,
     _configure_agent_env,
+    _ensure_required_verl_flags,
     _load_config,
     _print_run_summary,
     _sanity_checks,
@@ -281,6 +282,8 @@ def main() -> None:
         overrides=args.overrides,
         unknown=getattr(args, "_unknown_overrides", None),
     )
+
+    _ensure_required_verl_flags(cfg)
 
     _apply_training_hyperparameters(cfg, final_run_cfg.get("training"))
 
