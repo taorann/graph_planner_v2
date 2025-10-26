@@ -1,7 +1,7 @@
 """评估 Graph Planner/CGM 代理在 rLLM 上的推理表现（仅验证，不更新参数）。
 
 English summary
-    Runs the rLLM PPO pipeline in validation-only mode so we can collect
+    Runs the rLLM GRPO pipeline in validation-only mode so we can collect
     pass@k, success rate, and trajectory statistics without performing any
     optimisation steps.
 """
@@ -53,6 +53,8 @@ from scripts.train_graphplanner_rllm import (  # noqa: E402
     _apply_training_hyperparameters,
     _apply_verl_overrides,
     _configure_agent_env,
+    _ensure_batch_size_defaults,
+    _ensure_required_verl_flags,
     _load_config,
     _print_run_summary,
     _sanity_checks,
@@ -60,7 +62,7 @@ from scripts.train_graphplanner_rllm import (  # noqa: E402
     _set,
     _prepare_container_images,
     _validate_parallel_config,
-    _resolve_optional_path,
+    _resolve_model_path,
 )
 
 
@@ -87,7 +89,7 @@ def _collect_specified_cli_args(
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Evaluate Graph Planner agents with rLLM (validation only)"
+        description="Evaluate Graph Planner agents with rLLM GRPO (validation only)"
     )
     parser.add_argument("--agent", choices=["planner", "cgm"], default="planner")
     parser.add_argument(
@@ -234,7 +236,7 @@ def main() -> None:
         key = "planner_model" if args.agent == "planner" else "cgm_model"
         final_run_cfg.setdefault("paths", {})[key] = str(default_model)
     else:
-        args.model_path = _resolve_optional_path(args.model_path)
+        args.model_path = _resolve_model_path(args.model_path)
 
     output_base = Path(
         final_run_cfg.get("logging", {}).get("output_dir")
@@ -282,6 +284,8 @@ def main() -> None:
         unknown=getattr(args, "_unknown_overrides", None),
     )
 
+    _ensure_required_verl_flags(cfg)
+
     _apply_training_hyperparameters(cfg, final_run_cfg.get("training"))
 
     _set(cfg, "data.train_files", str(eval_path))
@@ -289,6 +293,7 @@ def main() -> None:
     _set(cfg, "data.train_batch_size", int(args.batch_size))
     _set(cfg, "data.val_batch_size", int(args.batch_size))
     _set(cfg, "data.shuffle", False)
+    _ensure_batch_size_defaults(cfg)
 
     if args.project_name:
         _set(cfg, "trainer.project_name", args.project_name)
