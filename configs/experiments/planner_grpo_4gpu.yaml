@@ -1,0 +1,116 @@
+# configs/experiments/planner_grpo_4gpu.yaml
+
+algorithm:
+  adv_estimator: grpo
+  use_kl_in_reward: false
+  norm_adv_by_std_in_grpo: true
+  kl_ctrl:
+    kl_coef: 0.0
+    target_kl: 0.0
+
+data:
+  train_files:
+    - datasets/r2e_gym/train.jsonl
+  val_files:
+    - datasets/r2e_gym/val.jsonl
+  train_batch_size: 8
+  val_batch_size: 512
+  max_prompt_length: 4096
+  max_response_length: 32768
+  filter_overlong_prompts: true
+  filter_overlong_prompts_workers: 32
+
+actor_rollout_ref:
+  model:
+    path: models/Qwen3-14B
+    tokenizer_path: models/Qwen3-14B
+    enable_gradient_checkpointing: true
+    use_remove_padding: true
+  hybrid_engine: true
+  actor:
+    strategy: fsdp
+    ppo_micro_batch_size_per_gpu: 1
+    ppo_mini_batch_size: 8
+    use_dynamic_bsz: false
+    ppo_max_token_len_per_gpu: 32000
+    loss_agg_mode: seq-mean-token-sum
+    optim:
+      lr: 1.0e-06
+    entropy_coeff: 0.0
+    use_kl_loss: false
+    kl_loss_coef: 0.0
+    ulysses_sequence_parallel_size: 1
+    fsdp_config:
+      use_orig_params: true
+      sync_module_states: true
+      param_offload: true
+      optimizer_offload: true
+  rollout:
+    name: vllm
+    mode: async
+    temperature: 1.0
+    'n': 4
+    val_kwargs:
+      'n': 1
+      temperature: 0.0
+    enforce_eager: false
+    gpu_memory_utilization: 0.6
+    tensor_model_parallel_size: 1
+    log_prob_use_dynamic_bsz: true
+    log_prob_micro_batch_size_per_gpu: 1
+  ref:
+    strategy: fsdp
+    fsdp_config:
+      use_orig_params: true
+      sync_module_states: true
+      param_offload: true
+
+rllm:
+  env:
+    name: graph_planner_repoenv
+  agent:
+    name: graph_planner_repoenv
+    max_steps: 50
+    overlong_filter: true
+
+trainer:
+  total_epochs: 1000
+  critic_warmup: 0
+  logger:
+  - console
+  - wandb
+  project_name: deepscaler-agent
+  experiment_name: planner-only-grpo-4g
+  val_before_train: false
+  save_freq: 10
+  test_freq: 10
+  default_hdfs_dir: null
+  n_gpus_per_node: 4
+  nnodes: 1
+  gradient_accumulation_steps: 2
+
+parallel:
+  agents: 1
+  workers: 1
+  replicas: 1
+  workflow_parallel: 1
+  tensor_parallel_planner: 1
+  tensor_parallel_cgm: 1
+
+resources:
+  num_gpus: 4
+  ray_cpus: 16
+  ray_gpus: 4
+
+ray:
+  runtime_env:
+    env_vars:
+      VLLM_USE_V1: "1"
+      VLLM_ATTENTION_BACKEND: FLASH_ATTN
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+      VLLM_ENGINE_ITERATION_TIMEOUT_S: "100000000000"
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:False"
+      NCCL_ASYNC_ERROR_HANDLING: "1"
+      TORCH_NCCL_BLOCKING_WAIT: "1"
+      NCCL_DEBUG: WARN
+      NCCL_IB_DISABLE: "1"
