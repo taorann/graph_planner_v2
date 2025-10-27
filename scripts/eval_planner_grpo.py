@@ -5,8 +5,9 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 _VLLM_ENV_DEFAULTS = {
     "VLLM_USE_V1": "1",
@@ -22,21 +23,31 @@ for _key, _value in _VLLM_ENV_DEFAULTS.items():
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 
-import ray
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+os.environ.setdefault("PYTHONPATH", str(_REPO_ROOT))
+
 from omegaconf import DictConfig, OmegaConf
 
-from graph_planner.infra.vendor import ensure_rllm_importable
-
-ensure_rllm_importable()
-
-from graph_planner.integrations.rllm import (  # noqa: E402
-    GRAPH_PLANNER_DATASET_NAME,
-    GraphPlannerRLLMAgent,
-    GraphPlannerRLLMEnv,
-    ensure_dataset_registered,
-)
-
 LOGGER = logging.getLogger("planner_grpo.eval")
+
+
+@lru_cache(maxsize=1)
+def _load_rllm_bindings() -> tuple[Any, Any, Any, str]:
+    from graph_planner.infra.vendor import ensure_rllm_importable
+
+    if not ensure_rllm_importable():  # pragma: no cover - defensive guard
+        raise RuntimeError("Unable to import vendored rLLM modules")
+
+    from graph_planner.integrations.rllm import (
+        GRAPH_PLANNER_DATASET_NAME,
+        GraphPlannerRLLMAgent,
+        GraphPlannerRLLMEnv,
+        ensure_dataset_registered,
+    )
+
+    return GraphPlannerRLLMAgent, GraphPlannerRLLMEnv, ensure_dataset_registered, GRAPH_PLANNER_DATASET_NAME
 
 
 def _parse_args() -> argparse.Namespace:
@@ -82,7 +93,45 @@ def _load_config(path: Path, overrides: Sequence[str] | None) -> DictConfig:
     return cfg
 
 
-def _ensure_runtime_env(cfg: DictConfig) -> dict[str, Any]:
+def _to_str_dict(payload: Mapping[str, Any] | None) -> dict[str, str]:
+    if not payload:
+        return {}
+    result: dict[str, str] = {}
+    for key, value in payload.items():
+        if value is None:
+            continue
+        result[str(key)] = str(value)
+    return result
+
+
+def _collect_env_section(cfg: DictConfig, section: str) -> tuple[dict[str, str], bool]:
+    node = OmegaConf.select(cfg, section, default=None)
+    env: dict[str, str] = {}
+    propagate = False
+    if node is None:
+        return env, propagate
+    if isinstance(node, DictConfig):
+        node = OmegaConf.to_container(node, resolve=True)
+    if isinstance(node, Mapping):
+        env.update(_to_str_dict(node.get("env")))
+        propagate = bool(node.get("propagate_via_ray", False))
+    return env, propagate
+
+
+def _resolve_planner_env(cfg: DictConfig) -> tuple[dict[str, str], bool]:
+    env, propagate = _collect_env_section(cfg, "graph_planner.planner")
+    planner_path = OmegaConf.select(cfg, "paths.planner_model", default=None)
+    tokenizer_path = OmegaConf.select(cfg, "paths.planner_tokenizer", default=None)
+    if planner_path:
+        env.setdefault("PLANNER_MODEL_PATH", str(planner_path))
+    if tokenizer_path:
+        env.setdefault("PLANNER_MODEL_TOKENIZER_PATH", str(tokenizer_path))
+    return env, propagate
+
+
+def _ensure_runtime_env(
+    cfg: DictConfig, propagate_env: dict[str, str] | None = None
+) -> dict[str, Any]:
     runtime_env = OmegaConf.to_container(
         OmegaConf.select(cfg, "ray.runtime_env"), resolve=True
     )
@@ -90,18 +139,37 @@ def _ensure_runtime_env(cfg: DictConfig) -> dict[str, Any]:
     env_vars = dict(runtime_env.get("env_vars") or {})
     for key, value in _VLLM_ENV_DEFAULTS.items():
         env_vars.setdefault(key, value)
+    env_vars.setdefault("PYTHONPATH", os.environ.get("PYTHONPATH", str(_REPO_ROOT)))
+    if propagate_env:
+        env_vars.update(propagate_env)
     runtime_env["env_vars"] = env_vars
     OmegaConf.update(cfg, "ray.runtime_env", runtime_env, merge=False)
     return runtime_env
 
 
+def _resolve_cgm_env(cfg: DictConfig) -> tuple[dict[str, str], bool]:
+    env, propagate = _collect_env_section(cfg, "graph_planner.cgm")
+    cgm_model = OmegaConf.select(cfg, "paths.cgm_model")
+    if not cgm_model and "CGM_MODEL_PATH" not in env:
+        raise ValueError("paths.cgm_model must be specified for CGM inference")
+    cgm_tokenizer = OmegaConf.select(cfg, "paths.cgm_tokenizer", default=cgm_model)
+    if cgm_model:
+        env.setdefault("CGM_MODEL_PATH", str(cgm_model))
+    if cgm_tokenizer:
+        env.setdefault("CGM_TOKENIZER_PATH", str(cgm_tokenizer))
+    env.setdefault("CGM_ENABLED", "1")
+    return env, propagate
+
+
 def _register_datasets(val_files: Sequence[str]) -> None:
+    (_, _, ensure_dataset_registered, dataset_name) = _load_rllm_bindings()
+
     seen: set[str] = set()
     for path in val_files:
         if path in seen:
             continue
         ensure_dataset_registered(
-            name=GRAPH_PLANNER_DATASET_NAME,
+            name=dataset_name,
             split="val",
             path=path,
         )
@@ -155,6 +223,26 @@ def _log_batch(cfg: DictConfig) -> None:
         )
 
 
+def _resolve_ray_address(args: argparse.Namespace, cfg: DictConfig) -> str | None:
+    for value in (
+        getattr(args, "ray_address", None),
+        os.environ.get("RAY_ADDRESS"),
+        OmegaConf.select(cfg, "ray.address", default=None),
+    ):
+        if value is None:
+            continue
+        normalised = str(value).strip()
+        if not normalised:
+            continue
+        lowered = normalised.lower()
+        if lowered == "local":
+            return None
+        if lowered == "auto":
+            return "auto"
+        return normalised
+    return None
+
+
 def main() -> None:
     args = _parse_args()
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
@@ -166,11 +254,36 @@ def main() -> None:
         raise ValueError("data.val_files must not be empty for evaluation")
     if not args.ckpt.exists():
         raise FileNotFoundError(f"Checkpoint path does not exist: {args.ckpt}")
+    model_path = str(OmegaConf.select(cfg, "actor_rollout_ref.model.path") or "")
+    if not model_path:
+        raise ValueError("actor_rollout_ref.model.path must be specified")
     LOGGER.info("Validation files (%d): %s", len(val_files), ", ".join(val_files))
     LOGGER.info("Checkpoint path: %s", args.ckpt)
+    LOGGER.info("Planner model path: %s", model_path)
 
-    runtime_env = _ensure_runtime_env(cfg)
+    planner_env, planner_propagate = _resolve_planner_env(cfg)
+    cgm_env, cgm_propagate = _resolve_cgm_env(cfg)
+    for env_map in (planner_env, cgm_env):
+        for key, value in env_map.items():
+            os.environ.setdefault(key, value)
+    LOGGER.info("CGM model path: %s", cgm_env.get("CGM_MODEL_PATH", "<missing>"))
+
+    propagate_env: dict[str, str] = {}
+    if planner_propagate:
+        propagate_env.update(planner_env)
+    if cgm_propagate:
+        propagate_env.update(cgm_env)
+
+    runtime_env = _ensure_runtime_env(cfg, propagate_env=propagate_env or None)
     LOGGER.info("Ray runtime env vars: %s", runtime_env.get("env_vars", {}))
+    LOGGER.info(
+        "Local planner env vars: %s",
+        {k: planner_env[k] for k in sorted(planner_env)},
+    )
+    LOGGER.info(
+        "Local CGM env vars: %s",
+        {k: cgm_env[k] for k in sorted(cgm_env)},
+    )
 
     _prepare_eval_config(cfg, args.ckpt.resolve(), args.output_dir.resolve() if args.output_dir else None)
     _log_batch(cfg)
@@ -183,17 +296,31 @@ def main() -> None:
         LOGGER.info("Dry run requested; skipping evaluation launch.")
         return
 
-    address = args.ray_address or OmegaConf.select(cfg, "ray.address", default=None)
-    ray.init(address=address, runtime_env=runtime_env or None, ignore_reinit_error=True)
+    from importlib import import_module
+
+    ray = import_module("ray")
+
+    address = _resolve_ray_address(args, cfg)
+
+    if address is None:
+        LOGGER.info(
+            "No Ray address provided via CLI/env/config; starting a fresh local Ray runtime."
+        )
+    else:
+        LOGGER.info("Connecting to Ray using address=%s", address)
+
+    ray.init(address=address, runtime_env=runtime_env or None, ignore_reinit_error=False)
 
     try:
         _register_datasets(val_files)
 
         from rllm.trainer.agent_trainer import AgentTrainer  # noqa: WPS433
 
+        (agent_cls, env_cls, _, _) = _load_rllm_bindings()
+
         trainer = AgentTrainer(
-            agent_class=GraphPlannerRLLMAgent,
-            env_class=GraphPlannerRLLMEnv,
+            agent_class=agent_cls,
+            env_class=env_cls,
             config=cfg,
         )
 

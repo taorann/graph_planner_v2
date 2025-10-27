@@ -1,5 +1,33 @@
 # configs/experiments/planner_grpo_4gpu.yaml
 
+paths:
+  planner_model: models/Qwen3-14B
+  planner_tokenizer: models/Qwen3-14B
+  cgm_model: models/CodeFuse-CGM
+  cgm_tokenizer: models/CodeFuse-CGM
+
+graph_planner:
+  planner:
+    propagate_via_ray: false
+    env:
+      PLANNER_MODEL_PATH: ${paths.planner_model}
+      PLANNER_MODEL_TOKENIZER_PATH: ${paths.planner_tokenizer}
+      PLANNER_MODEL_TEMPERATURE: 0.2
+      PLANNER_MODEL_TOP_P: 0.95
+      PLANNER_MODEL_MAX_INPUT_TOKENS: 4096
+      PLANNER_MODEL_MAX_TOKENS: 512
+  cgm:
+    propagate_via_ray: true
+    env:
+      CGM_ENABLED: "1"
+      CGM_MODEL_PATH: ${paths.cgm_model}
+      CGM_TOKENIZER_PATH: ${paths.cgm_tokenizer}
+      CGM_TEMPERATURE: 0.2
+      CGM_TOP_P: 0.9
+      CGM_MAX_TOKENS: 768
+      CGM_MAX_INPUT_TOKENS: 8192
+      CGM_DEVICE: cuda
+
 algorithm:
   adv_estimator: grpo
   use_kl_in_reward: false
@@ -22,8 +50,8 @@ data:
 
 actor_rollout_ref:
   model:
-    path: models/Qwen3-14B
-    tokenizer_path: models/Qwen3-14B
+    path: ${paths.planner_model}
+    tokenizer_path: ${paths.planner_tokenizer}
     enable_gradient_checkpointing: true
     use_remove_padding: true
   hybrid_engine: true
