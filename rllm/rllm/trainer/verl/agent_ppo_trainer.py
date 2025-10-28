@@ -46,12 +46,15 @@ class AgentPPOTrainer(RayPPOTrainer):
         agent_class=None,
         env_args=None,
         agent_args=None,
+        *,
+        role_worker_allocation: dict[str, list[int]] | None = None,
     ):
         super().__init__(config=config, tokenizer=tokenizer, role_worker_mapping=role_worker_mapping, resource_pool_manager=resource_pool_manager, ray_worker_group_cls=ray_worker_group_cls, reward_fn=reward_fn, val_reward_fn=val_reward_fn)
         self.env_class = env_class
         self.agent_class = agent_class
         self.env_args = env_args or {}
         self.agent_args = agent_args or {}
+        self.role_worker_allocation = role_worker_allocation or {}
 
         assert self.config.actor_rollout_ref.hybrid_engine, "Only hybrid engine is supported"
         assert self.config.actor_rollout_ref.rollout.mode == "async", "Only async rollout mode is supported"
