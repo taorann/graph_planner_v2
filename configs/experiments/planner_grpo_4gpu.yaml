@@ -126,7 +126,7 @@ parallel:
   replicas: 1
   workflow_parallel: 1
   tensor_parallel_planner: 1
-  tensor_parallel_cgm: 1
+  tensor_parallel_cgm: 2
 
 resources:
   num_gpus: 4
