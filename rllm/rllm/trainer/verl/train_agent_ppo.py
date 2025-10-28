@@ -16,6 +16,7 @@ from rllm.trainer.verl.agent_ppo_trainer import AgentPPOTrainer
 # Local application imports
 from rllm.trainer.verl.agent_workflow_trainer import AgentWorkflowPPOTrainer
 from rllm.trainer.verl.ray_runtime_env import get_ppo_ray_runtime_env
+from verl.trainer.ppo.core_algos import AdvantageEstimator
 from verl.trainer.ppo.reward import load_reward_manager
 from verl.utils.device import is_cuda_available
 
@@ -93,9 +94,18 @@ class TaskRunner:
         # Used for multimodal LLM, could be None
         # processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 
+        raw_adv = config.algorithm.adv_estimator
+        if isinstance(raw_adv, AdvantageEstimator):
+            adv_estimator = raw_adv
+        else:
+            adv_estimator = AdvantageEstimator(str(raw_adv))
+        use_critic = adv_estimator == AdvantageEstimator.GAE
+
         # Define worker classes based on the actor strategy.
+        critic_worker_cls = None
         if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
-            assert config.critic.strategy in {"fsdp", "fsdp2"}
+            if use_critic:
+                assert config.critic.strategy in {"fsdp", "fsdp2"}
             from verl.single_controller.ray import RayWorkerGroup
             from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker
 
@@ -114,6 +124,7 @@ class TaskRunner:
 
             actor_rollout_cls = AsyncActorRolloutRefWorker if config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
             ray_worker_group_cls = RayWorkerGroup
+            critic_worker_cls = CriticWorker
 
         elif config.actor_rollout_ref.actor.strategy == "megatron":
             assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
@@ -131,8 +142,11 @@ class TaskRunner:
         # Map roles to their corresponding remote worker classes.
         role_worker_mapping = {
             Role.ActorRollout: ray.remote(actor_rollout_cls),
-            Role.Critic: ray.remote(CriticWorker),
         }
+        if use_critic:
+            if critic_worker_cls is None:
+                raise ValueError("Critic worker class must be defined when using a critic")
+            role_worker_mapping[Role.Critic] = ray.remote(critic_worker_cls)
 
         # Define the resource pool specification.
         # Map roles to the resource pool.
@@ -142,8 +156,9 @@ class TaskRunner:
         }
         mapping = {
             Role.ActorRollout: global_pool_id,
-            Role.Critic: global_pool_id,
         }
+        if use_critic:
+            mapping[Role.Critic] = global_pool_id
 
         # Add a reference policy worker if KL loss or KL reward is used.
         if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
