@@ -370,6 +370,12 @@ def _get_local_runtime() -> Optional[_LocalCGMRuntime]:
     if path_obj.is_dir() and not (path_obj / "config.json").exists():
         return None
 
+    device_map = getattr(cgm_cfg, "device_map", None)
+    try:
+        device_map_fp = json.dumps(device_map, sort_keys=True)
+    except TypeError:
+        device_map_fp = repr(device_map)
+
     fingerprint = (
         str(path_obj),
         getattr(cgm_cfg, "tokenizer_path", None),
@@ -378,6 +384,7 @@ def _get_local_runtime() -> Optional[_LocalCGMRuntime]:
         getattr(cgm_cfg, "top_p", None),
         getattr(cgm_cfg, "max_input_tokens", None),
         getattr(cgm_cfg, "device", None),
+        device_map_fp,
     )
     if _LOCAL_RUNTIME_CACHE and _LOCAL_RUNTIME_FINGERPRINT == fingerprint:
         return _LOCAL_RUNTIME_CACHE
@@ -391,6 +398,7 @@ def _get_local_runtime() -> Optional[_LocalCGMRuntime]:
         top_p=float(getattr(cgm_cfg, "top_p", 0.9)),
         do_sample=float(getattr(cgm_cfg, "temperature", 0.0)) > 0,
         device=getattr(cgm_cfg, "device", None),
+        device_map=device_map,
     )
     generator = CodeFuseCGMGenerator(generation_cfg)
     _LOCAL_RUNTIME_CACHE = _LocalCGMRuntime(generator=generator)

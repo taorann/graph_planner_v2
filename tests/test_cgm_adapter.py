@@ -21,6 +21,7 @@ def reset_config_env(monkeypatch):
         "CGM_MODEL_PATH",
         "CGM_TOKENIZER_PATH",
         "CGM_DEVICE",
+        "CGM_DEVICE_MAP",
         "CGM_MAX_INPUT_TOKENS",
         "CGM_TOP_P",
     ]
@@ -135,3 +136,37 @@ def test_generate_with_local_runtime(monkeypatch):
 
     assert patch["summary"] == "local-runtime"
     assert patch["edits"][0]["new_text"].endswith("\n")
+
+
+def test_local_runtime_uses_device_map(monkeypatch, tmp_path):
+    model_dir = tmp_path / "cgm"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setenv("CGM_ENABLED", "1")
+    monkeypatch.setenv("CGM_MODEL_PATH", str(model_dir))
+    monkeypatch.setenv("CGM_DEVICE", "cuda:2")
+    monkeypatch.setenv("CGM_DEVICE_MAP", "[2,3]")
+
+    module = importlib.import_module("graph_planner.agents.rule_based.cgm_adapter")
+    importlib.reload(module)
+
+    captured = {}
+
+    class DummyGenerator:
+        def __init__(self, cfg):
+            captured["cfg"] = cfg
+            self.config = cfg
+
+        def generate(self, *args, **kwargs):  # pragma: no cover - not used
+            return []
+
+    monkeypatch.setattr(module, "CodeFuseCGMGenerator", DummyGenerator)
+    module._LOCAL_RUNTIME_CACHE = None
+    module._LOCAL_RUNTIME_FINGERPRINT = None
+
+    runtime = module._get_local_runtime()
+
+    assert runtime is not None
+    assert "cfg" in captured
+    assert captured["cfg"].device_map == [2, 3]

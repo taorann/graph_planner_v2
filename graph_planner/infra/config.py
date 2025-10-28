@@ -97,6 +97,7 @@ class CGMCfg:
     tokenizer_path: Optional[str] = None  # 如未指定则复用 model_path
     max_input_tokens: int = 8192
     device: Optional[str] = None
+    device_map: Optional[Any] = None
 
 
 @dataclass
@@ -115,6 +116,7 @@ class PlannerModelCfg:
     tokenizer_path: Optional[str] = None
     max_input_tokens: int = 4096
     device: Optional[str] = None
+    device_map: Optional[Any] = None
 
 
 @dataclass
@@ -181,6 +183,32 @@ def _load_json_file(path: str) -> Dict[str, Any]:
 
 
 def _apply_env_overrides(raw: Dict[str, Any]) -> Dict[str, Any]:
+    def _parse_device_map(value: str) -> Any:
+        value = value.strip()
+        if not value:
+            return None
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            lowered = value.lower()
+            if lowered in {"auto", "balanced", "balanced_low_0"}:
+                return lowered
+            if "," in value:
+                parts = [p.strip() for p in value.split(",") if p.strip()]
+                ints: list[int] = []
+                for part in parts:
+                    try:
+                        ints.append(int(part))
+                    except ValueError:
+                        return value
+                return ints
+            try:
+                return int(value)
+            except ValueError:
+                return value
+        else:
+            return parsed
+
     # COLLATE
     if "COLLATE_MODE" in os.environ:
         raw.setdefault("collate", {})["mode"] = os.environ["COLLATE_MODE"]
@@ -218,6 +246,8 @@ def _apply_env_overrides(raw: Dict[str, Any]) -> Dict[str, Any]:
         raw.setdefault("cgm", {})["max_input_tokens"] = int(os.environ["CGM_MAX_INPUT_TOKENS"])
     if "CGM_DEVICE" in os.environ:
         raw.setdefault("cgm", {})["device"] = os.environ["CGM_DEVICE"]
+    if "CGM_DEVICE_MAP" in os.environ:
+        raw.setdefault("cgm", {})["device_map"] = _parse_device_map(os.environ["CGM_DEVICE_MAP"])
 
     # PLANNER MODEL
     if "PLANNER_MODEL_ENABLED" in os.environ:
@@ -246,6 +276,10 @@ def _apply_env_overrides(raw: Dict[str, Any]) -> Dict[str, Any]:
         raw.setdefault("planner_model", {})["max_input_tokens"] = int(os.environ["PLANNER_MODEL_MAX_INPUT_TOKENS"])
     if "PLANNER_MODEL_DEVICE" in os.environ:
         raw.setdefault("planner_model", {})["device"] = os.environ["PLANNER_MODEL_DEVICE"]
+    if "PLANNER_MODEL_DEVICE_MAP" in os.environ:
+        raw.setdefault("planner_model", {})["device_map"] = _parse_device_map(
+            os.environ["PLANNER_MODEL_DEVICE_MAP"]
+        )
 
     # GLOBAL
     if "MODE" in os.environ:
