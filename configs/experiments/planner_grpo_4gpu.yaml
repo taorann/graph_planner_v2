@@ -92,6 +92,7 @@ actor_rollout_ref:
       use_orig_params: true
       sync_module_states: true
       param_offload: true
+      optimizer_offload: true
 
 rllm:
   env:
