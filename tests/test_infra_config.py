@@ -242,6 +242,20 @@ def test_update_args_from_config_sets_dataset_when_unspecified(tmp_path):
     assert args.dataset == (tmp_path / "yaml.jsonl").resolve()
 
 
+def test_load_reads_device_map_env(monkeypatch):
+    monkeypatch.delenv("CGM_DEVICE_MAP", raising=False)
+    monkeypatch.delenv("PLANNER_MODEL_DEVICE_MAP", raising=False)
+    monkeypatch.setenv("CGM_DEVICE_MAP", "[2,3]")
+    monkeypatch.setenv("PLANNER_MODEL_DEVICE_MAP", "0,1")
+
+    from graph_planner.infra.config import load
+
+    cfg = load()
+
+    assert cfg.cgm.device_map == [2, 3]
+    assert cfg.planner_model.device_map == [0, 1]
+
+
 def test_load_run_config_file_roundtrip(tmp_path):
     yaml_cfg = {"training": {"train_batch_size": 2}}
     path = tmp_path / "cfg.yaml"
