@@ -33,14 +33,15 @@ os.environ.setdefault("PYTHONPATH", str(_REPO_ROOT))
 
 from omegaconf import DictConfig, OmegaConf
 
+from graph_planner.infra.config import resolve_repo_path
+from graph_planner.infra.vendor import ensure_rllm_importable
+
 LOGGER = logging.getLogger("planner_grpo.train")
 
 
 @lru_cache(maxsize=1)
 def _load_rllm_bindings() -> tuple[Any, Any, Any, str]:
     """Import rLLM bindings lazily to avoid heavy startup cost."""
-
-    from graph_planner.infra.vendor import ensure_rllm_importable
 
     if not ensure_rllm_importable():  # pragma: no cover - defensive guard
         raise RuntimeError("Unable to import vendored rLLM modules")
@@ -136,11 +137,16 @@ def _collect_env_section(cfg: DictConfig, section: str) -> tuple[dict[str, str],
 
 def _resolve_planner_env(cfg: DictConfig) -> tuple[dict[str, str], bool]:
     env, propagate = _collect_env_section(cfg, "graph_planner.planner")
-    planner_path = OmegaConf.select(cfg, "paths.planner_model", default=None)
-    tokenizer_path = OmegaConf.select(cfg, "paths.planner_tokenizer", default=None)
+    planner_path = resolve_repo_path(OmegaConf.select(cfg, "paths.planner_model", default=None))
+    tokenizer_path = resolve_repo_path(
+        OmegaConf.select(cfg, "paths.planner_tokenizer", default=None)
+    )
+    if planner_path:
+        OmegaConf.update(cfg, "paths.planner_model", planner_path, merge=False)
     if planner_path:
         env.setdefault("PLANNER_MODEL_PATH", str(planner_path))
     if tokenizer_path:
+        OmegaConf.update(cfg, "paths.planner_tokenizer", tokenizer_path, merge=False)
         env.setdefault("PLANNER_MODEL_TOKENIZER_PATH", str(tokenizer_path))
     return env, propagate
 
@@ -165,10 +171,16 @@ def _ensure_runtime_env(
 
 def _resolve_cgm_env(cfg: DictConfig) -> tuple[dict[str, str], bool]:
     env, propagate = _collect_env_section(cfg, "graph_planner.cgm")
-    cgm_model = OmegaConf.select(cfg, "paths.cgm_model")
+    cgm_model = resolve_repo_path(OmegaConf.select(cfg, "paths.cgm_model"))
+    if cgm_model:
+        OmegaConf.update(cfg, "paths.cgm_model", cgm_model, merge=False)
     if not cgm_model and "CGM_MODEL_PATH" not in env:
         raise ValueError("paths.cgm_model must be specified for CGM inference")
-    cgm_tokenizer = OmegaConf.select(cfg, "paths.cgm_tokenizer", default=cgm_model)
+    cgm_tokenizer = resolve_repo_path(
+        OmegaConf.select(cfg, "paths.cgm_tokenizer", default=cgm_model)
+    )
+    if cgm_tokenizer:
+        OmegaConf.update(cfg, "paths.cgm_tokenizer", cgm_tokenizer, merge=False)
     if cgm_model:
         env.setdefault("CGM_MODEL_PATH", str(cgm_model))
     if cgm_tokenizer:
@@ -183,6 +195,8 @@ def _register_datasets(train_files: Sequence[str], val_files: Sequence[str]) -> 
     seen: set[tuple[str, str]] = set()
     for split, files in (("train", train_files), ("val", val_files)):
         for file_path in files:
+            abs_path = resolve_repo_path(file_path) if file_path else file_path
+            file_path = abs_path or file_path
             key = (split, file_path)
             if key in seen:
                 continue

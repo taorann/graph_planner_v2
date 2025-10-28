@@ -26,7 +26,7 @@ PYTHONPATH=. python scripts/prepare_swebench_validation.py \
 
 ## 1. 配置加载优先级
 
-`scripts/train_graphplanner_rllm.py` 与 `scripts/eval_graphplanner_rllm.py` 现在支持三层优先级；仓库在 `configs/experiments/` 下提供了可直接引用的示例 YAML，便于复制或按需修改：
+`scripts/train_graphplanner_rllm.py` 与 `scripts/eval_graphplanner_rllm.py` 现在支持三层优先级；仓库在 `configs/experiments/` 下提供了可直接引用的示例 YAML，便于复制或按需修改。与此同时，仓库根目录下新增的 `config/graph_planner_cfg.json` 汇总了 CGM/Planner 相关的默认路径、温度、超时等常用开关，并全部以仓库相对路径写出——当需要本地调参时，可以直接复制该文件到 `.aci/config.json` 或通过环境变量 `ACI_CONFIG` 指向自定义副本，再配合环境变量/CLI 覆盖细节。默认优先级如下：
 
 1. **内置默认值**（`default_training_run_config`）
 2. **YAML 配置文件**（`--config-file`，使用 `yaml.safe_load`）
@@ -185,7 +185,9 @@ PYTHONPATH=. python scripts/train_graphplanner_rllm.py \
 | 8×A800（Planner 训练 + CGM 推理） | `tensor_parallel_planner = 4`, `tensor_parallel_cgm = 4`, `parallel_agents = 4`, `rollout_workers = 4`, `num_gpus = 8`, `device_map_planner = [0,1,2,3]`, `device_map_cgm = [4,5,6,7]` | `PYTHONPATH=. python scripts/train_graphplanner_rllm.py --config-file configs/experiments/planner_cgm_8g.yaml --yaml-only --print-config-only` |
 | 16×A800（Planner 14B + CGM 73B） | `tensor_parallel_planner = 8`, `tensor_parallel_cgm = 8`, `parallel_agents = 8`, `rollout_workers = 8`, `workflow_parallel = 10`, `num_gpus = 16`, `device_map_planner = [0,1,2,3,4,5,6,7]`, `device_map_cgm = [8,9,10,11,12,13,14,15]` | `PYTHONPATH=. python scripts/train_graphplanner_rllm.py --config-file configs/experiments/gp_full_73b14b_16g.yaml --yaml-only --print-config-only` |
 
-> **注意**：上表中的 YAML 样例需要同时指定 `paths.planner_model: models/Qwen3-14B` 与 `paths.cgm_model: models/CodeFuse-CGM`，仓库已在 `models/` 目录下预留路径。
+> **注意**：上表中的 YAML 样例需要同时指定 `paths.planner_model: models/Qwen3-14B` 与 `paths.cgm_model: models/CodeFuse-CGM`，仓库已在 `models/` 目录下预留路径。`paths.*` 字段表示「在本地文件系统中放置模型权重的目录」，既可以是绝对路径，也可以是相对于仓库根目录的相对路径；启动脚本会在写入环境变量之前调用 `resolve_repo_path` 把它们转成绝对路径，再覆盖默认的 `config/graph_planner_cfg.json`。
+
+> **环境变量传播**：`graph_planner.planner|cgm.propagate_via_ray` 控制是否把各自的 `env` 块写入 Ray 的 `runtime_env.env_vars`。若值为 `true`，所有 rollout/learner worker 都能读到与主进程一致的 `PLANNER_MODEL_PATH`、`CGM_DEVICE_MAP` 等覆盖；若为 `false`，远端 worker 会退回到 `config/graph_planner_cfg.json` 中的默认值，仅主进程使用 YAML 中的覆盖。通常在训练时两者都保持 `true`，除非明确希望远端 worker 使用默认模型。
 
 ## 7. 离线评估与复现
 
