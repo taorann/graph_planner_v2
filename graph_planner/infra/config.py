@@ -51,9 +51,32 @@ def _detect_repo_root() -> Path:
 
 
 REPO_ROOT = _detect_repo_root()
+DEFAULT_CFG_PATH = REPO_ROOT / "config" / "graph_planner_cfg.json"
 
-PLANNER_MODEL_DIR = (REPO_ROOT / "models" / "Qwen3-14B").resolve()
-CGM_MODEL_DIR = (REPO_ROOT / "models" / "CodeFuse-CGM").resolve()
+
+def resolve_repo_path(value: Optional[os.PathLike[str] | str]) -> Optional[str]:
+    """Resolve ``value`` relative to the repository root when it is not absolute."""
+
+    if value is None:
+        return None
+    if isinstance(value, str):
+        candidate = value.strip()
+        if not candidate:
+            return None
+        path = Path(candidate).expanduser()
+    else:
+        path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    try:
+        resolved = path.resolve()
+    except FileNotFoundError:
+        resolved = path.resolve(strict=False)
+    return str(resolved)
+
+
+PLANNER_MODEL_DIR = resolve_repo_path(REPO_ROOT / "models" / "Qwen3-14B")
+CGM_MODEL_DIR = resolve_repo_path(REPO_ROOT / "models" / "CodeFuse-CGM")
 
 
 # ---------------- dataclasses ----------------
@@ -97,6 +120,7 @@ class CGMCfg:
     tokenizer_path: Optional[str] = None  # 如未指定则复用 model_path
     max_input_tokens: int = 8192
     device: Optional[str] = None
+    device_map: Optional[Any] = None
 
 
 @dataclass
@@ -115,6 +139,7 @@ class PlannerModelCfg:
     tokenizer_path: Optional[str] = None
     max_input_tokens: int = 4096
     device: Optional[str] = None
+    device_map: Optional[Any] = None
 
 
 @dataclass
@@ -181,6 +206,32 @@ def _load_json_file(path: str) -> Dict[str, Any]:
 
 
 def _apply_env_overrides(raw: Dict[str, Any]) -> Dict[str, Any]:
+    def _parse_device_map(value: str) -> Any:
+        value = value.strip()
+        if not value:
+            return None
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            lowered = value.lower()
+            if lowered in {"auto", "balanced", "balanced_low_0"}:
+                return lowered
+            if "," in value:
+                parts = [p.strip() for p in value.split(",") if p.strip()]
+                ints: list[int] = []
+                for part in parts:
+                    try:
+                        ints.append(int(part))
+                    except ValueError:
+                        return value
+                return ints
+            try:
+                return int(value)
+            except ValueError:
+                return value
+        else:
+            return parsed
+
     # COLLATE
     if "COLLATE_MODE" in os.environ:
         raw.setdefault("collate", {})["mode"] = os.environ["COLLATE_MODE"]
@@ -211,13 +262,15 @@ def _apply_env_overrides(raw: Dict[str, Any]) -> Dict[str, Any]:
     if "CGM_API_KEY_ENV" in os.environ:
         raw.setdefault("cgm", {})["api_key_env"] = os.environ["CGM_API_KEY_ENV"]
     if "CGM_MODEL_PATH" in os.environ:
-        raw.setdefault("cgm", {})["model_path"] = os.environ["CGM_MODEL_PATH"]
+        raw.setdefault("cgm", {})["model_path"] = resolve_repo_path(os.environ["CGM_MODEL_PATH"])
     if "CGM_TOKENIZER_PATH" in os.environ:
-        raw.setdefault("cgm", {})["tokenizer_path"] = os.environ["CGM_TOKENIZER_PATH"]
+        raw.setdefault("cgm", {})["tokenizer_path"] = resolve_repo_path(os.environ["CGM_TOKENIZER_PATH"])
     if "CGM_MAX_INPUT_TOKENS" in os.environ:
         raw.setdefault("cgm", {})["max_input_tokens"] = int(os.environ["CGM_MAX_INPUT_TOKENS"])
     if "CGM_DEVICE" in os.environ:
         raw.setdefault("cgm", {})["device"] = os.environ["CGM_DEVICE"]
+    if "CGM_DEVICE_MAP" in os.environ:
+        raw.setdefault("cgm", {})["device_map"] = _parse_device_map(os.environ["CGM_DEVICE_MAP"])
 
     # PLANNER MODEL
     if "PLANNER_MODEL_ENABLED" in os.environ:
@@ -239,13 +292,21 @@ def _apply_env_overrides(raw: Dict[str, Any]) -> Dict[str, Any]:
     if "PLANNER_MODEL_SYSTEM_PROMPT" in os.environ:
         raw.setdefault("planner_model", {})["system_prompt"] = os.environ["PLANNER_MODEL_SYSTEM_PROMPT"]
     if "PLANNER_MODEL_PATH" in os.environ:
-        raw.setdefault("planner_model", {})["model_path"] = os.environ["PLANNER_MODEL_PATH"]
+        raw.setdefault("planner_model", {})["model_path"] = resolve_repo_path(
+            os.environ["PLANNER_MODEL_PATH"]
+        )
     if "PLANNER_MODEL_TOKENIZER_PATH" in os.environ:
-        raw.setdefault("planner_model", {})["tokenizer_path"] = os.environ["PLANNER_MODEL_TOKENIZER_PATH"]
+        raw.setdefault("planner_model", {})["tokenizer_path"] = resolve_repo_path(
+            os.environ["PLANNER_MODEL_TOKENIZER_PATH"]
+        )
     if "PLANNER_MODEL_MAX_INPUT_TOKENS" in os.environ:
         raw.setdefault("planner_model", {})["max_input_tokens"] = int(os.environ["PLANNER_MODEL_MAX_INPUT_TOKENS"])
     if "PLANNER_MODEL_DEVICE" in os.environ:
         raw.setdefault("planner_model", {})["device"] = os.environ["PLANNER_MODEL_DEVICE"]
+    if "PLANNER_MODEL_DEVICE_MAP" in os.environ:
+        raw.setdefault("planner_model", {})["device_map"] = _parse_device_map(
+            os.environ["PLANNER_MODEL_DEVICE_MAP"]
+        )
 
     # GLOBAL
     if "MODE" in os.environ:
@@ -898,9 +959,17 @@ def serialise_resolved_config(config: Mapping[str, Any], path: Path) -> None:
 
 def load() -> Config:
     """
-    读取 .aci/config.json（若存在）并套用环境变量覆盖，返回 Config 对象。
+    读取仓库默认配置和 .aci/config.json（若存在）并套用环境变量覆盖。
     """
     cfg = Config()  # defaults
+
+    # 0) 读取仓库级默认配置
+    default_cfg = _load_json_file(str(DEFAULT_CFG_PATH))
+    if default_cfg:
+        merged_defaults = asdict(cfg)
+        _deep_update(merged_defaults, default_cfg)
+        cfg = _dict_to_config(merged_defaults)
+
     # 1) 从文件合并
     file_path = os.environ.get("ACI_CONFIG", os.path.join(".aci", "config.json"))
     raw = _load_json_file(file_path)
@@ -932,10 +1001,31 @@ def load() -> Config:
 def _dict_to_config(d: Dict[str, Any]) -> Config:
     # 子对象重建
     lint = LintCfg(**(d.get("lint") or {}))
-    telemetry = TelemetryCfg(**(d.get("telemetry") or {}))
+
+    telemetry_payload = dict(d.get("telemetry") or {})
+    if telemetry_payload.get("events_path"):
+        telemetry_payload["events_path"] = resolve_repo_path(telemetry_payload["events_path"])
+    if telemetry_payload.get("test_runs_path"):
+        telemetry_payload["test_runs_path"] = resolve_repo_path(telemetry_payload["test_runs_path"])
+    telemetry = TelemetryCfg(**telemetry_payload)
+
     collate = CollateCfg(**(d.get("collate") or {}))
-    cgm = CGMCfg(**(d.get("cgm") or {}))
-    planner_model = PlannerModelCfg(**(d.get("planner_model") or {}))
+
+    cgm_payload = dict(d.get("cgm") or {})
+    if cgm_payload.get("model_path"):
+        cgm_payload["model_path"] = resolve_repo_path(cgm_payload["model_path"])
+    if cgm_payload.get("tokenizer_path"):
+        cgm_payload["tokenizer_path"] = resolve_repo_path(cgm_payload["tokenizer_path"])
+    cgm = CGMCfg(**cgm_payload)
+
+    planner_payload = dict(d.get("planner_model") or {})
+    if planner_payload.get("model_path"):
+        planner_payload["model_path"] = resolve_repo_path(planner_payload["model_path"])
+    if planner_payload.get("tokenizer_path"):
+        planner_payload["tokenizer_path"] = resolve_repo_path(planner_payload["tokenizer_path"])
+    if planner_payload.get("metadata") is None:
+        planner_payload.pop("metadata")
+    planner_model = PlannerModelCfg(**planner_payload)
 
     return Config(
         mode=d.get("mode", "wsd"),

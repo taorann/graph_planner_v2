@@ -1,5 +1,9 @@
 # configs/experiments/planner_grpo_4gpu.yaml
 
+# Repository-local directories that contain the converted Hugging Face
+# checkpoints used during training. These may be absolute paths or paths
+# relative to the project root; the launch script resolves them before
+# exporting environment variables for Ray workers.
 paths:
   planner_model: models/Qwen3-14B
   planner_tokenizer: models/Qwen3-14B
@@ -8,7 +12,11 @@ paths:
 
 graph_planner:
   planner:
-    propagate_via_ray: false
+    # When set to ``true`` the launcher forwards these variables into Ray's
+    # runtime_env so every remote worker sees the same planner model
+    # configuration. Leave it ``true`` whenever you override the defaults below
+    # (paths, temperature, device map, etc.).
+    propagate_via_ray: true
     env:
       PLANNER_MODEL_PATH: ${paths.planner_model}
       PLANNER_MODEL_TOKENIZER_PATH: ${paths.planner_tokenizer}
@@ -16,6 +24,7 @@ graph_planner:
       PLANNER_MODEL_TOP_P: 0.95
       PLANNER_MODEL_MAX_INPUT_TOKENS: 4096
       PLANNER_MODEL_MAX_TOKENS: 512
+      PLANNER_MODEL_DEVICE_MAP: "[0, 1]"
   cgm:
     propagate_via_ray: true
     env:
@@ -26,7 +35,8 @@ graph_planner:
       CGM_TOP_P: 0.9
       CGM_MAX_TOKENS: 768
       CGM_MAX_INPUT_TOKENS: 8192
-      CGM_DEVICE: cuda
+      CGM_DEVICE: cuda:2
+      CGM_DEVICE_MAP: "[2, 3]"
 
 algorithm:
   adv_estimator: grpo
@@ -92,6 +102,7 @@ actor_rollout_ref:
       use_orig_params: true
       sync_module_states: true
       param_offload: true
+      optimizer_offload: true
 
 rllm:
   env:
@@ -123,7 +134,7 @@ parallel:
   replicas: 1
   workflow_parallel: 1
   tensor_parallel_planner: 1
-  tensor_parallel_cgm: 1
+  tensor_parallel_cgm: 2
 
 resources:
   num_gpus: 4

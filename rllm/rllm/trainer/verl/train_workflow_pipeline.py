@@ -10,7 +10,7 @@ from rllm.trainer.verl.agent_workflow_trainer_fireworks import (
     FireworksAgentWorkflowPPOTrainer,
 )
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
-from verl.trainer.ppo.reward import load_reward_manager
+from .train_agent_ppo import _maybe_load_reward_managers
 from verl.utils.device import is_cuda_available
 
 
@@ -159,9 +159,8 @@ class PipelineTaskRunner:
             role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
             mapping[Role.RefPolicy] = actor_pool_id
 
-        # Load the reward manager for training and validation.
-        reward_fn = load_reward_manager(config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {}))
-        val_reward_fn = load_reward_manager(config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {}))
+        # Load the reward manager for training and validation if configured.
+        reward_fn, val_reward_fn = _maybe_load_reward_managers(config, tokenizer)
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
         if workflow_class is None:
