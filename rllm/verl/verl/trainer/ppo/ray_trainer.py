@@ -26,7 +26,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from pprint import pprint
-from typing import Optional
+from typing import Any, Optional, Tuple
 
 import numpy as np
 import ray
@@ -62,6 +62,120 @@ from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 
 WorkerType = type[Worker]
+
+
+def _oc_get(mapping, key, default=None) -> Any:
+    # OmegaConf or dict safe get
+    if hasattr(mapping, "get"):
+        try:
+            return mapping.get(key, default)
+        except Exception:
+            return default
+    return getattr(mapping, key, default)
+
+
+def _oc_has(mapping, key) -> bool:
+    try:
+        if hasattr(mapping, "__contains__"):
+            return key in mapping
+    except Exception:
+        pass
+    try:
+        _ = _oc_get(mapping, key, None)
+        return _ is not None
+    except Exception:
+        return False
+
+
+def _oc_set(mapping, key, value):
+    # OmegaConf or dict safe set
+    try:
+        mapping[key] = value
+    except Exception:
+        try:
+            setattr(mapping, key, value)
+        except Exception:
+            pass
+
+
+def _oc_del(mapping, key):
+    try:
+        if hasattr(mapping, "__delitem__"):
+            del mapping[key]
+            return
+    except Exception:
+        pass
+    try:
+        delattr(mapping, key)
+    except Exception:
+        pass
+
+
+def _normalize_actor_batch_keys(actor_cfg) -> None:
+    """
+    Normalize synonyms and drop legacy keys to avoid mutual-exclusion checks:
+      - Prefer 'ppo_micro_batch_size_per_gpu' over 'micro_batch_size_per_gpu'
+      - Prefer 'ppo_micro_batch_size' over 'micro_batch_size'
+      - If per-gpu is set, drop any global key to avoid conflicts (new VERL style)
+    """
+    # Normalize per-gpu
+    ppo_pg = _oc_get(actor_cfg, "ppo_micro_batch_size_per_gpu", None)
+    gen_pg = _oc_get(actor_cfg, "micro_batch_size_per_gpu", None)
+    if ppo_pg is None and gen_pg is not None:
+        _oc_set(actor_cfg, "ppo_micro_batch_size_per_gpu", gen_pg)
+
+    # Normalize global (legacy)
+    ppo_g = _oc_get(actor_cfg, "ppo_micro_batch_size", None)
+    gen_g = _oc_get(actor_cfg, "micro_batch_size", None)
+    if ppo_g is None and gen_g is not None:
+        _oc_set(actor_cfg, "ppo_micro_batch_size", gen_g)
+
+    # If per-gpu exists, drop any global to honor new rule and avoid mutual exclusion
+    if _oc_has(actor_cfg, "ppo_micro_batch_size_per_gpu"):
+        if _oc_has(actor_cfg, "ppo_micro_batch_size"):
+            _oc_del(actor_cfg, "ppo_micro_batch_size")
+        if _oc_has(actor_cfg, "micro_batch_size"):
+            _oc_del(actor_cfg, "micro_batch_size")
+
+    # Drop generic legacy keys unconditionally after normalization
+    if _oc_has(actor_cfg, "micro_batch_size_per_gpu"):
+        _oc_del(actor_cfg, "micro_batch_size_per_gpu")
+    if _oc_has(actor_cfg, "micro_batch_size"):
+        _oc_del(actor_cfg, "micro_batch_size")
+
+
+def _resolve_micro_batch_sizes(cfg) -> Tuple[int | None, int | None]:
+    """
+    Return (global_micro, per_gpu_micro) with graceful fallback.
+    If global is missing, derive it as per_gpu * dp_world (not multiplied by grad_accum).
+    """
+    actor = cfg.actor_rollout_ref.actor
+    per_gpu = _oc_get(actor, "ppo_micro_batch_size_per_gpu", None)
+    global_mb = _oc_get(actor, "ppo_micro_batch_size", None)
+
+    # Derive a global value only if missing and per-gpu present
+    if (global_mb is None) and (per_gpu is not None):
+        try:
+            dp_world = int(cfg.trainer.n_gpus_per_node) * int(cfg.trainer.nnodes)
+            if dp_world <= 0:
+                dp_world = 1
+        except Exception:
+            dp_world = 1
+        try:
+            global_mb = int(per_gpu) * dp_world
+        except Exception:
+            global_mb = None
+
+    try:
+        global_mb = int(global_mb) if global_mb is not None else None
+    except Exception:
+        global_mb = None
+    try:
+        per_gpu = int(per_gpu) if per_gpu is not None else None
+    except Exception:
+        per_gpu = None
+
+    return global_mb, per_gpu
 
 
 class Role(Enum):
@@ -389,7 +503,29 @@ class RayPPOTrainer:
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
     def _validate_config(self):
+        # --- Added: normalize and resolve micro-batch sizes up front ---
+        try:
+            actor_cfg = self.config.actor_rollout_ref.actor
+            _normalize_actor_batch_keys(actor_cfg)
+            g_mb, pg_mb = _resolve_micro_batch_sizes(self.config)
+            # Store internally for downstream computations (do not write back deprecated keys)
+            self._resolved_global_micro_batch_size = g_mb
+            self._resolved_per_gpu_micro_batch_size = pg_mb
+            # Optional debug
+            try:
+                print(f"[MB-RESOLVE] per_gpu={pg_mb}, global={g_mb}")
+            except Exception:
+                pass
+        except Exception:
+            # Best-effort only; do not block validation
+            self._resolved_global_micro_batch_size = None
+            self._resolved_per_gpu_micro_batch_size = None
+        # --- end of Added block ---
+
         config = self.config
+        resolved_global_mb = getattr(self, "_resolved_global_micro_batch_size", None)
+        resolved_per_gpu_mb = getattr(self, "_resolved_per_gpu_micro_batch_size", None)
+
         # number of GPUs total
         n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
         if config.actor_rollout_ref.actor.strategy == "megatron":
@@ -406,7 +542,10 @@ class RayPPOTrainer:
             megatron_dp = n_gpus // (
                 model_parallel_size * config.actor_rollout_ref.actor.megatron.context_parallel_size
             )
-            minimal_bsz = megatron_dp * config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu
+            per_gpu_mb = resolved_per_gpu_mb
+            if per_gpu_mb is None:
+                per_gpu_mb = _oc_get(config.actor_rollout_ref.actor, "ppo_micro_batch_size_per_gpu", None)
+            minimal_bsz = megatron_dp * per_gpu_mb
         else:
             minimal_bsz = n_gpus
 
@@ -457,12 +596,10 @@ class RayPPOTrainer:
                     )
 
         if not config.actor_rollout_ref.actor.use_dynamic_bsz:
-            # actor: ppo_micro_batch_size vs. ppo_micro_batch_size_per_gpu
-            check_mutually_exclusive(
-                config.actor_rollout_ref.actor.ppo_micro_batch_size,
-                config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu,
-                "actor_rollout_ref.actor",
-            )
+            if resolved_global_mb is None and resolved_per_gpu_mb is None:
+                raise ValueError(
+                    "[actor_rollout_ref.actor] Please set 'ppo_micro_batch_size_per_gpu'."
+                )
 
             if self.use_reference_policy:
                 # reference: log_prob_micro_batch_size vs. log_prob_micro_batch_size_per_gpu
@@ -499,13 +636,12 @@ class RayPPOTrainer:
         if not config.actor_rollout_ref.actor.use_dynamic_bsz:
             assert config.data.train_batch_size >= config.actor_rollout_ref.actor.ppo_mini_batch_size
             sp_size = config.actor_rollout_ref.actor.get("ulysses_sequence_parallel_size", 1)
-            if config.actor_rollout_ref.actor.ppo_micro_batch_size is not None:
+            if resolved_global_mb is not None:
                 assert (
-                    config.actor_rollout_ref.actor.ppo_mini_batch_size
-                    % config.actor_rollout_ref.actor.ppo_micro_batch_size
+                    config.actor_rollout_ref.actor.ppo_mini_batch_size % resolved_global_mb
                     == 0
                 )
-                assert config.actor_rollout_ref.actor.ppo_micro_batch_size * sp_size >= n_gpus
+                assert resolved_global_mb * sp_size >= n_gpus
 
         assert config.actor_rollout_ref.actor.loss_agg_mode in [
             "token-mean",
