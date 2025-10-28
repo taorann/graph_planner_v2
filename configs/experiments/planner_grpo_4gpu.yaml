@@ -16,6 +16,7 @@ graph_planner:
       PLANNER_MODEL_TOP_P: 0.95
       PLANNER_MODEL_MAX_INPUT_TOKENS: 4096
       PLANNER_MODEL_MAX_TOKENS: 512
+      PLANNER_MODEL_DEVICE_MAP: "[0, 1]"
   cgm:
     propagate_via_ray: true
     env:
@@ -26,7 +27,8 @@ graph_planner:
       CGM_TOP_P: 0.9
       CGM_MAX_TOKENS: 768
       CGM_MAX_INPUT_TOKENS: 8192
-      CGM_DEVICE: cuda
+      CGM_DEVICE: cuda:2
+      CGM_DEVICE_MAP: "[2, 3]"
 
 algorithm:
   adv_estimator: grpo

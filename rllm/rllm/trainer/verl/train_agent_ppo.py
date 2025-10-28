@@ -21,6 +21,19 @@ from verl.trainer.ppo.reward import load_reward_manager
 from verl.utils.device import is_cuda_available
 
 
+def _maybe_load_reward_managers(config, tokenizer):
+    """Return reward managers if the config defines a reward_model section."""
+
+    reward_cfg = config.get("reward_model") if hasattr(config, "get") else None
+    if not reward_cfg:
+        return None, None
+
+    reward_kwargs = reward_cfg.get("reward_kwargs", {})
+    reward_fn = load_reward_manager(config, tokenizer, num_examine=0, **reward_kwargs)
+    val_reward_fn = load_reward_manager(config, tokenizer, num_examine=1, **reward_kwargs)
+    return reward_fn, val_reward_fn
+
+
 @hydra.main(config_path="../config", config_name="agent_ppo_trainer", version_base=None)
 def main(config):
     run_ppo_agent(config)
@@ -165,9 +178,8 @@ class TaskRunner:
             role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
             mapping[Role.RefPolicy] = global_pool_id
 
-        # Load the reward manager for training and validation.
-        reward_fn = load_reward_manager(config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {}))
-        val_reward_fn = load_reward_manager(config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {}))
+        # Load the reward manager for training and validation if configured.
+        reward_fn, val_reward_fn = _maybe_load_reward_managers(config, tokenizer)
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
         if config.rllm.workflow.use_workflow:
