@@ -253,9 +253,9 @@ if ray is not None:
             OmegaConf.resolve(config)
             pprint(OmegaConf.to_container(config))
 
-            role_worker_allocation = _resolve_role_worker_allocation(config)
+            role_worker_mapping = _resolve_role_worker_allocation(config)
             try:  # pragma: no cover - best effort logging
-                print(f"role_worker_mapping = {role_worker_allocation}")
+                print(f"role_worker_mapping = {role_worker_mapping}")
             except Exception:
                 pass
 
@@ -328,13 +328,13 @@ if ray is not None:
             from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
 
             # Map roles to their corresponding remote worker classes.
-            role_worker_mapping = {
+            ray_role_worker_mapping = {
                 Role.ActorRollout: ray.remote(actor_rollout_cls),
             }
             if use_critic:
                 if critic_worker_cls is None:
                     raise ValueError("Critic worker class must be defined when using a critic")
-                role_worker_mapping[Role.Critic] = ray.remote(critic_worker_cls)
+                ray_role_worker_mapping[Role.Critic] = ray.remote(critic_worker_cls)
 
             # Define the resource pool specification.
             # Map roles to the resource pool.
@@ -350,7 +350,7 @@ if ray is not None:
 
             # Add a reference policy worker if KL loss or KL reward is used.
             if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
-                role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
+                ray_role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
                 mapping[Role.RefPolicy] = global_pool_id
 
             # Load the reward manager for training and validation if configured.
@@ -394,7 +394,7 @@ if ray is not None:
                 return None
 
             trainer = AgentPPOTrainer(
-                config,
+                config=config,
                 resource_pool_manager=resource_pool_manager,
                 reward_fn=reward_fn,
                 val_reward_fn=val_reward_fn,
@@ -403,7 +403,8 @@ if ray is not None:
                 env_class=env_class,
                 agent_args=agent_args,
                 env_args=env_args,
-                role_worker_allocation=role_worker_allocation,
+                role_worker_mapping=ray_role_worker_mapping,
+                role_worker_allocation=role_worker_mapping,
             )
 
             trainer.fit()
@@ -452,9 +453,9 @@ else:  # pragma: no cover - exercised only when Ray is unavailable
         OmegaConf.resolve(config)
         pprint(OmegaConf.to_container(config))
 
-        role_worker_allocation = _resolve_role_worker_allocation(config)
+        role_worker_mapping = _resolve_role_worker_allocation(config)
         try:  # pragma: no cover - best effort logging
-            print(f"role_worker_mapping = {role_worker_allocation}")
+            print(f"role_worker_mapping = {role_worker_mapping}")
         except Exception:
             pass
 
@@ -516,13 +517,13 @@ else:  # pragma: no cover - exercised only when Ray is unavailable
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
 
         # Map roles to their corresponding remote worker classes.
-        role_worker_mapping = {
+        ray_role_worker_mapping = {
             Role.ActorRollout: ray.remote(actor_rollout_cls),
         }
         if use_critic:
             if critic_worker_cls is None:
                 raise ValueError("Critic worker class must be defined when using a critic")
-            role_worker_mapping[Role.Critic] = ray.remote(critic_worker_cls)
+            ray_role_worker_mapping[Role.Critic] = ray.remote(critic_worker_cls)
 
         # Define the resource pool specification.
         # Map roles to the resource pool.
@@ -538,7 +539,7 @@ else:  # pragma: no cover - exercised only when Ray is unavailable
 
         # Add a reference policy worker if KL loss or KL reward is used.
         if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
-            role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
+            ray_role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
             mapping[Role.RefPolicy] = global_pool_id
 
         # Load the reward manager for training and validation if configured.
@@ -568,7 +569,7 @@ else:  # pragma: no cover - exercised only when Ray is unavailable
             trainer = AgentWorkflowPPOTrainer(
                 config=config,
                 tokenizer=tokenizer,
-                role_worker_mapping=role_worker_mapping,
+                role_worker_mapping=ray_role_worker_mapping,
                 resource_pool_manager=resource_pool_manager,
                 ray_worker_group_cls=ray_worker_group_cls,
                 reward_fn=reward_fn,
@@ -576,7 +577,7 @@ else:  # pragma: no cover - exercised only when Ray is unavailable
                 workflow_class=workflow_class,
                 workflow_args=workflow_args,
             )
-            setattr(trainer, "role_worker_allocation", role_worker_allocation)
+            setattr(trainer, "role_worker_allocation", role_worker_mapping)
 
         else:
             if env_class is None:
@@ -594,7 +595,7 @@ else:  # pragma: no cover - exercised only when Ray is unavailable
             trainer = AgentPPOTrainer(
                 config=config,
                 tokenizer=tokenizer,
-                role_worker_mapping=role_worker_mapping,
+                role_worker_mapping=ray_role_worker_mapping,
                 resource_pool_manager=resource_pool_manager,
                 ray_worker_group_cls=ray_worker_group_cls,
                 reward_fn=reward_fn,
@@ -603,7 +604,7 @@ else:  # pragma: no cover - exercised only when Ray is unavailable
                 agent_class=agent_class,
                 env_args=env_args,
                 agent_args=agent_args,
-                role_worker_allocation=role_worker_allocation,
+                role_worker_allocation=role_worker_mapping,
             )
 
         trainer.init_workers()
