@@ -43,19 +43,6 @@ def _maybe_load_reward_managers(config, tokenizer):
     return reward_fn, val_reward_fn
 
 
-def _maybe_load_reward_managers(config, tokenizer):
-    """Return reward managers if the config defines a reward_model section."""
-
-    reward_cfg = config.get("reward_model") if hasattr(config, "get") else None
-    if not reward_cfg:
-        return None, None
-
-    reward_kwargs = reward_cfg.get("reward_kwargs", {})
-    reward_fn = load_reward_manager(config, tokenizer, num_examine=0, **reward_kwargs)
-    val_reward_fn = load_reward_manager(config, tokenizer, num_examine=1, **reward_kwargs)
-    return reward_fn, val_reward_fn
-
-
 @hydra.main(config_path="../config", config_name="agent_ppo_trainer", version_base=None)
 def main(config):
     run_ppo_agent(config)
@@ -89,8 +76,16 @@ def _import_agent_components():
 
 
 def _import_workflow_components():
-    from rllm.trainer.verl.agent_workflow_trainer import AgentWorkflowPPOTrainer
-    from rllm.trainer.verl.train_workflow_pipeline import run_workflow_pipeline
+    try:
+        from rllm.trainer.verl.agent_workflow_trainer import AgentWorkflowPPOTrainer
+        from rllm.trainer.verl.train_workflow_pipeline import run_workflow_pipeline
+    except ModuleNotFoundError as exc:  # pragma: no cover - exercised without workflow extras
+        missing_dep = exc.name or "required workflow dependency"
+        raise ImportError(
+            "Workflow training components are unavailable because the optional "
+            f"dependency '{missing_dep}' is not installed. Install the workflow extras "
+            "or disable workflow execution in the configuration."
+        ) from exc
 
     return AgentWorkflowPPOTrainer, run_workflow_pipeline
 
@@ -155,7 +150,6 @@ if ray is not None:
             """
             _require_verl()
             AgentPPOTrainer, _ = _import_agent_components()
-            AgentWorkflowPPOTrainer, run_workflow_pipeline = _import_workflow_components()
             # Print the initial configuration. `resolve=True` will evaluate symbolic values.
             from pprint import pprint
 
@@ -272,6 +266,7 @@ if ray is not None:
                 workflow_cfg = rllm_cfg.get("workflow") if hasattr(rllm_cfg, "get") else None
 
             if workflow_cfg and workflow_cfg.get("use_workflow"):
+                AgentWorkflowPPOTrainer, run_workflow_pipeline = _import_workflow_components()
                 if workflow_class is None:
                     workflow_name = (
                         workflow_cfg.get("name") if hasattr(workflow_cfg, "get") else workflow_cfg.name
