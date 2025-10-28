@@ -112,6 +112,10 @@ rllm:
     max_steps: 50
     overlong_filter: true
 
+verl:
+  role_worker_mapping:
+    rollout: [0, 1, 2, 3]
+
 trainer:
   total_epochs: 1000
   critic_warmup: 0

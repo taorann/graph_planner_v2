@@ -6,9 +6,19 @@ import ray
 from omegaconf import OmegaConf
 
 from rllm.trainer.env_agent_mappings import WORKFLOW_CLASS_MAPPING
-from rllm.trainer.verl.agent_workflow_trainer_fireworks import (
-    FireworksAgentWorkflowPPOTrainer,
-)
+try:
+    from rllm.trainer.verl.agent_workflow_trainer_fireworks import (
+        FireworksAgentWorkflowPPOTrainer,
+    )
+except Exception:  # pragma: no cover - fireworks optional
+    try:
+        from rllm.trainer.verl.agent_workflow_trainer_vllm import (
+            AgentWorkflowPPOTrainer as FireworksAgentWorkflowPPOTrainer,
+        )
+    except Exception:  # pragma: no cover - fallback to default trainer
+        from rllm.trainer.verl.agent_workflow_trainer import (
+            AgentWorkflowPPOTrainer as FireworksAgentWorkflowPPOTrainer,
+        )
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from .train_agent_ppo import _maybe_load_reward_managers
 from verl.utils.device import is_cuda_available

@@ -33,8 +33,11 @@ os.environ.setdefault("PYTHONPATH", str(_REPO_ROOT))
 
 from omegaconf import DictConfig, OmegaConf
 
+import ray
+
 from graph_planner.infra.config import resolve_repo_path
 from graph_planner.infra.vendor import ensure_rllm_importable
+from graph_planner.integrations.rllm.shared_actors import CGMTool, PlannerEngine
 
 LOGGER = logging.getLogger("planner_grpo.train")
 
@@ -167,6 +170,48 @@ def _ensure_runtime_env(
     runtime_env["env_vars"] = env_vars
     OmegaConf.update(cfg, "ray.runtime_env", runtime_env, merge=False)
     return runtime_env
+
+
+def _get_or_create_actor(name: str, cls):
+    try:
+        return ray.get_actor(name)
+    except Exception:
+        return cls.options(name=name, lifetime="detached").remote()
+
+
+def _maybe_wrap_save_with_reload(trainer) -> None:
+    """Wrap trainer save to refresh the shared planner actor."""
+    if trainer is None:
+        return
+
+    try:
+        planner_actor = ray.get_actor("planner_engine")
+    except Exception:
+        return
+
+    save_attr = None
+    for candidate in ("save", "save_checkpoint"):
+        method = getattr(trainer, candidate, None)
+        if callable(method):
+            save_attr = candidate
+            break
+    if save_attr is None:
+        return
+
+    original = getattr(trainer, save_attr)
+
+    def _wrapped_save(*args, **kwargs):
+        checkpoint_path = original(*args, **kwargs)
+        target_path = checkpoint_path if isinstance(checkpoint_path, str) else os.environ.get("PLANNER_MODEL_PATH")
+        if target_path:
+            try:
+                ray.get(planner_actor.reload_from.remote(target_path))
+                print(f"[SYNC] planner_engine reloaded from: {target_path}")
+            except Exception as exc:  # pragma: no cover - best effort logging
+                print(f"[SYNC] planner_engine reload failed: {exc}")
+        return checkpoint_path
+
+    setattr(trainer, save_attr, _wrapped_save)
 
 
 def _resolve_cgm_env(cfg: DictConfig) -> tuple[dict[str, str], bool]:
@@ -354,10 +399,6 @@ def main() -> None:
         LOGGER.info("Dry run requested; skipping Ray initialisation and training launch.")
         return
 
-    from importlib import import_module
-
-    ray = import_module("ray")
-
     address = _resolve_ray_address(args, cfg)
 
     if address is None:
@@ -370,6 +411,11 @@ def main() -> None:
     ray.init(address=address, runtime_env=runtime_env or None, ignore_reinit_error=False)
 
     try:
+        planner_engine = _get_or_create_actor("planner_engine", PlannerEngine)
+        cgm_tool = _get_or_create_actor("cgm_tool", CGMTool)
+        _ = (planner_engine, cgm_tool)
+        print("[INIT] Shared actors ready: planner_engine & cgm_tool")
+
         _register_datasets(train_files, val_files)
 
         from rllm.trainer.agent_trainer import AgentTrainer  # noqa: WPS433
@@ -381,6 +427,7 @@ def main() -> None:
             env_class=env_cls,
             config=cfg,
         )
+        _maybe_wrap_save_with_reload(trainer)
 
         LOGGER.info("Starting GRPO training loop ...")
         trainer.train()

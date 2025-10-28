@@ -5,9 +5,11 @@ Note that we don't combine the main with ray_trainer as ray_trainer is used by o
 
 import os
 import socket
+from collections.abc import Mapping
+from typing import Any, List
 
 import hydra
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
 try:  # pragma: no cover - optional dependency for distributed runs
     import ray
@@ -28,6 +30,95 @@ except ModuleNotFoundError:  # pragma: no cover - exercised when Verl extras mis
         raise ImportError(
             "Verl reward manager unavailable. Install Verl extras to run PPO training."
         )
+
+
+def _coerce_int_list(value: Any) -> List[int]:
+    """Convert arbitrary config values into a list of integers."""
+
+    if value is None:
+        return []
+
+    if isinstance(value, Mapping):
+        candidates = value.values()
+    elif isinstance(value, (list, tuple, set)):
+        candidates = value
+    elif isinstance(value, str):
+        # Allow comma/space separated inputs for robustness.
+        candidates = [part for part in value.replace(",", " ").split() if part]
+    else:
+        candidates = [value]
+
+    ints: List[int] = []
+    for item in candidates:
+        try:
+            ints.append(int(item))
+        except (TypeError, ValueError):  # pragma: no cover - defensive casting
+            continue
+    return ints
+
+
+def _resolve_role_worker_allocation(config) -> dict[str, List[int]]:
+    """Resolve user-provided role worker mapping or derive a sensible default."""
+
+    mapping_node = None
+    try:  # pragma: no cover - OmegaConf.select handles dotted lookups
+        mapping_node = OmegaConf.select(config, "verl.role_worker_mapping", default=None)
+    except Exception:
+        mapping_node = None
+    if mapping_node is None:
+        try:
+            mapping_node = OmegaConf.select(config, "trainer.role_worker_mapping", default=None)
+        except Exception:  # pragma: no cover - defensive
+            mapping_node = None
+
+    allocation: dict[str, List[int]] = {}
+    if isinstance(mapping_node, DictConfig):
+        mapping_node = OmegaConf.to_container(mapping_node, resolve=True)
+    if isinstance(mapping_node, Mapping):
+        for key, raw_value in mapping_node.items():
+            ints = _coerce_int_list(raw_value)
+            if ints:
+                allocation[str(key)] = ints
+    elif mapping_node is not None:
+        ints = _coerce_int_list(mapping_node)
+        if ints:
+            allocation["rollout"] = ints
+
+    if allocation:
+        return allocation
+
+    resources_node = None
+    try:
+        resources_node = OmegaConf.select(config, "resources", default=None)
+    except Exception:  # pragma: no cover - defensive
+        resources_node = None
+
+    resources_dict: dict[str, Any] = {}
+    if isinstance(resources_node, DictConfig):
+        resources_dict = dict(OmegaConf.to_container(resources_node, resolve=True) or {})
+    elif isinstance(resources_node, Mapping):
+        resources_dict = dict(resources_node)
+    elif resources_node is not None:
+        for attr in ("ray_gpus", "num_gpus"):
+            try:
+                value = getattr(resources_node, attr)
+            except AttributeError:
+                continue
+            if value is not None:
+                resources_dict[attr] = value
+
+    n_workers = 1
+    for key in ("ray_gpus", "num_gpus"):
+        value = resources_dict.get(key)
+        if value is None:
+            continue
+        try:
+            n_workers = max(int(value), 1)
+            break
+        except (TypeError, ValueError):  # pragma: no cover - invalid config value
+            continue
+
+    return {"rollout": list(range(n_workers))}
 
 
 def _maybe_load_reward_managers(config, tokenizer):
@@ -162,6 +253,12 @@ if ray is not None:
             OmegaConf.resolve(config)
             pprint(OmegaConf.to_container(config))
 
+            role_worker_mapping = _resolve_role_worker_allocation(config)
+            try:  # pragma: no cover - best effort logging
+                print(f"role_worker_mapping = {role_worker_mapping}")
+            except Exception:
+                pass
+
             # Download the checkpoint from HDFS to the local machine.
             # `use_shm` determines whether to use shared memory, which could lead to faster model loading if turned on
             local_path = copy_to_local(
@@ -231,13 +328,13 @@ if ray is not None:
             from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
 
             # Map roles to their corresponding remote worker classes.
-            role_worker_mapping = {
+            ray_role_worker_mapping = {
                 Role.ActorRollout: ray.remote(actor_rollout_cls),
             }
             if use_critic:
                 if critic_worker_cls is None:
                     raise ValueError("Critic worker class must be defined when using a critic")
-                role_worker_mapping[Role.Critic] = ray.remote(critic_worker_cls)
+                ray_role_worker_mapping[Role.Critic] = ray.remote(critic_worker_cls)
 
             # Define the resource pool specification.
             # Map roles to the resource pool.
@@ -253,7 +350,7 @@ if ray is not None:
 
             # Add a reference policy worker if KL loss or KL reward is used.
             if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
-                role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
+                ray_role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
                 mapping[Role.RefPolicy] = global_pool_id
 
             # Load the reward manager for training and validation if configured.
@@ -297,7 +394,7 @@ if ray is not None:
                 return None
 
             trainer = AgentPPOTrainer(
-                config,
+                config=config,
                 resource_pool_manager=resource_pool_manager,
                 reward_fn=reward_fn,
                 val_reward_fn=val_reward_fn,
@@ -306,6 +403,8 @@ if ray is not None:
                 env_class=env_class,
                 agent_args=agent_args,
                 env_args=env_args,
+                role_worker_mapping=ray_role_worker_mapping,
+                role_worker_allocation=role_worker_mapping,
             )
 
             trainer.fit()
@@ -353,6 +452,12 @@ else:  # pragma: no cover - exercised only when Ray is unavailable
         OmegaConf.register_new_resolver("mul", lambda x, y: int(x) * int(y))
         OmegaConf.resolve(config)
         pprint(OmegaConf.to_container(config))
+
+        role_worker_mapping = _resolve_role_worker_allocation(config)
+        try:  # pragma: no cover - best effort logging
+            print(f"role_worker_mapping = {role_worker_mapping}")
+        except Exception:
+            pass
 
         # Download the checkpoint from HDFS to the local machine.
         # `use_shm` determines whether to use shared memory, which could lead to faster model loading if turned on
@@ -412,13 +517,13 @@ else:  # pragma: no cover - exercised only when Ray is unavailable
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
 
         # Map roles to their corresponding remote worker classes.
-        role_worker_mapping = {
+        ray_role_worker_mapping = {
             Role.ActorRollout: ray.remote(actor_rollout_cls),
         }
         if use_critic:
             if critic_worker_cls is None:
                 raise ValueError("Critic worker class must be defined when using a critic")
-            role_worker_mapping[Role.Critic] = ray.remote(critic_worker_cls)
+            ray_role_worker_mapping[Role.Critic] = ray.remote(critic_worker_cls)
 
         # Define the resource pool specification.
         # Map roles to the resource pool.
@@ -434,7 +539,7 @@ else:  # pragma: no cover - exercised only when Ray is unavailable
 
         # Add a reference policy worker if KL loss or KL reward is used.
         if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
-            role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
+            ray_role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
             mapping[Role.RefPolicy] = global_pool_id
 
         # Load the reward manager for training and validation if configured.
@@ -464,7 +569,7 @@ else:  # pragma: no cover - exercised only when Ray is unavailable
             trainer = AgentWorkflowPPOTrainer(
                 config=config,
                 tokenizer=tokenizer,
-                role_worker_mapping=role_worker_mapping,
+                role_worker_mapping=ray_role_worker_mapping,
                 resource_pool_manager=resource_pool_manager,
                 ray_worker_group_cls=ray_worker_group_cls,
                 reward_fn=reward_fn,
@@ -472,6 +577,7 @@ else:  # pragma: no cover - exercised only when Ray is unavailable
                 workflow_class=workflow_class,
                 workflow_args=workflow_args,
             )
+            setattr(trainer, "role_worker_allocation", role_worker_mapping)
 
         else:
             if env_class is None:
@@ -489,7 +595,7 @@ else:  # pragma: no cover - exercised only when Ray is unavailable
             trainer = AgentPPOTrainer(
                 config=config,
                 tokenizer=tokenizer,
-                role_worker_mapping=role_worker_mapping,
+                role_worker_mapping=ray_role_worker_mapping,
                 resource_pool_manager=resource_pool_manager,
                 ray_worker_group_cls=ray_worker_group_cls,
                 reward_fn=reward_fn,
@@ -498,6 +604,7 @@ else:  # pragma: no cover - exercised only when Ray is unavailable
                 agent_class=agent_class,
                 env_args=env_args,
                 agent_args=agent_args,
+                role_worker_allocation=role_worker_mapping,
             )
 
         trainer.init_workers()
