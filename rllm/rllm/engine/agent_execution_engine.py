@@ -8,6 +8,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 import torch
 
+try:  # graph_planner optional integration
+    from graph_planner.integrations.rllm import planner_rpc  # type: ignore[attr-defined]
+except Exception:  # pragma: no cover - optional dependency
+    planner_rpc = None  # type: ignore[assignment]
+
 from rllm.agents.agent import Action, BaseAgent, Trajectory
 from rllm.agents.utils import (
     convert_messages_to_tokens_and_masks,
@@ -22,6 +27,35 @@ from rllm.misc import colorful_print
 from rllm.parser import ChatTemplateParser
 
 logger = logging.getLogger(__name__)
+
+
+class _PlannerRolloutFallback:
+    """Synchronous adapter that mirrors planner_rpc's fallback expectations."""
+
+    def __init__(self, rollout_engine, messages, base_kwargs):
+        self._rollout_engine = rollout_engine
+        self._messages = list(messages)
+        self._base_kwargs = dict(base_kwargs)
+
+    def generate(self, prompts, **kwargs):  # pragma: no cover - exercised via planner RPC
+        if not prompts:
+            return []
+
+        params = dict(self._base_kwargs)
+        meta_info = kwargs.pop("meta_info", None)
+        if meta_info is not None and "validate" not in params:
+            params["validate"] = bool(meta_info.get("validate", False))
+
+        params.update(kwargs)
+        application_id = params.pop("application_id", None)
+
+        coro = self._rollout_engine.get_model_response(
+            self._messages,
+            application_id=application_id,
+            **params,
+        )
+        output = asyncio.run(coro)
+        return [output.text]
 
 
 class AgentExecutionEngine:
@@ -141,13 +175,47 @@ class AgentExecutionEngine:
         sampling_params = self.sampling_params.copy()
         sampling_params.update(kwargs)
 
+        if planner_rpc is not None:
+            try:
+                prompt_text = self.chat_parser.parse(
+                    prompt,
+                    add_generation_prompt=True,
+                    is_first_msg=True,
+                )
+                fallback_kwargs = {"application_id": application_id, "enforce_max_prompt_length": False}
+                if self.engine_name == "verl":
+                    meta_info = sampling_params.get("meta_info", {})
+                    fallback_kwargs["validate"] = bool(meta_info.get("validate", False))
+                fallback_engine = _PlannerRolloutFallback(self.rollout_engine, prompt, fallback_kwargs)
+                responses = await asyncio.to_thread(
+                    planner_rpc.generate,
+                    [prompt_text],
+                    fallback_engine=fallback_engine,
+                    **sampling_params,
+                )
+                if responses:
+                    return responses[0]
+            except Exception:  # pragma: no cover - defensive fallback
+                logger.exception("Planner RPC generate failed; falling back to rollout engine")
+
         if self.engine_name == "openai":
-            output = await self.rollout_engine.get_model_response(prompt, application_id=application_id, enforce_max_prompt_length=False, **sampling_params)
+            output = await self.rollout_engine.get_model_response(
+                prompt,
+                application_id=application_id,
+                enforce_max_prompt_length=False,
+                **sampling_params,
+            )
             return output.text
         elif self.engine_name == "verl":
             meta_data = sampling_params.pop("meta_info", {})
             validate = meta_data.get("validate", False)
-            output = await self.rollout_engine.get_model_response(prompt, application_id=application_id, validate=validate, enforce_max_prompt_length=False, **sampling_params)
+            output = await self.rollout_engine.get_model_response(
+                prompt,
+                application_id=application_id,
+                validate=validate,
+                enforce_max_prompt_length=False,
+                **sampling_params,
+            )
             return output.text
         else:
             raise NotImplementedError(f"Engine type '{self.engine_name}' not supported")

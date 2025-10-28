@@ -33,8 +33,11 @@ os.environ.setdefault("PYTHONPATH", str(_REPO_ROOT))
 
 from omegaconf import DictConfig, OmegaConf
 
+import ray
+
 from graph_planner.infra.config import resolve_repo_path
 from graph_planner.infra.vendor import ensure_rllm_importable
+from graph_planner.integrations.rllm.shared_actors import CGMTool, PlannerEngine
 
 LOGGER = logging.getLogger("planner_grpo.train")
 
@@ -167,6 +170,13 @@ def _ensure_runtime_env(
     runtime_env["env_vars"] = env_vars
     OmegaConf.update(cfg, "ray.runtime_env", runtime_env, merge=False)
     return runtime_env
+
+
+def _get_or_create_actor(name: str, cls):
+    try:
+        return ray.get_actor(name)
+    except Exception:
+        return cls.options(name=name, lifetime="detached").remote()
 
 
 def _resolve_cgm_env(cfg: DictConfig) -> tuple[dict[str, str], bool]:
@@ -354,10 +364,6 @@ def main() -> None:
         LOGGER.info("Dry run requested; skipping Ray initialisation and training launch.")
         return
 
-    from importlib import import_module
-
-    ray = import_module("ray")
-
     address = _resolve_ray_address(args, cfg)
 
     if address is None:
@@ -370,6 +376,11 @@ def main() -> None:
     ray.init(address=address, runtime_env=runtime_env or None, ignore_reinit_error=False)
 
     try:
+        planner_engine = _get_or_create_actor("planner_engine", PlannerEngine)
+        cgm_tool = _get_or_create_actor("cgm_tool", CGMTool)
+        _ = (planner_engine, cgm_tool)
+        print("[INIT] Shared actors ready: planner_engine & cgm_tool")
+
         _register_datasets(train_files, val_files)
 
         from rllm.trainer.agent_trainer import AgentTrainer  # noqa: WPS433

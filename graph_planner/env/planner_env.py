@@ -4,13 +4,39 @@ from __future__ import annotations
 import base64
 import json
 import os
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from difflib import unified_diff
 
+try:  # pragma: no cover - optional runtime dependency
+    import ray
+except Exception:  # pragma: no cover - ray optional outside training
+    ray = None  # type: ignore[assignment]
+
 from ..agents.common import text_protocol
 from ..agents.common.chat import action_to_payload
+try:
+    from ..agents.common.chat import extract_json_payload
+except Exception:
+    # Minimal JSON payload extraction fallback (brace match)
+    def extract_json_payload(text):
+        import json as _json
+        import re as _re
+
+        m = _re.search(r"\{.*\}", str(text), _re.S)
+        if not m:
+            return None
+        try:
+            return _json.loads(m.group(0))
+        except Exception:
+            return None
+
 from ..agents.common.contracts import ProtocolError, validate_planner_action
+try:
+    from ..agents.common.contracts import CGM_PATCH_INSTRUCTION, CGM_SYSTEM_PROMPT
+except Exception:
+    CGM_PATCH_INSTRUCTION = ""
+    CGM_SYSTEM_PROMPT = ""
 from ..core.actions import (
     ActionUnion,
     ExploreAction,
@@ -20,11 +46,25 @@ from ..core.actions import (
     SubmitAction,
 )
 from ..infra.config import Config, load as load_config
+try:
+    from ..integrations.codefuse_cgm.formatting import GraphLinearizer, SnippetFormatter
+except Exception:
+    # Lightweight dummies
+
+    class GraphLinearizer:
+        def linearize(self, payload):
+            return "" if payload is None else str(payload)
+
+
+    class SnippetFormatter:
+        def format(self, snippets):
+            return "" if not snippets else str(snippets)
 from ..memory import graph_adapter, mem_candidates, subgraph_store, text_memory
 from ..memory.subgraph_store import WorkingSubgraph
 from ..runtime.sandbox import SandboxConfig, SandboxRuntime
 from aci.schema import Plan, PlanTarget
 from aci.guard import GuardError, enforce_patch_guard
+from ..agents.rule_based import cgm_adapter
 from ..agents.rule_based.test_prioritizer import prioritize_tests
 
 
@@ -42,6 +82,15 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(value)
     except Exception:
         return default
+
+
+def _get_shared_actor(name: str):  # pragma: no cover - simple Ray helper
+    if ray is None or not getattr(ray, "is_initialized", lambda: False)():
+        return None
+    try:
+        return ray.get_actor(name)
+    except Exception:
+        return None
 
 
 class PlannerEnv:
@@ -127,6 +176,8 @@ class PlannerEnv:
 
         self.last_candidates = []
         self.last_reads = []
+        self._cgm_linearizer = GraphLinearizer()
+        self._cgm_snippet_formatter = SnippetFormatter()
         return self._obs()
 
     def close(self) -> None:
@@ -585,6 +636,140 @@ class PlannerEnv:
             )
         return targets
 
+    def _build_cgm_chat_prompt(
+        self,
+        *,
+        plan_text: str,
+        plan_targets: List[Dict[str, Any]],
+        payload: Dict[str, Any],
+        snippets: List[Dict[str, Any]],
+    ) -> str:
+        sections: List[str] = [CGM_PATCH_INSTRUCTION]
+
+        issue = dict(self.issue)
+        payload_issue = payload.get("issue") or {}
+        if isinstance(payload_issue, Mapping):
+            issue.update({k: v for k, v in payload_issue.items() if v})
+        issue_lines: List[str] = []
+        title = issue.get("title") or issue.get("summary")
+        body = issue.get("body") or issue.get("description")
+        if title:
+            issue_lines.append(str(title))
+        if body:
+            issue_lines.append(str(body))
+        if issue_lines:
+            sections.append("[Issue]\n" + "\n".join(issue_lines))
+
+        if not plan_text:
+            plan_lines: List[str] = []
+            for target in plan_targets:
+                path = target.get("path", "?")
+                start = target.get("start", "?")
+                end = target.get("end", start)
+                plan_lines.append(f"- {path} L{start}-{end}")
+            if plan_lines:
+                plan_text = "Plan to modify:\n" + "\n".join(plan_lines)
+        if plan_text:
+            sections.append("[Subplan]\n" + str(plan_text))
+
+        graph_payload = payload.get("graph")
+        graph_text = self._cgm_linearizer.linearize(graph_payload)
+        if graph_text:
+            sections.append("[Subgraph]\n" + graph_text)
+
+        snippets_text = self._cgm_snippet_formatter.format(snippets)
+        if snippets_text:
+            sections.append("[Snippets]\n" + snippets_text)
+
+        text_memory = payload.get("text_memory") or {}
+        if isinstance(text_memory, Mapping):
+            memory_lines: List[str] = []
+            summary = text_memory.get("session_summary")
+            notes = text_memory.get("turn_notes")
+            if summary:
+                memory_lines.append(str(summary))
+            if notes:
+                memory_lines.append(str(notes))
+            if memory_lines:
+                sections.append("[Memory]\n" + "\n".join(memory_lines))
+
+        files = payload.get("files")
+        if isinstance(files, Mapping) and files:
+            file_lines: List[str] = []
+            for path, content in files.items():
+                preview = str(content)[:400]
+                file_lines.append(f"--- {path} ---\n{preview}")
+            if file_lines:
+                sections.append("[Files]\n" + "\n\n".join(file_lines))
+
+        return "\n\n".join(section for section in sections if section)
+
+    def _parse_cgm_chat_response(
+        self,
+        response: str,
+        *,
+        fallback_summary: str,
+    ) -> Optional[Dict[str, Any]]:
+        if not response:
+            return None
+        payload = extract_json_payload(response)
+        if payload is None:
+            try:
+                payload = json.loads(response)
+            except Exception:
+                return None
+        if not isinstance(payload, Mapping):
+            return None
+
+        patch_obj: Optional[Mapping[str, Any]] = None
+        candidate = payload.get("patch")
+        if isinstance(candidate, Mapping):
+            patch_obj = candidate
+        elif isinstance(payload.get("edits"), Sequence):
+            patch_obj = payload
+        if patch_obj is None:
+            return None
+
+        edits_raw = patch_obj.get("edits")
+        if not isinstance(edits_raw, Sequence):
+            return None
+
+        edits: List[Dict[str, Any]] = []
+        for entry in edits_raw:
+            if not isinstance(entry, Mapping):
+                continue
+            path = entry.get("path")
+            if not path:
+                continue
+            start = _safe_int(entry.get("start", entry.get("line", 1)), 1)
+            end = max(start, _safe_int(entry.get("end", start), start))
+            new_text = entry.get("new_text") or entry.get("text") or entry.get("diff")
+            if new_text is None:
+                continue
+            text_val = str(new_text)
+            if not text_val.endswith("\n"):
+                text_val += "\n"
+            edits.append(
+                {
+                    "path": str(path),
+                    "start": start,
+                    "end": end,
+                    "new_text": text_val,
+                }
+            )
+        if not edits:
+            return None
+
+        summary = (
+            patch_obj.get("summary")
+            or payload.get("summary")
+            or fallback_summary
+            or "cgm-remote"
+        )
+        confidence = float(payload.get("confidence", 0.5))
+        tests = payload.get("tests") if isinstance(payload.get("tests"), Sequence) else []
+        return {"edits": edits, "summary": str(summary), "confidence": confidence, "tests": tests}
+
     def _generate_cgm_candidates(self, payload: Dict[str, Any], k: int) -> List[Dict[str, Any]]:
         focus_ids = payload.get("graph", {}).get("focus_ids") or []
         plan_targets = self._plan_targets_from_focus(focus_ids)
@@ -594,18 +779,49 @@ class PlannerEnv:
             return []
         plan = self._build_plan(plan_targets)
         plan_text = payload.get("plan_text") or "\n".join(payload.get("plan") or [])
-        linearized = subgraph_store.linearize(self.subgraph, mode=getattr(self.config.collate, "mode", "wsd"))
-        patch = cgm_adapter.generate(
-            subgraph_linearized=linearized,
-            plan=plan,
-            constraints={"max_edits": max(1, len(plan_targets))},
-            snippets=self.last_reads or [],
-            plan_text=plan_text,
-            issue=self.issue,
+        linearized_list = list(
+            subgraph_store.linearize(
+                self.subgraph, mode=getattr(self.config.collate, "mode", "wsd")
+            )
         )
+        snippets = list(self.last_reads or [])
+        patch: Optional[Dict[str, Any]] = None
+        actor = _get_shared_actor("cgm_tool")
+        if actor is not None:
+            try:
+                prompt_text = self._build_cgm_chat_prompt(
+                    plan_text=plan_text,
+                    plan_targets=plan_targets,
+                    payload=payload,
+                    snippets=snippets,
+                )
+                response_text = ray.get(actor.chat.remote([
+                    {"role": "system", "content": CGM_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt_text},
+                ]))
+                patch = self._parse_cgm_chat_response(
+                    response_text,
+                    fallback_summary=plan_text,
+                )
+            except Exception:
+                patch = None
+        if patch is None:
+            linearized_text = "\n".join(str(x) for x in linearized_list)
+            patch = cgm_adapter.generate(
+                subgraph_linearized=linearized_text,
+                plan=plan,
+                constraints={"max_edits": max(1, len(plan_targets))},
+                snippets=snippets,
+                plan_text=plan_text,
+                issue=self.issue,
+            )
+
         edits = list(patch.get("edits") or [])
         if not edits:
             return []
+        max_edits = max(1, len(plan_targets))
+        if len(edits) > max_edits:
+            edits = edits[:max_edits]
         grouped: Dict[str, List[Dict[str, Any]]] = {}
         for edit in edits:
             path = str(edit.get("path") or "")
