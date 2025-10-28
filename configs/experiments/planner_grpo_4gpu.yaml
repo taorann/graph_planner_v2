@@ -1,5 +1,9 @@
 # configs/experiments/planner_grpo_4gpu.yaml
 
+# Repository-local directories that contain the converted Hugging Face
+# checkpoints used during training. These may be absolute paths or paths
+# relative to the project root; the launch script resolves them before
+# exporting environment variables for Ray workers.
 paths:
   planner_model: models/Qwen3-14B
   planner_tokenizer: models/Qwen3-14B
@@ -8,7 +12,11 @@ paths:
 
 graph_planner:
   planner:
-    propagate_via_ray: false
+    # When set to ``true`` the launcher forwards these variables into Ray's
+    # runtime_env so every remote worker sees the same planner model
+    # configuration. Leave it ``true`` whenever you override the defaults below
+    # (paths, temperature, device map, etc.).
+    propagate_via_ray: true
     env:
       PLANNER_MODEL_PATH: ${paths.planner_model}
       PLANNER_MODEL_TOKENIZER_PATH: ${paths.planner_tokenizer}

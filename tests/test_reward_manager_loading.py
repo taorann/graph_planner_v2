@@ -34,7 +34,7 @@ def test_maybe_load_reward_managers_invokes_loader(monkeypatch):
 
     def _spy(*args, **kwargs):
         calls.append((args, kwargs))
-        return kwargs.get("num_examine", args[2])
+        return kwargs["num_examine"]
 
     monkeypatch.setattr(train_agent_ppo, "load_reward_manager", _spy)
 
@@ -49,4 +49,4 @@ def test_maybe_load_reward_managers_invokes_loader(monkeypatch):
 
     assert reward_fn == 0
     assert val_reward_fn == 1
-    assert [call[0][2] for call in calls] == [0, 1]
+    assert [call[1]["num_examine"] for call in calls] == [0, 1]

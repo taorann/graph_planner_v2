@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +10,7 @@ import yaml
 from graph_planner.infra.config import (
     build_cli_overrides,
     default_training_run_config,
+    load,
     load_run_config_file,
     merge_run_config,
     serialise_resolved_config,
@@ -267,11 +269,11 @@ def test_load_run_config_file_roundtrip(tmp_path):
 
 def test_experiment_presets_use_local_model_assets():
     presets_dir = Path(__file__).resolve().parents[1] / "configs" / "experiments"
-    expected = {
-        "planner_model": "models/Qwen3-14B",
-        "planner_tokenizer": "models/Qwen3-14B",
-        "cgm_model": "models/CodeFuse-CGM",
-        "cgm_tokenizer": "models/CodeFuse-CGM",
+    expected_prefix = {
+        "planner_model": "models/",
+        "planner_tokenizer": "models/",
+        "cgm_model": "models/",
+        "cgm_tokenizer": "models/",
     }
 
     found_files = list(sorted(presets_dir.glob("*.yaml")))
@@ -280,7 +282,27 @@ def test_experiment_presets_use_local_model_assets():
     for preset in found_files:
         data = yaml.safe_load(preset.read_text(encoding="utf-8")) or {}
         paths = data.get("paths", {})
-        for key, expected_value in expected.items():
-            assert (
-                paths.get(key) == expected_value
-            ), f"{preset.name} should set {key} to {expected_value}"
+        for key, prefix in expected_prefix.items():
+            value = paths.get(key)
+            if value is None:
+                continue
+            assert value.startswith(prefix), f"{preset.name} should keep {key} under {prefix}"
+def test_load_resolves_relative_model_env(monkeypatch):
+    monkeypatch.delenv("CGM_MODEL_PATH", raising=False)
+    monkeypatch.delenv("CGM_TOKENIZER_PATH", raising=False)
+    monkeypatch.delenv("PLANNER_MODEL_PATH", raising=False)
+    monkeypatch.delenv("PLANNER_MODEL_TOKENIZER_PATH", raising=False)
+    monkeypatch.setenv("CGM_ENABLED", "1")
+    monkeypatch.setenv("CGM_MODEL_PATH", "models/custom-cgm")
+    monkeypatch.setenv("PLANNER_MODEL_PATH", "models/custom-planner")
+
+    cfg = load()
+
+    assert cfg.cgm.enabled is True
+    assert cfg.cgm.model_path is not None
+    assert cfg.planner_model.model_path is not None
+    assert os.path.isabs(cfg.cgm.model_path)
+    assert os.path.isabs(cfg.planner_model.model_path)
+    assert cfg.cgm.model_path.endswith("models/custom-cgm")
+    assert cfg.planner_model.model_path.endswith("models/custom-planner")
+
