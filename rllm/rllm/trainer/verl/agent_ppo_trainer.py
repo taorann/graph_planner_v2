@@ -64,6 +64,55 @@ class AgentPPOTrainer(RayPPOTrainer):
         else:
             print("Using trajectory-level advantage, max_prompt_length and max_response_length will be applied episode-wise")
 
+    def _filter_optimizer_to_planner_only(self):
+        """Restrict optimizer param groups to planner/actor parameters."""
+        opt = getattr(self, "optimizer", None)
+        model = getattr(self, "agent", None) or getattr(self, "policy", None) or None
+        if opt is None or model is None:
+            return
+
+        try:
+            named_params = list(model.named_parameters())
+        except Exception:
+            return
+
+        keep_names = set()
+        for name, param in named_params:
+            lowered = name.lower()
+            if ("actor" in lowered) or ("planner" in lowered) or ("policy" in lowered):
+                if getattr(param, "requires_grad", False):
+                    keep_names.add(name)
+
+        if not keep_names:
+            return
+
+        new_groups = []
+        kept = dropped = 0
+        for group in opt.param_groups:
+            params = []
+            for param in group.get("params", []):
+                param_name = None
+                for name, candidate in named_params:
+                    if candidate is param:
+                        param_name = name
+                        break
+                if param_name is not None and param_name in keep_names:
+                    params.append(param)
+                    kept += 1
+                else:
+                    dropped += 1
+            if params:
+                new_group = dict(group)
+                new_group["params"] = params
+                new_groups.append(new_group)
+
+        if new_groups:
+            opt.param_groups[:] = new_groups
+            try:
+                print(f"[OPT-FILTER] kept={kept} dropped={dropped} groups={len(new_groups)}")
+            except Exception:
+                pass
+
     def init_workers(self):
         super().init_workers()
 
@@ -86,6 +135,13 @@ class AgentPPOTrainer(RayPPOTrainer):
             disable_thinking=self.config.rllm.disable_thinking,
             **self.config.rllm.agent.get("engine_args", {}),
         )
+        try:
+            self._filter_optimizer_to_planner_only()
+        except Exception as exc:  # pragma: no cover - best effort logging
+            try:
+                print(f"[OPT-FILTER] skip due to: {exc}")
+            except Exception:
+                pass
 
     def init_envs_and_agents(self, batch):
         """
