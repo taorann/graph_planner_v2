@@ -13,12 +13,9 @@ CLI / Scripts / Tests
 └── scripts/
     ├── run_rule_agent.py …… 规则 & 本地 LLM 入口
     └── train_planner_grpo.py …… Planner-only GRPO 训练入口
-└── tests/ …… FakeSandbox & 集成测试
-    └── tests/test_rule_agent_pipeline.py …… 规则代理在 FakeSandbox 上的冒烟回归
-    └── tests/test_cgm_adapter.py …… CGM 本地/远端推理覆盖
-    └── tests/test_text_protocol_e2e.py …… 文本轨迹修复协议端到端流程
-    └── tests/test_text_memory.py …… Memory 动作配额与提交/删除流程
-    └── tests/test_toy_mlp.py …… 玩具 MLP 模型的 tokenizer/推理/反向链路
+└── tests/
+    └── test_reward_manager_loading.py …… rLLM 奖励管理器加载兜底覆盖
+└── rllm/tests/ …… 上游 rLLM 子模块自带的代理/环境/工具单测
 └── graph_planner/
     ├── agents/(rule_based|model_based|common)
     ├── env/planner_env.py …… 环境包装（R2E/RepoEnv）
@@ -34,8 +31,9 @@ CLI / Scripts / Tests
 
 - `scripts/run_rule_agent.py` 将配置解析、环境初始化、代理循环封装为单一入口，用于离线调试规则/本地 LLM 决策。【F:scripts/run_rule_agent.py†L1-L136】
 - `graph_planner.env.planner_env.PlannerEnv` 负责动作编排、奖励计算、记忆同步，是规则代理、本地 LLM 与 rLLM 环境的共同核心。【F:graph_planner/env/planner_env.py†L32-L173】
-- `graph_planner.runtime.sandbox.SandboxRuntime` 根据 `backend` 字段切换 FakeSandbox、RepoEnv、docker-py，并统一命令执行与测试流程。【F:graph_planner/runtime/sandbox.py†L32-L214】
+- `graph_planner.runtime.sandbox.SandboxRuntime` 根据配置切换 RepoEnv 与纯 Docker 路径，并统一命令执行与测试流程。【F:graph_planner/runtime/sandbox.py†L32-L214】
 - `graph_planner.integrations` 目录收拢所有外部模型/训练栈：CGM（数据/推理/训练）、Hugging Face 聊天客户端、本地 rLLM 适配层。
+- `tests/` 仅保留针对 rLLM 奖励管理器加载路径的冒烟测试，历史上的 FakeSandbox/文本协议等单测已随重构移除；如需这些验证，可参考文档中的命令自行重放流程。【F:tests/test_reward_manager_loading.py†L1-L45】
 
 ## 2. 模块职责一览 / Module responsibilities
 
@@ -44,7 +42,9 @@ CLI / Scripts / Tests
 | `agents/rule_based/planner.py` | `PlannerAgent` | 规则策略状态机，驱动图扩展、记忆维护、补丁触发。【F:graph_planner/agents/rule_based/planner.py†L26-L187】 |
 | `agents/model_based/planner.py` | `LocalLLMPlannerAgent` | 调用 `local_llm` 聊天客户端解析模型响应，失败时回退规则策略。【F:graph_planner/agents/model_based/planner.py†L38-L178】 |
 | `agents/rule_based/cgm_adapter.py` | `CodeFuseCGMGenerator`、`CodeFuseCGMClient`、本地 fallback | 组合 GraphLinearizer/SnippetFormatter/ConversationEncoder，优先调用本地或远端 CGM，失败时打标记补丁。【F:graph_planner/agents/rule_based/cgm_adapter.py†L20-L200】 |
+| `actor/cgm_local.py` | `generate` | 纯本地 CGM 兜底实现：优先复用仓库内的 rule-based 适配器，若缺席则返回空补丁，供 `CGMService` 在无 vLLM 时关闭环路。【F:actor/cgm_local.py†L1-L63】 |
 | `integrations/codefuse_cgm/data.py` | `CGMExample`、`CodeFuseCGMDataset` | 解析训练/推理 JSON，加载图、片段、计划并产出结构化样本。【F:graph_planner/integrations/codefuse_cgm/data.py†L1-L210】 |
+| `rllm/verl/verl/workers/cgm_service.py` | `CGMService` | rLLM/Verl 训练时调度 CGM 推理；检测不到 vLLM 时切换为 `actor.cgm_local.generate` 以保持闭环且无 RPC 递归。【F:rllm/verl/verl/workers/cgm_service.py†L1-L247】【F:actor/cgm_local.py†L1-L63】 |
 | `integrations/codefuse_cgm/formatting.py` | `GraphLinearizer`、`SnippetFormatter`、`ConversationEncoder` | 将 `serialize_subgraph` 结果与候选片段线性化，组合聊天模板用于训练/推理。【F:graph_planner/integrations/codefuse_cgm/formatting.py†L69-L199】 |
 | `integrations/codefuse_cgm/training.py` | `CGMBatchCollator`、`CodeFuseCGMTrainer` | 构建监督微调所需的 DataLoader、优化器、调度器与训练循环。【F:graph_planner/integrations/codefuse_cgm/training.py†L1-L250】 |
 | `integrations/codefuse_cgm/inference.py` | `CodeFuseCGMGenerator` | 加载 Hugging Face checkpoint，以本地方式生成补丁候选，并支持 device map / 量化推理。【F:graph_planner/integrations/codefuse_cgm/inference.py†L18-L152】 |
@@ -141,7 +141,7 @@ CLI / Scripts / Tests
 - **协议对齐 / Contract alignment**：生成的 CGM payload 与回包严格遵循“单文件 unified diff”约束，`constraints.one_file_per_patch=true` 让 CGM 只编辑一个文件。若 CGM 侧仍返回多文件 diff，`handle_planner_repair` 会拆分并串行处理，确保每次只对一个文件运行 `validate_unified_diff` 和 `try_apply_and_test`。
 
 - `PlannerEnv.step()` 在检测到 Planner 动作为 `repair` 且未携带显式 `patch` 时，会实例化 `RepairRuntimeState` 并委托上述管线；若 Planner 请求 `apply=false`，则仅返回候选补丁信息，不会修改仓库。【F:graph_planner/env/planner_env.py†L142-L229】
-- 新增的 `tests/test_text_protocol_e2e.py` 覆盖了动作解析、payload 构建、补丁应用成功/失败、observation 编码等场景，确保文本轨迹协议端到端闭环可复现。【F:tests/test_text_protocol_e2e.py†L1-L139】
+- 文本协议的端到端流程依托 `text_protocol.handle_planner_repair` 与 `SandboxRuntime` 的联动完成，当前仓库不再附带早期的 e2e 单测，建议按文档命令手动重放以验证自定义改动。【F:graph_planner/agents/common/text_protocol.py†L148-L396】【F:graph_planner/runtime/sandbox.py†L60-L214】
 
 ## 3. 数据与上下文流 / Data flow
 
@@ -163,12 +163,12 @@ CLI / Scripts / Tests
 - **1-hop 扩展实现**：`mem_candidates.build_mem_candidates` 内部调用 `graph_adapter.one_hop_expand`。适配器优先加载外部 `repo_graph.jsonl/graph.jsonl/code_graph.jsonl`，若缺失则按需扫描仓库源文件构建轻量代码图（文件节点、Python 函数/类、导入边）。1-hop 邻居不仅包含原图边，还会补充同文件函数/类及同目录文件，使 Planner 无需手工解析仓库即可围绕锚点扩展上下文。【F:graph_planner/memory/mem_candidates.py†L39-L152】【F:graph_planner/memory/graph_adapter.py†L19-L231】【F:graph_planner/memory/graph_adapter.py†L250-L371】
 - **是否需要预先解析代码图？** 不需要额外的前置步骤：若仓库随任务提供序列化图，适配器会直接载入；否则会在首次调用 `graph_adapter.connect()` 时构建本地图句柄，并在 1-hop 扩展时缓存和复用，从而保证 Explore 功能在没有独立图生成服务的情况下也能运行。【F:graph_planner/memory/graph_adapter.py†L52-L133】【F:graph_planner/memory/graph_adapter.py†L308-L371】
 
-### 3.1 测试数据流（Toy MLP）/ Test data flow with the toy MLP
+### 3.1 Toy MLP 示例（手动验证）
 
-1. **Checkpoint 构建**：`tests/test_toy_mlp.py::test_toy_checkpoint_integrates_with_cgm_generator` 调用 `create_toy_checkpoint()`，在临时目录写入字符粒度 `ToyTokenizer`、`ToyLMConfig` 以及两层 MLP 权重，形成 Hugging Face 兼容的本地模型目录。【F:graph_planner/models/toy_lm.py†L27-L200】【F:tests/test_toy_mlp.py†L13-L31】
-2. **CGM 推理链路**：`CodeFuseCGMGenerator` 读取该 checkpoint，与 `_build_example()` 构造的 `CGMExample`（含 issue、plan、subgraph、snippets）结合，通过 `ConversationEncoder` 组装消息后执行 `generate()`，输出字符串补丁候选，验证 CGM 集成完整性。【F:graph_planner/integrations/codefuse_cgm/data.py†L80-L210】【F:graph_planner/integrations/codefuse_cgm/inference.py†L18-L152】【F:tests/test_toy_mlp.py†L23-L33】
-3. **Planner 聊天链路**：同一测试文件在 `test_toy_checkpoint_integrates_with_planner_chat` 中使用 `HuggingFaceChatClient` 加载 toy checkpoint，通过 tokenizer 的 `chat_template` 将 system/user 消息格式化，并经 MLP 生成响应，证明 Planner LLM 代理的本地推理路径可用。【F:graph_planner/integrations/local_llm/hf.py†L19-L186】【F:graph_planner/models/toy_lm.py†L160-L218】【F:tests/test_toy_mlp.py†L35-L48】
-4. **梯度反向传播**：`test_toy_model_supports_backward_updates` 直接实例化 `ToyLMForCausalLM`，构造随机张量进行前向、计算交叉熵损失并触发 `SGD.step()`，确认模型权重随梯度更新，从而支撑 rLLM 训练链路的单步前/反向流程。【F:graph_planner/models/toy_lm.py†L108-L158】【F:tests/test_toy_mlp.py†L50-L66】
+- `graph_planner/models/toy_lm.py` 继续提供 `ToyTokenizer`、`ToyLMForCausalLM` 以及 `create_toy_checkpoint`，可在本地生成 Hugging Face 兼容的玩具模型与权重，便于在无网环境下演练推理与反向传播。【F:graph_planner/models/toy_lm.py†L18-L215】
+- 生成的 checkpoint 可交由 `HuggingFaceChatClient` 加载，以聊天接口驱动 Planner 模型链路；该客户端同样负责解析自定义设备、精度与采样参数。【F:graph_planner/integrations/local_llm/hf.py†L71-L186】
+- 若需要模拟 CGM 端输入，可结合 `CGMExample`、`GraphLinearizer` 与 `SnippetFormatter` 构造最小样本，再调用本地推理器验证补丁生成逻辑。【F:graph_planner/integrations/codefuse_cgm/data.py†L70-L156】【F:graph_planner/integrations/codefuse_cgm/formatting.py†L73-L172】【F:graph_planner/integrations/codefuse_cgm/inference.py†L18-L152】
+- 仓库不再附带旧版 `tests/test_toy_mlp.py`，需要这些路径时可根据上述模块手动编写脚本重现原有测试行为。
 
 ### 3.2 GRPO 测试调用流程（文件 | 函数 | 作用）
 
@@ -304,8 +304,7 @@ R2E-Gym 本身提供了 RepoEnv 环境、动作解析与容器运行时等通用
    ```
    - 使用 `--agent llm` 可切换到本地 Planner 模型；命令会打印奖励、补丁 diff，并将完整轨迹写入 `smoke_report.json`。
 4. **检查日志**
-   - `logs/test_runs.jsonl`、`logs/events.jsonl` 会追加遥测记录，包括阅读片段、补丁 diff、命令序列与测试结果；
-   - `tests/test_rule_agent_pipeline.py` 在 FakeSandbox 上提供无 Docker 的替代验证路径。
+    - `logs/test_runs.jsonl`、`logs/events.jsonl` 会追加遥测记录，包括阅读片段、补丁 diff、命令序列与测试结果；若需要快速回放旧版冒烟流程，可使用最小化 JSONL（仅含一条任务）运行 `scripts/run_rule_agent.py`，复现日志产出而无需额外单测文件。【F:scripts/run_rule_agent.py†L54-L136】
 
 #### 4.3.4 16 GPU 并行配置
 
@@ -347,6 +346,7 @@ R2E-Gym 本身提供了 RepoEnv 环境、动作解析与容器运行时等通用
 
 ### 4.4 远端 CGM / 本地 fallback
 - 若 `.aci/config.json` 或环境变量启用了 `cgm.endpoint`，`cgm_adapter` 会优先使用 `CodeFuseCGMClient` 向官方服务发起请求；否则回退到本地 `CodeFuseCGMGenerator` 或规则标记补丁，确保补丁流程不会因模型缺失而中断。【F:graph_planner/agents/rule_based/cgm_adapter.py†L145-L207】
+- 在 rLLM/Verl 训练场景下，`CGMService` 会在检测到 vLLM 缺席时切换到 `actor.cgm_local.generate`，避免再经由 Ray RPC，确保 Planner↔CGM 闭环保持纯本地执行。【F:rllm/verl/verl/workers/cgm_service.py†L74-L123】【F:actor/cgm_local.py†L1-L63】
 - Planner 模型路径可通过环境变量或配置文件注入，使规则策略、本地 LLM、rLLM 训练共用同一组配置读取逻辑。【F:graph_planner/infra/config.py†L60-L176】
 
 ## 5. 常用命令 / Recommended commands
