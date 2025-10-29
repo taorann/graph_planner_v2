@@ -8,6 +8,12 @@ from typing import Any
 from ...infra.vendor import ensure_rllm_importable
 from .agent import GraphPlannerRLLMAgent
 from .cgm_agent import CGMRLLMAgent
+from .dataset import (
+    GRAPH_PLANNER_CGM_DATASET_NAME,
+    GRAPH_PLANNER_DATASET_NAME,
+    RegisteredDataset,
+    ensure_dataset_registered,
+)
 from .registry import register_rllm_components
 
 ensure_rllm_importable()
@@ -45,6 +51,7 @@ __all__ = [
     "CGMRLLMEnv",
     "GRAPH_PLANNER_DATASET_NAME",
     "GRAPH_PLANNER_CGM_DATASET_NAME",
+    "RegisteredDataset",
     "resolve_task_file",
     "load_task_entries",
     "register_dataset_from_file",
@@ -68,6 +75,7 @@ def __getattr__(name: str) -> Any:  # pragma: no cover - trivial dispatcher
     if name in {
         "GRAPH_PLANNER_DATASET_NAME",
         "GRAPH_PLANNER_CGM_DATASET_NAME",
+        "RegisteredDataset",
         "resolve_task_file",
         "load_task_entries",
         "register_dataset_from_file",
