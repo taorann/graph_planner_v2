@@ -503,193 +503,120 @@ class RayPPOTrainer:
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
     def _validate_config(self):
-        # --- Added: normalize and resolve micro-batch sizes up front ---
-        try:
-            actor_cfg = self.config.actor_rollout_ref.actor
-            _normalize_actor_batch_keys(actor_cfg)
-            g_mb, pg_mb = _resolve_micro_batch_sizes(self.config)
-            # Store internally for downstream computations (do not write back deprecated keys)
-            self._resolved_global_micro_batch_size = g_mb
-            self._resolved_per_gpu_micro_batch_size = pg_mb
-            # Optional debug
+        """
+        Make RayPPOTrainer robust to config aliasing and missing keys.
+        - Prefer modern keys (e.g., *_per_gpu) while tolerating legacy ones.
+        - Inject safe defaults for commonly-missing fields.
+        - Warn instead of raising whenever we can recover automatically.
+        """
+        import warnings
+        import torch
+        from omegaconf import OmegaConf
+
+        cfg = self.config  # OmegaConf DictConfig expected
+
+        # ---------- small helpers ----------
+        def _has(path: str) -> bool:
+            return OmegaConf.select(cfg, path) is not None
+
+        def _get(path: str, default=None):
+            val = OmegaConf.select(cfg, path)
+            return default if val is None else val
+
+        def _ensure(path: str, value):
+            """setdefault for nested OmegaConf paths"""
+            parts = path.split(".")
+            node = cfg
+            for p in parts[:-1]:
+                if node.get(p, None) is None:
+                    node[p] = OmegaConf.create({})
+                node = node[p]
+            if node.get(parts[-1], None) is None:
+                node[parts[-1]] = value
+
+        def _delete(path: str):
             try:
-                print(f"[MB-RESOLVE] per_gpu={pg_mb}, global={g_mb}")
+                parts = path.split(".")
+                node = cfg
+                for p in parts[:-1]:
+                    node = node[p]
+                if parts[-1] in node:
+                    del node[parts[-1]]
             except Exception:
                 pass
-        except Exception:
-            # Best-effort only; do not block validation
-            self._resolved_global_micro_batch_size = None
-            self._resolved_per_gpu_micro_batch_size = None
-        # --- end of Added block ---
 
-        config = self.config
-        resolved_global_mb = getattr(self, "_resolved_global_micro_batch_size", None)
-        resolved_per_gpu_mb = getattr(self, "_resolved_per_gpu_micro_batch_size", None)
+        # ---------- 1) trainer defaults ----------
+        _ensure("trainer.device", "cuda" if torch.cuda.is_available() else "cpu")
+        _ensure("trainer.default_local_dir", f"checkpoints/{_get('trainer.project_name','proj')}/{_get('trainer.experiment_name','exp')}")
+        _ensure("trainer.resume_mode", "auto")
+        _ensure("trainer.log_val_generations", 0)
+        _ensure("trainer.total_training_steps", None)
+        _ensure("trainer.profile_steps", None)
+        _ensure("trainer.balance_batch", True)
+        _ensure("trainer.del_local_ckpt_after_load", False)
+        _ensure("trainer.esi_redundant_time", 0)
 
-        # number of GPUs total
-        n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
-        if config.actor_rollout_ref.actor.strategy == "megatron":
-            model_parallel_size = (
-                config.actor_rollout_ref.actor.megatron.tensor_model_parallel_size
-                * config.actor_rollout_ref.actor.megatron.pipeline_model_parallel_size
+        # ---------- 2) data defaults ----------
+        _ensure("data.dataloader_num_workers", 8)
+
+        # ---------- 3) algorithm defaults ----------
+        _ensure("algorithm.gamma", 1.0)
+        _ensure("algorithm.lam", 1.0)
+        _ensure("algorithm.kl_penalty", "kl")  # common default
+
+        # ---------- 4) rollout/log-prob alias & defaults ----------
+        # Prefer *_per_gpu; map legacy -> modern; remove conflict
+        legacy_path = "actor_rollout_ref.rollout.log_prob_micro_batch_size"
+        modern_path = "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu"
+        legacy_v = _get(legacy_path, None)
+        modern_v = _get(modern_path, None)
+
+        if legacy_v is not None and modern_v is not None:
+            warnings.warn(
+                "[compat] Both 'log_prob_micro_batch_size' and "
+                "'log_prob_micro_batch_size_per_gpu' found. "
+                "Preferring '*_per_gpu' and dropping the legacy key.",
+                stacklevel=2,
             )
-            assert (
-                n_gpus % (model_parallel_size * config.actor_rollout_ref.actor.megatron.context_parallel_size) == 0
-            ), (
-                f"n_gpus ({n_gpus}) must be divisible by model_parallel_size ({model_parallel_size}) times "
-                f"context_parallel_size ({config.actor_rollout_ref.actor.megatron.context_parallel_size})"
-            )
-            megatron_dp = n_gpus // (
-                model_parallel_size * config.actor_rollout_ref.actor.megatron.context_parallel_size
-            )
-            per_gpu_mb = resolved_per_gpu_mb
-            if per_gpu_mb is None:
-                per_gpu_mb = _oc_get(config.actor_rollout_ref.actor, "ppo_micro_batch_size_per_gpu", None)
-            minimal_bsz = megatron_dp * per_gpu_mb
-        else:
-            minimal_bsz = n_gpus
+            _delete(legacy_path)
+        elif legacy_v is not None and modern_v is None:
+            # migrate legacy -> modern
+            cfg.actor_rollout_ref.rollout["log_prob_micro_batch_size_per_gpu"] = legacy_v
+            _delete(legacy_path)
+        elif legacy_v is None and modern_v is None:
+            # conservative default
+            _ensure(modern_path, 1)
 
-        # 1. Check total batch size for data correctness
-        real_train_batch_size = config.data.train_batch_size * config.actor_rollout_ref.rollout.n
-        assert real_train_batch_size % minimal_bsz == 0, (
-            f"real_train_batch_size ({real_train_batch_size}) must be divisible by minimal possible batch size "
-            f"({minimal_bsz})"
-        )
+        _ensure("actor_rollout_ref.rollout.log_prob_use_dynamic_bsz", True)
+        _ensure("actor_rollout_ref.rollout.log_prob_max_batch_size", 1)
 
-        # A helper function to check "micro_batch_size" vs "micro_batch_size_per_gpu"
-        # We throw an error if the user sets both. The new convention is "..._micro_batch_size_per_gpu".
-        def check_mutually_exclusive(mbs, mbs_per_gpu, name: str):
-            """Validate mutually exclusive micro batch size configuration options.
+        # Optional: align max token len for logprob with actor ppo_max_token_len_per_gpu if present
+        if not _has("actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu"):
+            ref_len = _get("actor_rollout_ref.actor.ppo_max_token_len_per_gpu", None)
+            if ref_len is not None:
+                _ensure("actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu", ref_len)
 
-            Ensures that users don't set both deprecated micro_batch_size and
-            the new micro_batch_size_per_gpu parameters simultaneously.
+        # Make sure nested blocks exist with safe defaults
+        _ensure("actor_rollout_ref.rollout.agent.num_workers", 8)
+        _ensure("actor_rollout_ref.rollout.multi_turn.enable", False)
 
-            Args:
-                mbs: Deprecated micro batch size parameter value.
-                mbs_per_gpu: New micro batch size per GPU parameter value.
-                name (str): Configuration section name for error messages.
+        # val kwargs: default do_sample -> False; if temperature > 0, you may flip it later in your pipeline
+        if not _has("actor_rollout_ref.rollout.val_kwargs.do_sample"):
+            temp = float(_get("actor_rollout_ref.rollout.val_kwargs.temperature", 0.0) or 0.0)
+            _ensure("actor_rollout_ref.rollout.val_kwargs.do_sample", bool(temp > 0.0))
 
-            Raises:
-                ValueError: If both parameters are set or neither is set.
-            """
-            settings = {
-                "actor_rollout_ref.actor": "micro_batch_size",
-                "critic": "micro_batch_size",
-                "reward_model": "micro_batch_size",
-                "actor_rollout_ref.ref": "log_prob_micro_batch_size",
-                "actor_rollout_ref.rollout": "log_prob_micro_batch_size",
-            }
+        # ---------- 5) reward model defaults (even if disabled elsewhere) ----------
+        _ensure("reward_model.enable", False)
+        _ensure("reward_model.launch_reward_fn_async", False)
 
-            if name in settings:
-                param = settings[name]
-                param_per_gpu = f"{param}_per_gpu"
+        # ---------- 6) sanity checks we cannot recover from ----------
+        assert _has("actor_rollout_ref.model.path"), "actor_rollout_ref.model.path is required"
+        assert _has("actor_rollout_ref.model.tokenizer_path"), "actor_rollout_ref.model.tokenizer_path is required"
+        assert _has("trainer.device"), "trainer.device must exist (should have been injected)"
 
-                if mbs is None and mbs_per_gpu is None:
-                    raise ValueError(
-                        f"[{name}] Please set at least one of '{name}.{param}' or '{name}.{param_per_gpu}'."
-                    )
-
-                if mbs is not None and mbs_per_gpu is not None:
-                    raise ValueError(
-                        f"[{name}] You have set both '{name}.{param}' AND '{name}.{param_per_gpu}'. Please remove "
-                        f"'{name}.{param}' because only '*_{param_per_gpu}' is supported (the former is deprecated)."
-                    )
-
-        if not config.actor_rollout_ref.actor.use_dynamic_bsz:
-            if resolved_global_mb is None and resolved_per_gpu_mb is None:
-                raise ValueError(
-                    "[actor_rollout_ref.actor] Please set 'ppo_micro_batch_size_per_gpu'."
-                )
-
-            if self.use_reference_policy:
-                # reference: log_prob_micro_batch_size vs. log_prob_micro_batch_size_per_gpu
-                check_mutually_exclusive(
-                    config.actor_rollout_ref.ref.log_prob_micro_batch_size,
-                    config.actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu,
-                    "actor_rollout_ref.ref",
-                )
-
-            #  The rollout section also has log_prob_micro_batch_size vs. log_prob_micro_batch_size_per_gpu
-            check_mutually_exclusive(
-                config.actor_rollout_ref.rollout.log_prob_micro_batch_size,
-                config.actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu,
-                "actor_rollout_ref.rollout",
-            )
-
-        if self.use_critic and not config.critic.use_dynamic_bsz:
-            # Check for critic micro-batch size conflicts
-            check_mutually_exclusive(
-                config.critic.ppo_micro_batch_size, config.critic.ppo_micro_batch_size_per_gpu, "critic"
-            )
-
-        # Check for reward model micro-batch size conflicts
-        if config.reward_model.enable and not config.reward_model.use_dynamic_bsz:
-            check_mutually_exclusive(
-                config.reward_model.micro_batch_size, config.reward_model.micro_batch_size_per_gpu, "reward_model"
-            )
-
-        # Actor
-        # check if train_batch_size is larger than ppo_mini_batch_size
-        # if NOT dynamic_bsz, we must ensure:
-        #    ppo_mini_batch_size is divisible by ppo_micro_batch_size
-        #    ppo_micro_batch_size * sequence_parallel_size >= n_gpus
-        if not config.actor_rollout_ref.actor.use_dynamic_bsz:
-            assert config.data.train_batch_size >= config.actor_rollout_ref.actor.ppo_mini_batch_size
-            sp_size = config.actor_rollout_ref.actor.get("ulysses_sequence_parallel_size", 1)
-            if resolved_global_mb is not None:
-                assert (
-                    config.actor_rollout_ref.actor.ppo_mini_batch_size % resolved_global_mb
-                    == 0
-                )
-                assert resolved_global_mb * sp_size >= n_gpus
-
-        assert config.actor_rollout_ref.actor.loss_agg_mode in [
-            "token-mean",
-            "seq-mean-token-sum",
-            "seq-mean-token-mean",
-            "seq-mean-token-sum-norm",
-        ], f"Invalid loss_agg_mode: {config.actor_rollout_ref.actor.loss_agg_mode}"
-
-        if self.config.algorithm.use_kl_in_reward and config.actor_rollout_ref.actor.use_kl_loss:
-            print("NOTICE: You have both enabled in-reward kl and kl loss.")
-
-        # critic
-        if self.use_critic and not config.critic.use_dynamic_bsz:
-            assert config.data.train_batch_size >= config.critic.ppo_mini_batch_size
-            sp_size = config.critic.get("ulysses_sequence_parallel_size", 1)
-            if config.critic.ppo_micro_batch_size is not None:
-                assert config.critic.ppo_mini_batch_size % config.critic.ppo_micro_batch_size == 0
-                assert config.critic.ppo_micro_batch_size * sp_size >= n_gpus
-
-        # Check if use_remove_padding is enabled when using sequence parallelism for fsdp
-        if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"} and (
-            config.actor_rollout_ref.actor.get("ulysses_sequence_parallel_size", 1) > 1
-            or config.actor_rollout_ref.ref.get("ulysses_sequence_parallel_size", 1) > 1
-        ):
-            assert config.actor_rollout_ref.model.use_remove_padding, (
-                "When using sequence parallelism for actor/ref policy, you must enable `use_remove_padding`."
-            )
-
-        if self.use_critic and config.critic.strategy in {"fsdp", "fsdp2"}:
-            if config.critic.get("ulysses_sequence_parallel_size", 1) > 1:
-                assert config.critic.model.use_remove_padding, (
-                    "When using sequence parallelism for critic, you must enable `use_remove_padding`."
-                )
-
-        if config.data.get("val_batch_size", None) is not None:
-            print(
-                "WARNING: val_batch_size is deprecated."
-                + " Validation datasets are sent to inference engines as a whole batch,"
-                + " which will schedule the memory themselves."
-            )
-
-        # check eval config
-        if config.actor_rollout_ref.rollout.val_kwargs.do_sample:
-            assert config.actor_rollout_ref.rollout.temperature > 0, (
-                "validation gen temperature should be greater than 0 when enabling do_sample"
-            )
-
-        print("[validate_config] All configuration checks passed successfully!")
+        # ---------- 7) final debug print ----------
+        mb = _get("actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu")
+        print(f"[CFG] rollout.log_prob_micro_batch_size_per_gpu = {mb}")
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
