@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 from functools import lru_cache
@@ -38,6 +39,7 @@ import ray
 from graph_planner.infra.config import resolve_repo_path
 from graph_planner.infra.vendor import ensure_rllm_importable
 from graph_planner.integrations.rllm.shared_actors import CGMTool, PlannerEngine
+from graph_planner.integrations.rllm.dataset import ensure_dataset_registered
 
 LOGGER = logging.getLogger("planner_grpo.train")
 
@@ -234,6 +236,108 @@ def _resolve_cgm_env(cfg: DictConfig) -> tuple[dict[str, str], bool]:
     return env, propagate
 
 
+def _maybe_materialize_json_to_verl_parquet(config):
+    """
+    For each file in data.train_files / val_files:
+      - if suffix in {json,jsonl} -> normalize and write *_verl.parquet
+      - replace cfg paths with the materialized parquet path
+    Also prints a sample of container runtime config (docker image, workdir, mounts) from the parquet,
+    so users can confirm the container will launch as intended.
+    """
+
+    def _process_list(name: str, lst):
+        new_paths = []
+        for i, p in enumerate(lst or []):
+            p = str(p)
+            low = p.lower()
+            if low.endswith(".json") or low.endswith(".jsonl") or low.endswith(".jl"):
+                ds = ensure_dataset_registered(
+                    name="graph_planner_repoenv",
+                    split=None,  # infer from file name
+                    path=p,
+                )
+                print(
+                    f"[DATA] {name}[{i}] JSON→Parquet: {p} -> {ds.get_verl_data_path()} (rows={ds.num_rows})"
+                )
+                new_paths.append(ds.get_verl_data_path())
+            else:
+                new_paths.append(p)
+        return new_paths
+
+    # mutate config in-place
+    tf = OmegaConf.select(config, "data.train_files") or []
+    vf = OmegaConf.select(config, "data.val_files") or []
+
+    tf2 = _process_list("train_files", tf)
+    vf2 = _process_list("val_files", vf)
+
+    # write back
+    if "data" not in config:
+        config["data"] = {}
+    config["data"]["train_files"] = tf2
+    config["data"]["val_files"] = vf2
+
+    # DEBUG: peek one row and print container args
+    try:
+        from datasets import load_dataset
+
+        sample_path = (tf2 or vf2)[0]
+        ds = load_dataset("parquet", data_files=sample_path, split="train")
+        if len(ds) > 0 and "extra_info" in ds.column_names:
+            ex = ds[0]
+            extra = ex["extra_info"]
+            if isinstance(extra, str):
+                extra = json.loads(extra)
+            sb = (extra or {}).get("sandbox", {})
+            print(
+                "[DATA→ENV] sample sandbox:",
+                {
+                    "backend": sb.get("backend"),
+                    "docker_image": sb.get("docker_image"),
+                    "workdir": sb.get("workdir"),
+                    "mounts": sb.get("mounts"),
+                    "env.size": len((sb.get("env") or {})),
+                },
+            )
+    except Exception as e:  # pragma: no cover - best effort logging
+        print("[WARN] Failed to peek sample sandbox info:", repr(e))
+
+
+def _maybe_prepull_docker_images(config):
+    import os as _os
+    import subprocess
+
+    if _os.environ.get("PREPULL_DOCKER", "0") != "1":
+        return
+    from datasets import load_dataset
+
+    train_paths = OmegaConf.select(config, "data.train_files") or []
+    val_paths = OmegaConf.select(config, "data.val_files") or []
+    paths = list(train_paths) + list(val_paths)
+    images = set()
+    for p in paths:
+        try:
+            ds = load_dataset("parquet", data_files=p, split="train")
+            for ex in ds.select(range(min(1000, len(ds)))):
+                extra = ex.get("extra_info")
+                if isinstance(extra, str):
+                    extra = json.loads(extra)
+                img = (extra or {}).get("sandbox", {}).get("docker_image")
+                if img:
+                    images.add(img)
+        except Exception:
+            pass
+    if not images:
+        print("[PREPULL] No docker images found in dataset.")
+        return
+    print("[PREPULL] pulling:", images)
+    for img in sorted(images):
+        try:
+            subprocess.run(["docker", "pull", img], check=False)
+        except Exception as e:  # pragma: no cover - best effort logging
+            print("[PREPULL] pull failed:", img, repr(e))
+
+
 def _register_datasets(train_files: Sequence[str], val_files: Sequence[str]) -> None:
     (_, _, ensure_dataset_registered, dataset_name) = _load_rllm_bindings()
 
@@ -351,6 +455,13 @@ def main() -> None:
         raise ValueError("data.train_files must not be empty")
     if not val_files:
         raise ValueError("data.val_files must not be empty")
+
+    # materialize JSON/JSONL → *_verl.parquet and rewrite cfg paths
+    _maybe_materialize_json_to_verl_parquet(cfg)
+    _maybe_prepull_docker_images(cfg)
+
+    train_files = _listify(OmegaConf.select(cfg, "data.train_files"))
+    val_files = _listify(OmegaConf.select(cfg, "data.val_files"))
 
     model_path = str(OmegaConf.select(cfg, "actor_rollout_ref.model.path") or "")
     if not model_path:
