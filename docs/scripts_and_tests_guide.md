@@ -24,15 +24,14 @@
 - `train_planner_grpo.py` 负责加载 YAML、注册数据、构造 Ray runtime，并将 Planner/CGM 路径注入环境变量后启动 GRPO 训练循环。【F:scripts/train_planner_grpo.py†L322-L468】
 - `eval_planner_grpo.py` 复用了 `train_planner_grpo` 的配置处理，额外要求 `--ckpt` 指向待评估的 checkpoint 目录。
 
-## 测试目录（`tests/`）
+## 测试目录（`tests/` 与 `rllm/tests/`）
 
-| 文件 | 核心覆盖点 | 说明 |
-| --- | --- | --- |
-| `test_cgm_adapter.py` | 校验 CGM 打补丁适配层的本地后备与远程调用路径，确保规划器调用 CGM 时能够生成正确补丁。 | 覆盖 `graph_planner.agents.rule_based.cgm_adapter` 的异常兜底、请求参数序列化等逻辑。 |
-| `test_rule_agent_pipeline.py` | 驱动 FakeSandbox 模拟完整的计划→记忆→打补丁→提交流程，验证规则代理、遥测与日志写入（`logs/test_runs.jsonl`）的行为。 | 强调对 `repair_trace` 的记录：阅读片段、补丁 diff、命令执行与最终文件内容。 |
+当前仓库的轻量测试集中在两个入口：
 
-- `test_cgm_adapter.py` 验证 CGM 适配器在本地兜底与远程请求路径下能返回预期补丁并携带正确的 API 参数。【F:tests/test_cgm_adapter.py†L1-L88】
-- `test_rule_agent_pipeline.py` 模拟完整容器交互，覆盖补丁应用、测试执行与测记录，确保规则策略可在无 Docker 环境下回归。【F:tests/test_rule_agent_pipeline.py†L13-L199】
+| 目录 | 文件 | 核心覆盖点 | 说明 |
+| --- | --- | --- | --- |
+| `tests/` | `test_reward_manager_loading.py` | 确保 `train_agent_ppo._maybe_load_reward_managers` 在缺省配置与启用奖励时都能正确回退/加载。 | 直接引用 rLLM 训练入口，避免奖励依赖导致的离线调试崩溃。【F:tests/test_reward_manager_loading.py†L1-L45】 |
+| `rllm/tests/` | `agents/`, `envs/`, `rewards/`, `tools/` 子目录 | 校验强化学习 Agent、环境包装器、奖励模型与工具函数。 | 运行 `pytest rllm/tests -q` 可覆盖 FrozenLake/AppWorld/ToolAgent 等核心逻辑。【F:rllm/tests/agents/test_tool_agent.py†L1-L151】【F:rllm/tests/envs/test_tool_env.py†L1-L134】 |
 
 ## ACI / Git / Lint / Test 的实现来源
 
@@ -66,8 +65,9 @@
 2. **回归测试**：
    ```bash
    PYTHONPATH=. pytest tests -q
+   PYTHONPATH=. pytest rllm/tests -q
    ```
-   若依赖项缺失，可先安装 `R2E-Gym` 或使用 `pip install -e ./R2E-Gym` 完成补齐。
+   若依赖项缺失，可先安装 `R2E-Gym` 或使用 `pip install -e ./R2E-Gym` 完成补齐；当缺少 Verl 依赖时，`test_reward_manager_loading.py` 会自动跳过。
 
 3. **训练任务**：使用 `scripts/train_planner_grpo.py --config configs/experiments/planner_grpo_4gpu.yaml` 启动 GRPO 训练；需要覆盖特定路径或超参时，通过 `--overrides key=value` 追加 dotlist，运行前可以配合 `--print-config` / `--dry-run` 进行审计。【F:scripts/train_planner_grpo.py†L371-L424】
 
