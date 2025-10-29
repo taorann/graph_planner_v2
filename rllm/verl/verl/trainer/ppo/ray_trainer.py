@@ -23,12 +23,11 @@ import json as _json
 import os
 import uuid
 from collections import defaultdict
-from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from pprint import pprint
-from typing import Any, Optional, Tuple
+from typing import Any, Mapping, Optional, Tuple
 
 import numpy as np
 import ray
@@ -170,7 +169,9 @@ def build_vllm_engine(
     adapters: Any | None = None,
     extra_config: Mapping | None = None,
 ) -> StaticVLLMEngine:
-    """Construct a topology-aware vLLM engine placeholder."""
+    """Construct a topology-aware vLLM engine placeholder.
+    TODO: replace with the repo's real vLLM launcher so planner/cgm engines actually run.
+    This function must create exactly ONE engine spanning the provided GPUs with TP=tp, DP=1."""
 
     engine = StaticVLLMEngine(
         group=group,
@@ -210,14 +211,42 @@ def _oc_has(mapping, key) -> bool:
 
 
 def _oc_set(mapping, key, value):
-    # OmegaConf or dict safe set
+    # OmegaConf or dict safe set with dotted-key support
+    if mapping is None:
+        return
     try:
-        mapping[key] = value
+        OmegaConf.update(mapping, key, value, merge=True)  # type: ignore[arg-type]
+        return
     except Exception:
-        try:
-            setattr(mapping, key, value)
-        except Exception:
-            pass
+        pass
+
+    if isinstance(key, str) and "." in key:
+        parts = [p for p in key.split(".") if p]
+        target = mapping
+        for part in parts[:-1]:
+            nxt = _oc_get(target, part, None)
+            if nxt is None:
+                nxt = {}
+                try:
+                    if hasattr(target, "__setitem__"):
+                        target[part] = nxt  # type: ignore[index]
+                    else:
+                        setattr(target, part, nxt)
+                except Exception:
+                    return
+            target = nxt
+        key = parts[-1]
+
+    try:
+        if hasattr(mapping, "__setitem__"):
+            mapping[key] = value  # type: ignore[index]
+            return
+    except Exception:
+        pass
+    try:
+        setattr(mapping, key, value)
+    except Exception:
+        pass
 
 
 def _oc_del(mapping, key):
@@ -887,6 +916,14 @@ class RayPPOTrainer:
             collate_fn=collate_fn,
             sampler=train_sampler,
         )
+        # Prevent empty train dataloader edge case
+        try:
+            if hasattr(self.train_dataset, "__len__"):
+                assert len(self.train_dataset) >= int(self.config.data.train_batch_size), (
+                    "len(train_dataset) < data.train_batch_size — reduce batch or expand dataset"
+                )
+        except Exception:
+            pass
 
         val_batch_size = self.config.data.val_batch_size  # Prefer config value if set
         if val_batch_size is None:
@@ -1284,9 +1321,18 @@ class RayPPOTrainer:
             ray_cls_with_init=planner_cls,
             device_name=self.device_name,
         )
-        spawned = planner_wg_root.spawn(prefix_set={"actor_rollout"})
+        spawned = planner_wg_root.spawn(prefix_set={"actor_rollout"}, world_size=fsdp_world)
         planner_wg = spawned["actor_rollout"]
         planner_wg.init_model()
+
+        # Optional: keep n_gpus metrics correct when bypassing resource_pool_manager defaults
+        try:
+            self.resource_pool_manager.override_n_gpus(len(planner_cfg.gpus))
+        except Exception:
+            pass
+
+        # Ensure FSDP world size shows up in config for init_model() and logs
+        _oc_set(self.config, "actor_rollout_ref.actor.fsdp_config.fsdp_size", fsdp_world)
 
         self.worker_groups["planner"] = planner_wg
         self.planner_trainer = planner_wg
@@ -1338,7 +1384,13 @@ class RayPPOTrainer:
             )
             actor_name = f"CGMService::{self._run_id}"
             if ray.is_initialized():
-                self.cgm_actor = CGMService.options(name=actor_name, lifetime="detached").remote(self.cgm_engine)
+                cgm_env = {"CUDA_VISIBLE_DEVICES": ",".join(map(str, cgm_cfg.gpus))}
+                self.cgm_actor = CGMService.options(
+                    name=actor_name,
+                    lifetime="detached",
+                    num_gpus=len(cgm_cfg.gpus),
+                    runtime_env={"env_vars": cgm_env},
+                ).remote(self.cgm_engine)
                 print(f"[Topology] CGM actor '{actor_name}' spawned")
             else:
                 self.cgm_actor = None
@@ -1352,6 +1404,9 @@ class RayPPOTrainer:
         self.ref_policy_wg = None
         self.rm_wg = None
 
+        # Disable old rollout.mode=="async" path under topology; use snapshot pipeline switches instead
+        self.async_rollout_mode = False
+        self.async_rollout_manager = None
         pipeline_cfg = _oc_get(_oc_get(self.config, "system", {}), "pipeline", {})
         self.async_pipeline_mode = bool(_oc_get(pipeline_cfg, "async_mode", False))
         self.pipeline_max_policy_version_lag = int(_oc_get(pipeline_cfg, "max_policy_version_lag", 0) or 0)
