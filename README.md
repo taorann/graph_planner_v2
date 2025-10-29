@@ -23,13 +23,14 @@ graph_planner/
   memory/          # 代码图子图维护与线性化工具
   runtime/         # SandboxRuntime，封装 RepoEnv / R2E / docker 三种后端
 scripts/           # 运行代理、注册数据集、启动训练的 CLI
-tests/             # FakeSandbox 测试与 CGM 适配器回归
+tests/             # rLLM 辅助测试（例如奖励管理器加载路径）
 ```
 
 各目录的职责与详细说明可参考：
 
 - [`docs/graph_planner_architecture_pipeline.md`](docs/graph_planner_architecture_pipeline.md)：架构分层、容器运行流以及 CGM / rLLM 训练流水线的统一参考。
 - [`docs/scripts_and_tests_guide.md`](docs/scripts_and_tests_guide.md)：脚本与测试入口、ACI/Git/Lint/Test 的实现来源。
+- [`docs/pain-points.md`](docs/pain-points.md)：记录 Contract-as-Code、补丁落盘与训练集成的痛点与解决方案。
 
 ## 快速上手
 
