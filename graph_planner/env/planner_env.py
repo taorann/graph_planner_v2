@@ -5,6 +5,7 @@ import base64
 import json
 import os
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from types import SimpleNamespace
 
 from difflib import unified_diff
 
@@ -12,6 +13,8 @@ try:  # pragma: no cover - optional runtime dependency
     import ray
 except Exception:  # pragma: no cover - ray optional outside training
     ray = None  # type: ignore[assignment]
+
+from copy import deepcopy
 
 from ..agents.common import text_protocol
 from ..agents.common.chat import action_to_payload
@@ -64,7 +67,8 @@ from ..memory.subgraph_store import WorkingSubgraph
 from ..runtime.sandbox import SandboxConfig, SandboxRuntime
 from aci.schema import Plan, PlanTarget
 from aci.guard import GuardError, enforce_patch_guard
-from ..agents.rule_based import cgm_adapter
+from actor.collater import collate
+from actor import cgm_adapter
 from ..agents.rule_based.test_prioritizer import prioritize_tests
 
 
@@ -127,6 +131,7 @@ class PlannerEnv:
         self.steps: int = 0
         self.last_info: Dict[str, Any] = {}
         self.repo_root_in_container: str = sandbox_cfg.workdir or "."
+        self.run_id: str = os.environ.get("GRAPH_PLANNER_RUN_ID", "") or self.issue.get("run_id", "")
 
         self.subgraph: WorkingSubgraph = subgraph_store.new()
         self.last_candidates: List[Dict[str, Any]] = []
@@ -386,32 +391,117 @@ class PlannerEnv:
             ).get("priority_tests", [])
             return info
 
-        subplan_text = (act.plan or "").strip()
-        focus_ids = [str(t.get("id")) for t in act.plan_targets or [] if isinstance(t, dict) and t.get("id")]
+        return self._repair_with_cgm(act, info)
+
+    def _repair_with_cgm(self, act: RepairAction, info: Dict[str, Any]) -> Dict[str, Any]:
+        plan_struct: Plan
         try:
-            runtime_state = self._build_repair_state(subplan_text, focus_ids)
+            plan_struct = self._build_plan(act.plan_targets)
         except Exception as exc:
             info["applied"] = False
-            info["error"] = f"repair-state-failed:{exc}"
+            info["no_repair"] = True
+            info["error"] = f"plan-build-failed:{exc}"
             return info
 
-        action_payload = {"name": "repair", "params": {"subplan": subplan_text, "focus_ids": focus_ids, "apply": act.apply}}
         try:
-            result = text_protocol.handle_planner_repair(action_payload, runtime_state)
-        except ProtocolError as exc:
-            info["applied"] = False
-            info["error"] = f"text-repair-error:{exc.code}"
-            info["fallback_reason"] = exc.code
-            info["msg"] = exc.detail
-            return info
+            collate_cfg = deepcopy(self.config)
+        except Exception:
+            collate_cfg = SimpleNamespace(mode=getattr(self.config, "mode", "wsd"))
+
+        if not hasattr(collate_cfg, "collate") or collate_cfg.collate is None:
+            collate_cfg.collate = SimpleNamespace()  # type: ignore[attr-defined]
+        else:
+            collate_cfg.collate = deepcopy(collate_cfg.collate)
+
+        collate_cfg.mode = getattr(collate_cfg, "mode", getattr(self.config, "mode", "wsd"))
+        collate_cfg.prefer_test_files = getattr(self.config, "prefer_test_files", True)
+        collate_cfg.collate.mode = getattr(collate_cfg.collate, "mode", collate_cfg.mode)
+        collate_cfg.collate.budget_tokens = min(int(getattr(collate_cfg.collate, "budget_tokens", 40000)), 8000)
+        collate_cfg.collate.max_chunks = getattr(collate_cfg.collate, "max_chunks", 64)
+        collate_cfg.collate.per_file_max_chunks = getattr(collate_cfg.collate, "per_file_max_chunks", 8)
+        base_collate_cfg = getattr(self.config, "collate", SimpleNamespace())
+        collate_cfg.collate.enable_light_reorder = getattr(
+            collate_cfg.collate,
+            "enable_light_reorder",
+            getattr(base_collate_cfg, "enable_light_reorder", False),
+        )
+        collate_cfg.collate.interleave_tests = getattr(
+            collate_cfg.collate,
+            "interleave_tests",
+            getattr(base_collate_cfg, "interleave_tests", True),
+        )
+
+        try:
+            chunks, meta = collate(self.subgraph, plan_struct, collate_cfg)
         except Exception as exc:
             info["applied"] = False
-            info["error"] = f"text-repair-error:{exc}"
+            info["no_repair"] = True
+            info["error"] = f"collate-failed:{exc}"
             return info
 
-        info.update(result)
-        info.setdefault("plan_targets", act.plan_targets)
-        info.setdefault("applied", bool(result.get("applied")))
+        info["collate_meta"] = meta
+        constraints = {"max_edits": 3}
+        request_collated = {"chunks": chunks, "meta": meta}
+
+        run_id = self.run_id or self.issue_id
+        try:
+            patch = cgm_adapter.generate(
+                collated=request_collated,
+                plan=act.plan or "",
+                constraints=constraints,
+                run_id=run_id,
+                timeout_s=60.0,
+                retry=1,
+                plan_struct=plan_struct,
+                plan_text=act.plan,
+                issue=self.issue,
+            )
+        except Exception as exc:
+            if ray is not None and isinstance(exc, getattr(ray.exceptions, "GetTimeoutError", tuple())):  # type: ignore[arg-type]
+                info["applied"] = False
+                info["no_repair"] = True
+                info["error"] = f"cgm-timeout:{exc}"
+                info["fallback_reason"] = "cgm-timeout"
+                return info
+            info["applied"] = False
+            info["no_repair"] = True
+            info["error"] = f"cgm-error:{exc}"
+            return info
+
+        if not isinstance(patch, Mapping):
+            info["applied"] = False
+            info["no_repair"] = True
+            info["error"] = "cgm-invalid-patch"
+            return info
+
+        patch_dict: Dict[str, Any] = dict(patch)
+        patch_dict.setdefault("summary", act.plan or "")
+        info["patch"] = patch_dict
+
+        try:
+            enforce_patch_guard(patch_dict, plan_struct, self.config)
+        except GuardError as ge:
+            info["guard_error"] = str(ge)
+            info["applied"] = False
+            info["no_repair"] = True
+            return info
+
+        apply_result = self._apply_patch_edits(patch_dict.get("edits") or [])
+        info.update(apply_result)
+        applied = bool(apply_result.get("success"))
+        info["applied"] = applied
+        info["plan_targets"] = act.plan_targets
+
+        lint_ok = bool(self.box.lint())
+        tests_report = self.box.test()
+        info["lint_ok"] = lint_ok
+        info["lint"] = lint_ok
+        info["tests"] = tests_report
+        info["priority_tests"] = prioritize_tests(
+            self._observation_pack(),
+            subgraph=self.subgraph,
+        ).get("priority_tests", [])
+
         return info
 
     def _handle_submit(self) -> Dict[str, Any]:
