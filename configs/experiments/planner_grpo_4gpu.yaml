@@ -1,5 +1,3 @@
-# configs/experiments/planner_grpo_4gpu.yaml
-
 # Repository-local directories that contain the converted Hugging Face
 # checkpoints used during training. These may be absolute paths or paths
 # relative to the project root; the launch script resolves them before
@@ -45,12 +43,17 @@ algorithm:
   kl_ctrl:
     kl_coef: 0.0
     target_kl: 0.0
+  gamma: 1.0
+  lam: 1.0
+  kl_penalty: kl
+
 
 data:
   train_files:
     - datasets/r2e_gym/train.jsonl
   val_files:
     - datasets/r2e_gym/val.jsonl
+  dataloader_num_workers: 8
   train_batch_size: 8
   val_batch_size: 512
   max_prompt_length: 4096
@@ -90,12 +93,19 @@ actor_rollout_ref:
     'n': 4
     val_kwargs:
       'n': 1
+      do_sample: false
       temperature: 0.0
     enforce_eager: false
     gpu_memory_utilization: 0.6
     tensor_model_parallel_size: 1
+    log_prob_micro_batch_size: ${actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu}
     log_prob_use_dynamic_bsz: true
     log_prob_micro_batch_size_per_gpu: 1
+    agent:
+      num_workers: 8
+    multi_turn:
+      enable: false
+
   ref:
     strategy: fsdp
     fsdp_config:
@@ -117,6 +127,7 @@ verl:
     rollout: [0, 1, 2, 3]
 
 trainer:
+  device: cuda 
   total_epochs: 1000
   critic_warmup: 0
   logger:
@@ -131,6 +142,14 @@ trainer:
   n_gpus_per_node: 4
   nnodes: 1
   gradient_accumulation_steps: 2
+  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+  resume_mode: auto
+  log_val_generations: 0
+  total_training_steps: null
+  profile_steps: null
+  balance_batch: true
+  del_local_ckpt_after_load: false
+  esi_redundant_time: 0
 
 parallel:
   agents: 1
