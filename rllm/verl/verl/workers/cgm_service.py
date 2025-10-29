@@ -15,8 +15,8 @@ try:  # pragma: no cover - optional local fallback
 except Exception:  # pragma: no cover - safety net when ACI not installed
     Plan = None  # type: ignore[assignment]
 
-try:  # pragma: no cover - local CGM fallback helper
-    from actor import cgm_adapter as _local_cgm_adapter
+try:  # pragma: no cover - local CGM fallback helper (MUST be local, NOT RPC)
+    from actor import cgm_local as _local_cgm_adapter
 except Exception:  # pragma: no cover - optional dependency outside planner
     _local_cgm_adapter = None  # type: ignore[assignment]
 
