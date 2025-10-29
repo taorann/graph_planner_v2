@@ -39,7 +39,7 @@ import ray
 from graph_planner.infra.config import resolve_repo_path
 from graph_planner.infra.vendor import ensure_rllm_importable
 from graph_planner.integrations.rllm.shared_actors import CGMTool, PlannerEngine
-from graph_planner.integrations.rllm.dataset import ensure_dataset_registered
+from graph_planner.integrations.rllm.dataset import ensure_dataset_registered as ensure_verl_parquet
 
 LOGGER = logging.getLogger("planner_grpo.train")
 
@@ -251,7 +251,7 @@ def _maybe_materialize_json_to_verl_parquet(config):
             p = str(p)
             low = p.lower()
             if low.endswith(".json") or low.endswith(".jsonl") or low.endswith(".jl"):
-                ds = ensure_dataset_registered(
+                ds = ensure_verl_parquet(
                     name="graph_planner_repoenv",
                     split=None,  # infer from file name
                     path=p,

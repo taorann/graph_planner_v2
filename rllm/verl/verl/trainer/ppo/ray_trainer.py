@@ -19,9 +19,11 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import json
+import json as _json
 import os
 import uuid
 from collections import defaultdict
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
@@ -33,6 +35,7 @@ import ray
 import torch
 from omegaconf import OmegaConf, open_dict
 from torch.utils.data import Dataset, Sampler
+from torch.utils.data._utils.collate import default_collate as _default_collate
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
@@ -558,6 +561,18 @@ class RayPPOTrainer:
 
         # ---------- 2) data defaults ----------
         _ensure("data.dataloader_num_workers", 8)
+        _ensure("data.sampler", None)                    # critical: ensure key exists
+        _ensure("data.train_batch_size", 8)              # safe fallback
+        _ensure("data.val_batch_size", 512)
+        _ensure("data.max_prompt_length", 4096)
+        _ensure("data.max_response_length", 32768)
+        _ensure("data.filter_overlong_prompts", False)   # YAML may override; this is a fallback
+        _ensure("data.filter_overlong_prompts_workers", 8)
+
+        # optional but helpful fallbacks
+        _ensure("data.dataset_size", None)
+        _ensure("data.shuffle", True)
+        _ensure("data.drop_last", False)
 
         # ---------- 3) algorithm defaults ----------
         _ensure("algorithm.gamma", 1.0)
@@ -642,6 +657,49 @@ class RayPPOTrainer:
 
             collate_fn = default_collate_fn
 
+        base_collate = collate_fn or _default_collate
+
+        def _with_extra_info(_examples):
+            metas = []
+            sanitized = []
+            for ex in _examples:
+                record: Any = ex
+                if isinstance(ex, Mapping):
+                    record = dict(ex)
+                    metas.append(record.pop("extra_info", None))
+                else:
+                    meta = None
+                    if hasattr(ex, "get"):
+                        try:
+                            meta = ex.get("extra_info")  # type: ignore[call-arg]
+                        except Exception:
+                            meta = None
+                    if meta is None and hasattr(ex, "extra_info"):
+                        meta = getattr(ex, "extra_info")
+                    metas.append(meta)
+                    if hasattr(ex, "copy"):
+                        try:
+                            record = ex.copy()
+                            if hasattr(record, "pop"):
+                                record.pop("extra_info", None)
+                        except Exception:
+                            record = ex
+                sanitized.append(record)
+
+            batch = base_collate(sanitized)
+
+            try:
+                batch["meta"] = metas
+            except Exception:
+                try:
+                    batch = dict(batch)
+                    batch["meta"] = metas
+                except Exception:
+                    batch = {"data": batch, "meta": metas}
+            return batch
+
+        collate_fn = _with_extra_info
+
         num_workers = self.config.data["dataloader_num_workers"]
 
         self.train_dataloader = StatefulDataLoader(
@@ -665,6 +723,24 @@ class RayPPOTrainer:
             drop_last=False,
             collate_fn=collate_fn,
         )
+
+        try:
+            _probe = next(iter(self.train_dataloader))
+            if isinstance(_probe, Mapping):
+                keys = list(_probe.keys())
+            else:
+                keys = list(getattr(_probe, "keys", lambda: [])())
+            print("[DEBUG] train batch keys:", keys)
+            if isinstance(_probe, Mapping) and "meta" in _probe:
+                sample_meta = _probe["meta"][0] if _probe.get("meta") else None
+                if isinstance(sample_meta, str):
+                    try:
+                        sample_meta = _json.loads(sample_meta)
+                    except Exception:
+                        pass
+                print("[DEBUG] meta sample:", sample_meta)
+        except Exception as _e:
+            print("[DEBUG] skip batch probe:", repr(_e))
 
         assert len(self.train_dataloader) >= 1, "Train dataloader is empty!"
         assert len(self.val_dataloader) >= 1, "Validation dataloader is empty!"

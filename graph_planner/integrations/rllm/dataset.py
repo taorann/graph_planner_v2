@@ -200,7 +200,15 @@ def ensure_dataset_registered(
     out_dir = DATASETS_ROOT / name
     out_path = out_dir / f"{split}_verl.parquet"
     _ensure_dir(out_path)
-    norm.to_parquet(out_path, index=False, engine=_PARQUET_ENGINE)
+    try:
+        norm.to_parquet(out_path, index=False, engine=_PARQUET_ENGINE)
+    except Exception as e:  # pragma: no cover - requires missing deps
+        raise RuntimeError(
+            "Failed to write parquet. Please install one of the parquet engines:\n"
+            "  pip install pyarrow  (preferred)\n"
+            "  or: pip install fastparquet\n"
+            f"Details: {type(e).__name__}: {e}"
+        ) from e
 
     return RegisteredDataset(
         name=name,
