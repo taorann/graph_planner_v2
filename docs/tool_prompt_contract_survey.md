@@ -17,10 +17,10 @@
 
 | 动作 | 数据类定义 | 环境入口 | 依赖工具/模块 | 实现状态 |
 | --- | --- | --- | --- | --- |
-| `explore` | `graph_planner/core/actions.py` → `ExploreAction`【F:graph_planner/core/actions.py†L1-L40】 | `graph_planner/env/planner_env.py` → `_handle_explore`【F:graph_planner/env/planner_env.py†L97-L169】 | `graph_planner/graph/context.py`（子图上下文）、`graph_planner/memory/candidates.py`（候选生成）、`graph_planner/retriever/snippet_reader.py`（代码片段）等 | ✅ 已实现，可根据 anchors 与 budget 选择 `find`/`expand`/`read`。 |
+| `explore` | `graph_planner/core/actions.py` → `ExploreAction`【F:graph_planner/core/actions.py†L1-L40】 | `graph_planner/env/planner_env.py` → `_handle_explore`【F:graph_planner/env/planner_env.py†L97-L169】 | `graph_planner/memory/mem_candidates.py`（候选生成）、`graph_planner/memory/graph_adapter.py`（1-hop 扩展与锚点解析）、`graph_planner/runtime/sandbox.py`（读取 repo 内代码片段）【F:graph_planner/memory/mem_candidates.py†L1-L200】【F:graph_planner/memory/graph_adapter.py†L1-L149】【F:graph_planner/runtime/sandbox.py†L60-L214】 | ✅ 已实现，可根据 anchors 与 budget 选择 `find`/`expand`/`read`。 |
 | `memory` | `MemoryAction`【F:graph_planner/core/actions.py†L42-L74】 | `_handle_memory`【F:graph_planner/env/planner_env.py†L214-L241】 | `graph_planner/memory/text_memory.py`（`memory_commit`/`memory_delete`、配额估算）【F:graph_planner/memory/text_memory.py†L1-L407】 | ✅ 已实现，支持 explore/observation 目标、turn/session scope 与 over-budget 拒绝。 |
 | `repair` | `RepairAction`【F:graph_planner/core/actions.py†L76-L118】 | `_handle_repair`【F:graph_planner/env/planner_env.py†L246-L305】 | `graph_planner/agents/common/text_protocol.py`（`handle_planner_repair`、CGM payload）【F:graph_planner/agents/common/text_protocol.py†L148-L396】；`graph_planner/agents/rule_based/cgm_adapter.py`（本地 CGM 客户端）【F:graph_planner/agents/rule_based/cgm_adapter.py†L1-L358】 | ✅ 已实现，Planner 只写 subplan，CGM 生成统一 diff 并可自动测试。 |
-| `submit` | `SubmitAction`【F:graph_planner/core/actions.py†L120-L150】 | `_handle_submit`【F:graph_planner/env/planner_env.py†L306-L309】 | `graph_planner/tools/testing.py`（`run_all_checks`）、`graph_planner/tools/git_utils.py`（补丁状态）等 | ✅ 已实现，负责最终测试与 episode 结束。 |
+| `submit` | `SubmitAction`【F:graph_planner/core/actions.py†L120-L150】 | `_handle_submit`【F:graph_planner/env/planner_env.py†L306-L309】 | `graph_planner/runtime/sandbox.py` 的 `SandboxRuntime.test/get_patch` 负责运行容器内测试并收集最终 diff。【F:graph_planner/runtime/sandbox.py†L210-L276】 | ✅ 已实现，负责最终测试与 episode 结束。 |
 | `noop` | `NoopAction`【F:graph_planner/core/actions.py†L152-L170】 | `PlannerEnv.step` 顶层判断【F:graph_planner/env/planner_env.py†L61-L95】 | 无（直接回传空 observation） | ✅ 已实现，允许模型显式跳过操作。 |
 
 | 动作 | 触发位置 | 环境/实现 | 说明 |
@@ -32,7 +32,7 @@
 | `noop` | `<function=noop>`；解析为 `NoopAction`。【F:graph_planner/agents/common/contracts.py†L337-L341】【F:graph_planner/agents/common/chat.py†L123-L151】 | `PlannerEnv.step` 识别 `NoopAction` 并返回 {"kind": "noop"}，不上链任何容器操作。【F:graph_planner/env/planner_env.py†L61-L95】 | 新增显式空操作，便于模型放弃本轮动作且保持协议一致。 |
 Graph Planner 约定 **单回合仅一个 `<function=...>` 块**，内含多段 `<param>`。`parse_action_block` 会验证起止标签、参数唯一性与合法动作名，一旦违规便抛出带错误码的 `ProtocolError`；`format_action_block` 用于 fallback 再输出同样的文本协议。【F:graph_planner/agents/common/contracts.py†L193-L343】【F:graph_planner/agents/common/text_protocol.py†L37-L54】
 
-Planner 将环境 observation 包装成 `<observation for="{name}">{...JSON...}</observation>`，下一轮模型可直接读取；这一封装由 `emit_observation` 统一实现并在单测中确保严格输出 JSON。【F:graph_planner/agents/common/text_protocol.py†L275-L279】【F:tests/test_text_protocol_e2e.py†L57-L139】
+Planner 将环境 observation 包装成 `<observation for="{name}">{...JSON...}</observation>`，下一轮模型可直接读取；这一封装由 `emit_observation` 统一实现。仓库已移除旧版文本协议 e2e 测试，若需要验证输出，可配合 `scripts/run_rule_agent.py` 手动重放或编写临时脚本调用同一接口。【F:graph_planner/agents/common/text_protocol.py†L275-L279】【F:scripts/run_rule_agent.py†L54-L136】
 
 ## 3. 模型提示模板与输出契约
 

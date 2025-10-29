@@ -18,7 +18,7 @@ Graph Planner 致力于复现 CGM + Planner 的双智能体代码修复流程：
 1. **Graph Planner 统一包结构**（`graph_planner/`）
    - `graph_planner.agents`：同时保留规则策略（`rule_based`）与本地模型策略（`model_based`），共享 `agents.common.text_protocol` 定义的 `<function=...>` 文本轨迹协议，方便替换决策模型。
    - `graph_planner.env`：`PlannerEnv` 封装 R2E/RepoEnv 任务生命周期，负责动作解析、奖励计算与遥测输出。
-   - `graph_planner.runtime`：`SandboxRuntime` 调度 FakeSandbox、RepoEnv、docker-py 三种后端，并统一将 lint/test 结果写入日志。
+   - `graph_planner.runtime`：`SandboxRuntime` 负责在 RepoEnv 与纯 Docker 运行模式间切换，并统一将 lint/test 结果写入日志。【F:graph_planner/runtime/sandbox.py†L60-L276】
 
 2. **rLLM 训练集成**
    - `graph_planner.integrations.rllm.agent.GraphPlannerRLLMAgent` 将环境观测整理成系统提示，解析模型输出的 `<function=...>` 区块，并在解析失败时回退到规则策略。
@@ -27,11 +27,12 @@ Graph Planner 致力于复现 CGM + Planner 的双智能体代码修复流程：
    - `scripts/train_planner_grpo.py` 读取 rLLM PPO 配置，覆盖数据路径与训练超参，可选择性关闭规则回退。
 
 3. **本地运行与冒烟测试脚手架**
-   - `scripts/run_rule_agent.py` 支持在 FakeSandbox、RepoEnv、docker 模式下运行规则或本地 LLM 策略，方便训练前验证模型行为。
-   - `tests/test_rule_agent_pipeline.py` 通过 FakeSandbox 模拟完整修复流程，并把 `repair_trace` 写入 `logs/test_runs.jsonl`，用于回归测试和日志示例。
+   - `scripts/run_rule_agent.py` 支持在 RepoEnv 或纯 Docker 工作流下运行规则/本地 LLM 策略，便于在真实容器环境中做训练前冒烟检查。【F:scripts/run_rule_agent.py†L101-L136】
+   - `tests/test_reward_manager_loading.py` 保留 rLLM 奖励管理器的加载兜底用例，确保在缺省配置下训练脚本仍能顺利启动；其他历史冒烟测试已迁移为文档中的手动命令。【F:tests/test_reward_manager_loading.py†L1-L45】
 
 4. **补丁生成与护栏**
    - `graph_planner.agents.rule_based.cgm_adapter` 暴露 CGM 的统一接口，既可调用真实模型，也能在缺席时回退到规则补丁。
+   - `actor.cgm_local.generate` 为 rLLM/Verl 的纯本地兜底，实现不依赖 Ray RPC；在 vLLM 缺席时由 `CGMService` 直接调用，防止递归触发远端适配器。【F:actor/cgm_local.py†L1-L63】【F:rllm/verl/verl/workers/cgm_service.py†L74-L123】
    - `aci.guard` 提供补丁护栏校验，确保 Planner 与 CGM 输出的 diff 满足安全约束。
    - `aci` 工具链实现文件查看、编辑、lint/test 等基础能力，供 Sandbox 与训练流程复用。
 
