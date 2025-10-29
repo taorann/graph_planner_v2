@@ -1,7 +1,9 @@
 __pycache__/
 *.pyc
-datasets/r2e_gym/instances/
-datasets/swebench/instances/
+datasets/r2e_gym/instances/*
+!datasets/r2e_gym/instances/.gitignore
+datasets/swebench/instances/*
+!datasets/swebench/instances/.gitignore
 datasets/swebench/*.jsonl
 wandb/
 **/wandb/

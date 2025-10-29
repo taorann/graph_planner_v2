@@ -42,36 +42,29 @@ tests/             # FakeSandbox 测试与 CGM 适配器回归
 
 2. **准备训练/评测数据集**
    ```bash
-   # R2E-Gym 训练/验证集
-   PYTHONPATH=. python scripts/prepare_training_datasets.py \
-     --r2e-dataset R2E-Gym/R2E-Gym-Lite
-
-   # SWE-bench Verified 验证/测试集
-   PYTHONPATH=. python scripts/prepare_swebench_validation.py \
+   PYTHONPATH=. python scripts/prepare_datasets.py \
+     --r2e-dataset R2E-Gym/R2E-Gym-Lite \
      --swebench-dataset princeton-nlp/SWE-bench_Verified
    ```
-  第一个脚本会下载 Hugging Face 上的 R2E-Gym 训练集并写入 `datasets/r2e_gym/train.jsonl`、`datasets/r2e_gym/val.jsonl`，同时生成 `instances/*.json` 与 `docker_images.txt` 供 RepoEnv 使用。第二个脚本会优先解析仓库内的 `graph_planner/SWE-bench`（若存在），否则回退到 Hugging Face 数据集，把验证/测试任务写入 `datasets/swebench/<split>.jsonl` 并生成对应的 docker manifest。两个脚本均支持 `--prepull-containers` 预拉容器以及一组 `--prepull-*` 并行参数。
+  `prepare_datasets.py` 会把 Hugging Face 上的 R2E-Gym / SWE-bench 数据集转换成 Graph Planner 所需的 JSON/JSONL 结构，并在 `datasets/` 下生成对应的任务文件、`instances/*.json` 以及 docker manifest。脚本同时支持 `--skip-r2e`、`--skip-swebench`、`--prepull-*` 等参数，便于按需刷新或预拉容器。
 
 3. **运行规则代理冒烟**
    ```bash
    PYTHONPATH=. python scripts/run_rule_agent.py \
      --backend repoenv \
-     --ds-json config/r2e_ds_repoenv_sample.json \
+     --ds-json /path/to/your_r2e_dataset.jsonl \
      --max-steps 6 \
      --report smoke_report.json
    ```
-   该脚本会生成 `smoke_report.json` 和 `logs/test_runs.jsonl`，便于分析修复轨迹。
+   请将 `--ds-json` 指向已经准备好的 R2E-Gym（或自定义）任务 JSONL。脚本会生成 `smoke_report.json` 和 `logs/test_runs.jsonl`，便于分析修复轨迹。
 
 4. **启动强化学习训练（需要 rLLM + Docker 环境）**
    ```bash
-   PYTHONPATH=. python scripts/train_graphplanner_rllm.py \
-     --config-file configs/experiments/planner_debug.yaml \
-     --dataset datasets/r2e_gym/train.jsonl \
-     --model-path models/Qwen3-14B \
-   --cgm-model-path models/CodeFuse-CGM \
-    --print-config
-  ```
-  仓库在 `configs/experiments/` 下提供了可直接运行的示例 YAML（单卡调试、8 卡/16 卡配方等）。命令会按“内置默认 < YAML < CLI”优先级合并配置，并在 `outputs/<run_name>/resolved_config.yaml` 中保存最终参数。若 manifest 存在会自动载入；也可通过 `--prepull-containers` 在训练前统一预拉容器。若仅需审计配置而不真正启动训练，可改用 `--print-config-only`。更多示例与 W&B 监控说明见 [`docs/runbook.md`](docs/runbook.md)。
+   PYTHONPATH=. python scripts/train_planner_grpo.py \
+     --config configs/experiments/planner_grpo_4gpu.yaml \
+     --print-config
+   ```
+  当前仓库仅保留 `configs/experiments/planner_grpo_4gpu.yaml` 作为默认 GRPO 配置，脚本会自动解析其中的模型、数据集与环境变量设置。如需调整路径或超参，可使用 `--overrides trainer.total_epochs=10 data.train_batch_size=4` 形式的 OmegaConf dotlist 覆写。添加 `--dry-run` 可以在应用完覆写后立即退出，便于审计配置。更多说明见 [`docs/runbook.md`](docs/runbook.md)。
 
 5. **合同冒烟检查**
    ```bash

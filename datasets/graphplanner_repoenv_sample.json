@@ -1,0 +1,12 @@
+{
+  "task_id": "repoenv_sample_calc_fix",
+  "docker_image": "graph_planner/repoenv-sample:latest",
+  "repo": "calc-project",
+  "repo_path": "/repo",
+  "commands": {
+    "build": "pytest",
+    "test": "pytest tests/test_calc.py"
+  },
+  "env": {},
+  "max_steps": 6
+}

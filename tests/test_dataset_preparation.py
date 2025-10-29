@@ -12,7 +12,7 @@ from graph_planner.datasets import (
     convert_swebench_entries,
     prepare as datasets_prepare,
 )
-from scripts import prepare_swebench_validation, prepare_training_datasets
+from scripts import prepare_datasets
 
 
 @pytest.fixture()
@@ -239,9 +239,9 @@ def test_write_manifest_and_maybe_prepull(tmp_path: Path, monkeypatch):
     def fake_prepull(images, **kwargs):
         calls.append((list(images), kwargs))
 
-    monkeypatch.setattr(prepare_training_datasets, "prepull_docker_images", fake_prepull)
+    monkeypatch.setattr(prepare_datasets, "prepull_docker_images", fake_prepull)
 
-    manifest = prepare_training_datasets._write_manifest_and_maybe_prepull(  # pylint: disable=protected-access
+    manifest = prepare_datasets._write_manifest_and_maybe_prepull(  # pylint: disable=protected-access
         output_dir=tmp_path,
         result=result,
         manifest_name="docker.txt",
@@ -263,6 +263,7 @@ def test_write_manifest_handles_collections_without_build_only(tmp_path: Path, m
         def __init__(self) -> None:
             self.images = ["demo:image"]
             self.missing = 0
+            self.build_only = 0
 
     invoked: dict[str, bool] = {}
 
@@ -273,11 +274,11 @@ def test_write_manifest_handles_collections_without_build_only(tmp_path: Path, m
         invoked["called"] = True
         assert images == ["demo:image"]
 
-    monkeypatch.setattr(prepare_training_datasets, "collect_docker_images", fake_collect)
-    monkeypatch.setattr(prepare_training_datasets, "prepull_docker_images", fake_prepull)
+    monkeypatch.setattr(prepare_datasets, "collect_docker_images", fake_collect)
+    monkeypatch.setattr(prepare_datasets, "prepull_docker_images", fake_prepull)
 
     result = DatasetConversionResult(records=[], instance_paths=[], skipped=0)
-    manifest = prepare_training_datasets._write_manifest_and_maybe_prepull(  # pylint: disable=protected-access
+    manifest = prepare_datasets._write_manifest_and_maybe_prepull(  # pylint: disable=protected-access
         output_dir=tmp_path,
         result=result,
         manifest_name="manifest.txt",
@@ -292,36 +293,32 @@ def test_write_manifest_handles_collections_without_build_only(tmp_path: Path, m
     assert invoked.get("called") is True
 
 
-def test_prepare_swebench_validation_prefers_local(tmp_path: Path, monkeypatch):
-    swe_root = tmp_path / "SWE-bench"
-    data_dir = swe_root / "data" / "verified"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "instance_id": "demo__repo-1",
-        "title": "Fix bug",
-        "docker_image": "demo/image:latest",
-        "repo": "demo/repo",
-    }
-    (data_dir / "validation.jsonl").write_text(json.dumps(payload) + "\n", encoding="utf-8")
+def test_prepare_swebench_downloads_from_hf(tmp_path: Path, monkeypatch):
+    rows = [
+        {
+            "instance_id": "demo__repo-1",
+            "title": "Fix bug",
+            "docker_image": "demo/image:latest",
+            "repo": "demo/repo",
+        }
+    ]
 
-    invoked = {"hf": False}
+    def fake_load(dataset: str, split: str, token: Optional[str]):
+        assert dataset == "princeton-nlp/SWE-bench_Verified"
+        assert split == "validation"
+        assert token is None
+        return rows
 
-    def fail_hf(*_: object, **__: object) -> tuple[Iterable[Mapping[str, Any]], str]:
-        invoked["hf"] = True
-        return [], "validation"
+    monkeypatch.setattr(prepare_datasets, "_load_dataset", fake_load)
 
-    monkeypatch.setattr(prepare_swebench_validation, "_load_hf_dataset", fail_hf)
-
-    result = prepare_swebench_validation._prepare_swebench(  # pylint: disable=protected-access
+    result = prepare_datasets._prepare_swebench(  # pylint: disable=protected-access
         output_dir=tmp_path / "out",
         dataset="princeton-nlp/SWE-bench_Verified",
         split="validation",
         token=None,
         limit=None,
-        dataset_path=swe_root,
     )
 
-    assert invoked["hf"] is False
     assert len(result.records) == 1
     record = result.records[0]
     assert record["task_id"] == "demo__repo-1"
@@ -331,34 +328,28 @@ def test_prepare_swebench_validation_prefers_local(tmp_path: Path, monkeypatch):
     assert ds_path.is_relative_to((tmp_path / "out").resolve())
 
 
-def test_prepare_swebench_validation_falls_back_to_test_split(tmp_path: Path, monkeypatch):
-    payload = {
-        "instance_id": "demo__repo-2",
-        "title": "Fix issue",
-        "docker_image": "demo/image:latest",
-        "repo": "demo/repo",
-    }
+def test_prepare_swebench_respects_limit(tmp_path: Path, monkeypatch):
+    rows = [
+        {
+            "instance_id": f"demo__repo-{idx}",
+            "title": "Fix issue",
+            "docker_image": "demo/image:latest",
+            "repo": "demo/repo",
+        }
+        for idx in range(3)
+    ]
 
-    def fake_local(_: Path, __: str) -> list[Mapping[str, Any]]:
-        return []
+    monkeypatch.setattr(prepare_datasets, "_load_dataset", lambda *_: rows)
 
-    def fake_hf(name: str, split: str, token: Optional[str]):
-        assert split == "validation"
-        return iter([payload]), "test"
-
-    monkeypatch.setattr(prepare_swebench_validation, "_load_local_swebench", fake_local)
-    monkeypatch.setattr(prepare_swebench_validation, "_load_hf_dataset", fake_hf)
-
-    result = prepare_swebench_validation._prepare_swebench(  # pylint: disable=protected-access
+    result = prepare_datasets._prepare_swebench(  # pylint: disable=protected-access
         output_dir=tmp_path / "out",
         dataset="princeton-nlp/SWE-bench_Verified",
         split="validation",
-        token=None,
-        limit=None,
-        dataset_path=None,
+        token="secret",
+        limit=2,
     )
 
-    assert len(result.records) == 1
-    record = result.records[0]
-    assert record["split"] == "test"
-    assert (tmp_path / "out" / "test.jsonl").exists()
+    assert len(result.records) == 2
+    for record in result.records:
+        assert record["task_id"].startswith("demo__repo-")
+

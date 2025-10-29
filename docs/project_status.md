@@ -24,7 +24,7 @@ Graph Planner 致力于复现 CGM + Planner 的双智能体代码修复流程：
    - `graph_planner.integrations.rllm.agent.GraphPlannerRLLMAgent` 将环境观测整理成系统提示，解析模型输出的 `<function=...>` 区块，并在解析失败时回退到规则策略。
    - `graph_planner.integrations.rllm.env.GraphPlannerRLLMEnv` 将 `PlannerEnv` 暴露给 rLLM，封装奖励、终止条件与 RepoEnv/Sandbox 初始化逻辑。
    - `graph_planner.integrations.rllm.registry` + `graph_planner.infra.vendor.ensure_rllm_importable` 负责定位子模块 rLLM 并在 Hydra/Verl 注册 Graph Planner 自定义 agent/env。
-   - `scripts/train_graphplanner_rllm.py` 读取 rLLM PPO 配置，覆盖数据路径与训练超参，可选择性关闭规则回退。
+   - `scripts/train_planner_grpo.py` 读取 rLLM PPO 配置，覆盖数据路径与训练超参，可选择性关闭规则回退。
 
 3. **本地运行与冒烟测试脚手架**
    - `scripts/run_rule_agent.py` 支持在 FakeSandbox、RepoEnv、docker 模式下运行规则或本地 LLM 策略，方便训练前验证模型行为。
@@ -66,7 +66,7 @@ Graph Planner 致力于复现 CGM + Planner 的双智能体代码修复流程：
    - 启动 Docker 守护进程，并验证当前用户对 `/var/run/docker.sock` 具备访问权限。
 
 2. **数据与镜像就绪**
-   - 根据训练需求编写 RepoEnv/R2E JSONL 任务描述，并在 `config/` 或 `datasets/` 目录下维护。
+   - 根据训练需求编写 RepoEnv/R2E JSONL 任务描述，并在 `datasets/` 目录下维护。
    - 预先拉取或构建所有任务对应的 Docker 镜像，保证 `scripts/run_rule_agent.py` 可以顺利启动容器。
    - 使用 `scripts/register_graphplanner_dataset.py` 将数据集注册到 rLLM/Verl，确认生成的 parquet 文件可被训练脚本读取。
 
@@ -76,7 +76,7 @@ Graph Planner 致力于复现 CGM + Planner 的双智能体代码修复流程：
 
 4. **训练启动**
    - 将基础 checkpoint 拷贝至 `models/Qwen3-14B/`（以及需要的 `models/CodeFuse-CGM/`），脚本会自动使用这些路径作为默认模型目录。
-   - 根据实验计划编辑 `configs/experiments/*.yaml`（或使用 `--config-file` 指向自定义 YAML），再运行 `scripts/train_graphplanner_rllm.py`；需要临时覆写时可继续使用 CLI（例如 `--dataset`、`--total-epochs`），若希望完全依赖 YAML 则追加 `--yaml-only`。
+   - 根据实验计划编辑 `configs/experiments/planner_grpo_4gpu.yaml`（或使用 `--config` 指向自定义 YAML），再运行 `scripts/train_planner_grpo.py`；需要临时覆写时可继续使用 CLI（例如 `--overrides trainer.total_epochs=200`）。
    - 在训练过程中关注 `logs/` 与 Ray dashboard，确保奖励、轨迹记录符合预期。
 
 ## 缺失信息登记

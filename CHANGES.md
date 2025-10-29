@@ -1,14 +1,7 @@
 # Changelog
 
 ## Unreleased
-- Harden planner/CGM contract enforcement with newline normalisation, unified-diff validation, and deterministic patch hashing.
-- Introduce `runtime.sandbox.PatchApplier` for atomic apply + telemetry (`patch_id`, `n_hunks`, `temp_path`) and add duplicate/dirty workspace safeguards.
-- Add CLI helpers (`scripts/validate_patches.py`) and regression tests covering diff validation, atomic apply, and observation telemetry.
-- Fix README quick-start instructions to reference the actual R2E-Gym installation workflow and remove the obsolete `requirements-dev.txt` step.
-- Tune the 16×A800 training profile (`gp_full_73b14b_16g.yaml`) for higher throughput and document the updated parallelism hints in the runbook.
-- Split dataset preparation into `scripts/prepare_training_datasets.py` (R2E-Gym train/val) and `scripts/prepare_swebench_validation.py` (SWE-bench Verified validation/test), with local-repo parsing, docker manifest emission, and documentation updates for the new workflow.
-- Make the R2E-Gym converter tolerant of missing `task_id` fields by deriving identifiers from nested metadata or falling back to deterministic dataset indexes; extend coverage to nested `ds` payloads.
-- Skip malformed R2E rows lacking docker metadata while reporting skip counts, and expose those metrics via the dataset preparation CLI logs.
-- Extend dataset preparation with docker manifest emission and optional pre-pull hooks, wire training/eval CLIs to reuse the manifest (or preheat containers via `--prepull-containers`), and add tests covering the new helpers.
-- Refresh architecture/runbook documentation so all training/evaluation examples use the YAML-first launch flow and reflect the current script flags; update the project status note accordingly.
-- Teach the SWE-bench converter to fall back on official TestSpec metadata when docker images are missing, persist `requires_build`/`swebench_spec` markers, skip pre-pulling build-only entries, and document the new workflow with regression tests.
+- Remove obsolete configs, scripts, and tests now that `train_planner_grpo.py` is the sole training entry point.
+- Refresh README、文档与样例数据集说明，突出 `prepare_datasets.py`、统一的 GRPO 配置以及新的 RepoEnv sample。
+- 精简 `models/`、`datasets/` 等目录结构，仅保留 Planner/CGM 需要的占位目录与最新样例。
+- 更新 `tests/test_dataset_preparation.py` 以覆盖新的数据准备流程并删除失效的 rLLM 集成测试。

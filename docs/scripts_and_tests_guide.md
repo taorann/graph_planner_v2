@@ -13,15 +13,16 @@
 
 | 文件 | 作用 | 主要依赖 |
 | --- | --- | --- |
+| `prepare_datasets.py` | 下载并转换 R2E-Gym / SWE-bench 数据，生成 Graph Planner 兼容的 JSON/JSONL、manifest 与实例文件。 | `graph_planner.datasets`, `graph_planner.runtime.containers` |
 | `run_rule_agent.py` | 统一的沙箱运行入口。按照命令行参数构建 `PlannerEnv`，选择规则或本地 LLM 规划器，并在 RepoEnv / Docker / FakeSandbox 后端之间切换。支持 `--report` 输出轨迹日志。 | `graph_planner.env.planner_env`, `graph_planner.runtime.sandbox`, `graph_planner.agents.common.chat`, `graph_planner.infra.config` |
+| `train_planner_grpo.py` | 以单一 YAML (`configs/experiments/planner_grpo_4gpu.yaml`) 驱动 Planner-only GRPO 训练，自动注册 JSONL、预拉容器并配置 Ray runtime。 | `graph_planner.integrations.rllm`, `omegaconf`, `ray`, `graph_planner.infra.config` |
+| `eval_planner_grpo.py` | 复用训练脚本的配置解析逻辑，加载指定 checkpoint 执行验证流程。 | `graph_planner.integrations.rllm`, `omegaconf`, `ray` |
 | `register_graphplanner_dataset.py` | 将 RepoEnv 任务描述注册到 rLLM 数据集仓库，便于训练时引用。 | `graph_planner.integrations.rllm.dataset`, `R2E-Gym` |
-| `train_graphplanner_rllm.py` | 使用 rLLM/VERL 的 PPO 管道训练规划器，拼接自定义环境、代理与数据集。 | `graph_planner.integrations.rllm`, `graph_planner.agents.model_based`, `R2E-Gym` |
+| `validate_contracts.py` / `validate_patches.py` | 校验 Planner/CGM 协议与补丁结构，防止输出格式漂移。 | `graph_planner.agents.rule_based`, `graph_planner.aci.guard` |
 
-> 早期的 `smoke_test*.py` 已删除，所有端到端演练统一从 `run_rule_agent.py` 启动。
-
-- `run_rule_agent.py` 负责构建 `PlannerEnv`、驱动代理循环并根据配置选择不同容器后端，是规则策略与本地 LLM 共用的 CLI。【F:scripts/run_rule_agent.py†L1-L136】
-- `register_graphplanner_dataset.py` 把 RepoEnv 任务注册到 rLLM 数据集，自动规范 `r2e_ds_json`、挂载路径等字段。【F:scripts/register_graphplanner_dataset.py†L1-L47】
-- `train_graphplanner_rllm.py` 加载默认 PPO 配置，注入 Graph Planner 专属参数并触发 Ray 训练或配置导出。【F:scripts/train_graphplanner_rllm.py†L1-L147】
+- `prepare_datasets.py` 支持 `--skip-*` 与 `--prepull-*` 参数，可一次性生成训练/评测所需的 JSONL、实例与 docker manifest。【F:scripts/prepare_datasets.py†L12-L86】【F:scripts/prepare_datasets.py†L135-L214】
+- `train_planner_grpo.py` 负责加载 YAML、注册数据、构造 Ray runtime，并将 Planner/CGM 路径注入环境变量后启动 GRPO 训练循环。【F:scripts/train_planner_grpo.py†L322-L468】
+- `eval_planner_grpo.py` 复用了 `train_planner_grpo` 的配置处理，额外要求 `--ckpt` 指向待评估的 checkpoint 目录。
 
 ## 测试目录（`tests/`）
 
@@ -31,14 +32,14 @@
 | `test_rule_agent_pipeline.py` | 驱动 FakeSandbox 模拟完整的计划→记忆→打补丁→提交流程，验证规则代理、遥测与日志写入（`logs/test_runs.jsonl`）的行为。 | 强调对 `repair_trace` 的记录：阅读片段、补丁 diff、命令执行与最终文件内容。 |
 
 - `test_cgm_adapter.py` 验证 CGM 适配器在本地兜底与远程请求路径下能返回预期补丁并携带正确的 API 参数。【F:tests/test_cgm_adapter.py†L1-L88】
-- `test_rule_agent_pipeline.py` 模拟完整容器交互，覆盖补丁应用、测试执行与遥测记录，确保规则策略可在无 Docker 环境下回归。【F:tests/test_rule_agent_pipeline.py†L13-L199】
+- `test_rule_agent_pipeline.py` 模拟完整容器交互，覆盖补丁应用、测试执行与测记录，确保规则策略可在无 Docker 环境下回归。【F:tests/test_rule_agent_pipeline.py†L13-L199】
 
 ## ACI / Git / Lint / Test 的实现来源
 
 - **ACI 工具链（`aci/`）**：
   - `aci/tools.py` 提供查看、搜索、编辑、lint、测试等 CLI 操作的统一封装。优先调用项目内实现，缺省回退到宿主机已有的工具。
   - `aci/git_tools.py` 封装分支、提交、回滚、diff 等 Git 操作，统一返回 `AciResp` 结构，方便在 CLI 与 API 中复用。
-  - `aci/guard.py` 则负责补丁护栏与决策清洗逻辑，被 `PlannerEnv` 与外部代理共同调用，以保持编辑窗口、预算等策略约束一致。
+  - `aci/guard.py` 负责补丁护栏校验与决策清洗逻辑，被 `PlannerEnv` 与外部代理共同调用，以保持编辑窗口、预算等策略约束一致。
 
 - **Git 操作**：仓库未依赖 R2E 提供的 Git 管理，所有交互均通过 `aci/git_tools.py` 调用系统 `git`。
 
@@ -48,8 +49,7 @@
 
 - **与 R2E 的关系**：
   - RepoEnv / Docker 运行时通过 `graph_planner.runtime.sandbox.SandboxRuntime` 的不同分支（`repoenv`、`r2e`、`docker`）对接 R2E-Gym，利用其任务定义和容器封装。【F:graph_planner/runtime/sandbox.py†L62-L208】
-  - 除沙箱后端外，ACI、Git、Lint、Test 逻辑均是仓库自研模块，不依赖 R2E 提供的实现。
-  - R2E-Gym 专注于“任务数据集 + 环境调度”两类能力，本身并不提供通用的代码编辑 CLI、Git 自动化或 lint/test 驱动器；这些基础设施在本仓库已有成熟实现，也方便离线或无容器环境下工作，因此继续保留自研方案，减少对额外依赖的耦合。
+  - 除沙箱后端外，ACI、Git、Lint、Test 逻辑均是仓库自研模块，可在离线或无容器环境下工作。
 
 ## 推荐使用流程
 
@@ -57,7 +57,7 @@
    ```bash
    PYTHONPATH=. python scripts/run_rule_agent.py \
      --backend repoenv \
-     --ds-json config/r2e_ds_repoenv_sample.json \
+     --ds-json /path/to/your_r2e_dataset.jsonl \
      --max-steps 6 \
      --report smoke_report.json
    ```
@@ -67,8 +67,8 @@
    ```bash
    PYTHONPATH=. pytest tests -q
    ```
-   若依赖项（如 `pydantic`）缺失，可先安装 `R2E-Gym` 提供的环境。
+   若依赖项缺失，可先安装 `R2E-Gym` 或使用 `pip install -e ./R2E-Gym` 完成补齐。
 
-3. **训练任务**：使用 `scripts/train_graphplanner_rllm.py` 启动 rLLM 强化学习；详细的准备步骤与命令示例请参考《graph_planner_architecture_pipeline.md》中的“4.3.2 训练脚本速查”。【F:docs/graph_planner_architecture_pipeline.md†L120-L172】
+3. **训练任务**：使用 `scripts/train_planner_grpo.py --config configs/experiments/planner_grpo_4gpu.yaml` 启动 GRPO 训练；需要覆盖特定路径或超参时，通过 `--overrides key=value` 追加 dotlist，运行前可以配合 `--print-config` / `--dry-run` 进行审计。【F:scripts/train_planner_grpo.py†L371-L424】
 
 通过以上梳理，贡献者可以快速理解脚本入口、回归保障与基础设施封装，并在需要时跳转到架构总览文档获取端到端 pipeline 与命令速查。

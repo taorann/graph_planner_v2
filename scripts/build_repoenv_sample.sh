@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Build the local RepoEnv-compatible sample image used by the rule-based agent
 # smoke tests. The resulting image tag is referenced from
-# config/r2e_ds_repoenv_sample.json.
+# datasets/graphplanner_repoenv_sample.json.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
