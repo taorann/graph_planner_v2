@@ -138,7 +138,7 @@ class CGMService:
                 except queue.Empty:
                     break
 
-            print(f"CGMService batching {len(batch)} requests")
+            print(f"[CGMService] batching={len(batch)} group={getattr(self.engine, 'group', 'cgm')}")
             prompts = [self._build_prompt(slot["req"]) for slot in batch]
             generations = self.engine.generate(prompts)
             patches = [self._parse_patch(gen) for gen in generations]
@@ -153,10 +153,10 @@ class CGMService:
             with self.lock:
                 self.batching = False
 
-    def _build_prompt(self, req: Dict[str, Any]) -> Any:
-        """Translate an environment request into an engine-friendly payload."""
+    def _build_prompt(self, req: Dict[str, Any]) -> str:
+        """Encode request as JSON string for vLLM; fallback will json.loads."""
 
-        return dict(req)
+        return json.dumps(req, ensure_ascii=False)
 
     def _parse_patch(self, payload: Any) -> Dict[str, Any]:
         """Parse CGM output payload into a structured patch dict."""
