@@ -1,8 +1,7 @@
 # 数据集路径说明 / Dataset layout
 
-- `r2e_gym/train.jsonl`：Graph Planner 默认的 R2E-Gym 训练集。运行 `python scripts/prepare_training_datasets.py`
-  会先从 Hugging Face 下载原始 parquet 分片，再转换成 JSON/JSONL 写入该目录。转换过程中脚本会为每条任务
-  整理出三个关键信息：
+仓库默认不再附带 R2E-Gym JSONL，运行 `python scripts/prepare_datasets.py` 会在本目录生成训练/验证集。
+脚本会为每条任务整理出三个关键信息：
 
   * **`task_id`**：容器运行与训练日志依赖的唯一标识。原始 R2E 任务散落在不同字段中（`task_id`、`instance_id`、
     `ds.task.task_id` 等），脚本会按顺序回退，必要时基于数据集名 + 下标生成稳定 ID，确保后续缓存/断点恢复
@@ -12,9 +11,9 @@
   * **`instance` JSON**：包含 issue 描述、环境变量、挂载配置、最大步数等结构化数据（见下文）。环境运行和
     rLLM 数据注册都依赖这一结构，因此统一写成 JSON 便于快速重放任务。
 
-- `r2e_gym/val.jsonl`：Graph Planner 默认的 R2E-Gym 验证集，生成流程同上。
-- `graphplanner_repoenv_sample.jsonl`：保留的历史示例，便于快速回归旧版脚本。
-- `swebench/`：通过 `scripts/prepare_swebench_validation.py` 下载或解析的 SWE-bench 验证/测试集。Verified 分支不再
+- `r2e_gym/train.jsonl` / `r2e_gym/val.jsonl`：运行数据准备脚本后生成的训练/验证 JSONL。
+- `graphplanner_repoenv_sample.jsonl`：轻量示例，便于验证 RepoEnv 流程，依赖 `graphplanner_repoenv_sample.json`。
+- `swebench/`：通过 `scripts/prepare_datasets.py` 下载或解析的 SWE-bench 验证/测试集。Verified 分支不再
   提供现成的容器镜像，脚本会在 `instances/*.json` 与 JSONL 中额外写入 `requires_build=true` 以及从官方
   `swebench.harness.test_spec` 解析出的 `swebench_spec`（仓库、安装脚本、评测脚本等）。若 manifest 中只有
   build-only 项，`--prepull-containers` 会给出提示，需要先运行 `python -m swebench.harness.prepare_images`
@@ -39,7 +38,7 @@
 
 生成完 JSONL 后，训练脚本会按以下步骤消费：
 
-1. `scripts/train_graphplanner_rllm.py` 调用 `ensure_dataset_registered` 读取 JSONL，将上述字段再度压平成 Verl 期望的
+1. `scripts/train_planner_grpo.py` 调用 `ensure_dataset_registered` 读取 JSONL，将上述字段再度压平成 Verl 期望的
    parquet schema，并把 `task_id`、`docker_image`、`instance` 等信息保存到 Ray 可访问的缓存目录。
 2. rLLM 在回放数据时会把 JSON 反序列化，交给 `GraphPlannerRLLMEnv.reset` 恢复 RepoEnv 容器。此时 `docker_image` 确定
    运行基础镜像，`instance` 字段提供初始化挂载、工作目录、测试命令等。若 manifest 存在，训练/评估脚本会在启动前读取

@@ -1,5 +1,0 @@
-{
-  "docker_image": "graph-planner/repoenv-sample:latest",
-  "repo_name": "graph-planner-sample",
-  "parsed_commit_content": "{\"file_diffs\":[],\"old_commit_hash\":\"0000000\",\"new_commit_hash\":\"0000001\",\"commit_message\":\"sample\",\"commit_date\":\"1970-01-01T00:00:00Z\",\"metadata\":{}}"
-}

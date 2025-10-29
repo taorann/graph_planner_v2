@@ -1,242 +1,66 @@
-# Graph Planner 训练/评估 Runbook
+# Graph Planner GRPO Runbook
 
-本指南描述 rLLM 训练/评估脚本的统一配置方式、启动命令与监控要点，解决“多处配置”“指令不一致”等痛点。默认语言为中文，括号内附英文关键词，便于跨团队协作。
+本指南说明如何使用 `scripts/train_planner_grpo.py` 复现实验配置、准备数据以及检查运行环境。新版流程只保留了一个公开的 YAML——`configs/experiments/planner_grpo_4gpu.yaml`——其余配置项通过 CLI dotlist 覆写即可。
 
 ## 0. 数据准备
 
-运行训练或评测前，分别执行下列两个脚本，将 Hugging Face 或本地数据转换成 Graph Planner 消费的 JSON/JSONL：
+1. **下载/转换数据集**：
+   ```bash
+   PYTHONPATH=. python scripts/prepare_datasets.py \
+     --r2e-dataset R2E-Gym/R2E-Gym-Lite \
+     --swebench-dataset princeton-nlp/SWE-bench_Verified
+   ```
+   脚本会在 `datasets/` 目录下生成标准化的 JSON/JSONL 以及 `instances/*.json`，并按需写入 docker manifest；可以通过 `--skip-r2e`、`--skip-swebench`、`--prepull-*` 控制各阶段。
 
+2. **确认训练/验证文件**：`configs/experiments/planner_grpo_4gpu.yaml` 的 `data.train_files` / `data.val_files` 默认指向 `datasets/r2e_gym/{train,val}.jsonl`，如需替换成自定义任务，只需修改 YAML 或在 CLI 中传入 `--overrides data.train_files=[...]`。
+
+3. **预拉容器（可选）**：当 YAML 中启用 `graph_planner.env.prepull_containers=true` 时，训练脚本会扫描 JSONL 任务并调用 `_maybe_prepull_docker_images`，逐个执行 `docker pull` 缓解首次 rollout 的等待时间。【F:scripts/train_planner_grpo.py†L293-L320】
+
+## 1. YAML 字段速览
+
+`planner_grpo_4gpu.yaml` 覆盖了模型、采样、并行、资源与 Ray runtime 设置，重点字段如下：
+
+- `paths.*`：Planner / CGM 权重与 tokenizer 的本地目录。训练脚本会通过 `resolve_repo_path` 把它们转换为绝对路径，并填充到 Ray runtime 的环境变量中。【F:scripts/train_planner_grpo.py†L110-L150】【F:scripts/train_planner_grpo.py†L207-L252】
+- `data.*`：训练/验证 JSONL 列表以及 dataloader 相关参数。脚本会在启动前调用 `_maybe_materialize_json_to_verl_parquet` 将 JSONL 转换成 `_verl.parquet` 并写回配置，后续的 GRPO 流程直接消费 parquet。【F:scripts/train_planner_grpo.py†L322-L362】
+- `actor_rollout_ref.*`：Planner 模型的 FSDP 策略、学习率和 rollout 配置，默认固定在 4×GPU GRPO 场景。`train_planner_grpo.py` 会验证 strategy 是否为 FSDP，并保证 tensor parallel 度为 1。【F:scripts/train_planner_grpo.py†L237-L284】
+- `trainer.*`、`parallel.*`、`resources.*`：声明梯度累积、保存/评估周期与 Ray 资源，用于构建 Verl 的训练器和 runtime。
+
+## 2. CLI 与覆写
+
+`train_planner_grpo.py` 的核心参数：
+
+- `--config`：必填，指向 YAML（默认值 `configs/experiments/planner_grpo_4gpu.yaml`）。
+- `--overrides`：可选的 OmegaConf dotlist，例如 `--overrides trainer.total_epochs=200 data.train_files=[my/train.jsonl]`。
+- `--ray-address`：连接既有集群；`local` 表示强制启动本地 Ray，`auto` 沿用 Ray 默认逻辑。【F:scripts/train_planner_grpo.py†L371-L412】
+- `--print-config`：打印最终合并后的 YAML 并退出，常用于检查路径/环境变量。【F:scripts/train_planner_grpo.py†L415-L420】
+- `--dry-run`：完成配置解析与数据注册后立刻退出，不会初始化 Ray 或启动训练。【F:scripts/train_planner_grpo.py†L420-L424】
+
+命令示例：
 ```bash
-# 训练：R2E-Gym
-PYTHONPATH=. python scripts/prepare_training_datasets.py \
-  --r2e-dataset R2E-Gym/R2E-Gym-Lite \
-  --r2e-output datasets/r2e_gym
-
-# 验证/测试：SWE-bench Verified
-PYTHONPATH=. python scripts/prepare_swebench_validation.py \
-  --swebench-dataset princeton-nlp/SWE-bench_Verified \
-  --swebench-output datasets/swebench
-```
-
-- 两个脚本都会读取 Hugging Face token（环境变量 `HF_TOKEN`），必要时可通过 `--hf-token` 显式指定。
-- `prepare_training_datasets.py` 负责写入 `datasets/r2e_gym/train.jsonl`、`datasets/r2e_gym/val.jsonl` 与配套的 `instances/*.json`，并支持 `--r2e-val-size`/`--r2e-val-split` 自定义验证集切分。
-- `prepare_swebench_validation.py` 会优先解析仓库内的 `graph_planner/SWE-bench`（若存在），否则回退至 Hugging Face 数据集，最终在 `datasets/swebench/<split>.jsonl` 与 `datasets/swebench/instances/` 产出验证/测试任务。`--swebench-split` 默认 `validation`，也可改为 `test`。
-- 两个脚本都会生成 docker manifest（如 `datasets/r2e_gym/docker_images.txt`、`datasets/swebench/docker_images_{validation,test}.txt`），并在 `--prepull-containers` 时复用 R2E-Gym 的工具并行预拉容器，可用 `--prepull-max-workers/--prepull-retries/--prepull-delay/--prepull-timeout` 调整。
-- 若仅需刷新其中一种数据，可分别带 `--skip-r2e` 或 `--skip-swebench`。
-
-## 1. 配置加载优先级
-
-`scripts/train_graphplanner_rllm.py` 与 `scripts/eval_graphplanner_rllm.py` 现在支持三层优先级；仓库在 `configs/experiments/` 下提供了可直接引用的示例 YAML，便于复制或按需修改。与此同时，仓库根目录下新增的 `config/graph_planner_cfg.json` 汇总了 CGM/Planner 相关的默认路径、温度、超时等常用开关，并全部以仓库相对路径写出——当需要本地调参时，可以直接复制该文件到 `.aci/config.json` 或通过环境变量 `ACI_CONFIG` 指向自定义副本，再配合环境变量/CLI 覆盖细节。默认优先级如下：
-
-1. **内置默认值**（`default_training_run_config`）
-2. **YAML 配置文件**（`--config-file`，使用 `yaml.safe_load`）
-3. **CLI 覆盖**（除非加 `--yaml-only`）
-
-当设置 `--yaml-only` 时，仅解析 YAML（以及 `--config-file` / `--yaml-only` / `--wandb-offline` 本身），其余 CLI 参数会被忽略并在日志中提示。
-
-最终合并后的配置会写入 `logging.output_dir/run_name/resolved_config.yaml`，并同步到 W&B `config`（`wandb.config.update`）。
-
-### 1.1 CLI → YAML → Hydra 调用链
-
-- **训练脚本主流程**：`train_graphplanner_rllm.py` 会先解析 CLI，并把显式出现的参数记录在 `_collect_specified_cli_args` 的集合里，随后 `_absolutise_args` 将所有路径转换为绝对路径，避免后续覆盖时出现歧义。【F:scripts/train_graphplanner_rllm.py†L70-L128】
-- **运行配置三段合并**：`default_training_run_config()` 提供 dataclass 默认值；`load_run_config_file()` 读取 `--config-file` 指定的 YAML；`build_cli_overrides()` 仅把 CLI 中出现过的字段转成嵌套字典，最后由 `merge_run_config()` 按“默认 → YAML → CLI”顺序得到 `final_run_cfg`，并在 `update_args_from_config()` 中把 YAML/默认值补全回 CLI 命名空间。【F:graph_planner/infra/config.py†L34-L204】若 YAML 额外提供 `planner:` / `cgm:` 子段，`merge_run_config()` 会根据当前 `--agent` 只挑选对应的子配置再参与合并，方便在双代理顺序训练时分别指定资源与并行度。【F:graph_planner/infra/config.py†L699-L722】
-- **数据集与容器预处理**：解析完 run config 后，脚本会通过 `resolve_task_file()` / `_resolve_dataset()` 找到训练与验证 JSONL，并调用 `ensure_dataset_registered()` 生成 Verl parquet 与 DatasetRegistry 项；若需要还会 `collect_docker_images()` 并写入/读取 `docker_images.txt`。【F:scripts/train_graphplanner_rllm.py†L335-L468】
-- **Hydra 配置注入**：随后 `_load_config()` 会调用 Hydra 的 `initialize_config_dir`/`compose` 来展开 `agent_ppo_trainer.yaml` 内声明的 `defaults`，从而把 Verl 的 `ppo_trainer.yaml` 及其子配置合成为完整的 DictConfig；`_apply_model_overrides()`、`_apply_parallel_overrides()`、`_apply_training_overrides()`、`_apply_logging_overrides()` 分别把 run config 中的模型、并行、训练与日志字段写入 Hydra 配置树；`_configure_agent_env()` 选择 Planner/CGM agent 与 env 类并注入奖励、CGM、禁用选项等额外参数。【F:scripts/train_graphplanner_rllm.py†L297-L506】【F:rllm/rllm/trainer/config/agent_ppo_trainer.yaml†L1-L27】
-- **执行阶段**：完成资源校验后，脚本会把上述 Hydra 配置和 agent/env 构造参数交给 rLLM 的 `AgentTrainer`，最后调用 `trainer.train()` 进入 PPO 训练循环。【F:scripts/train_graphplanner_rllm.py†L750-L909】
-- **评估脚本差异**：`eval_graphplanner_rllm.py` 复用了绝大部分工具函数，但会强制把 Hydra 中的 `trainer.total_training_steps` 置 0、`trainer.val_only` 设为 True，并把 CLI `--batch-size` 写入 `data.train_batch_size`/`data.val_batch_size`，从而在相同配置下执行纯验证流程。【F:scripts/eval_graphplanner_rllm.py†L248-L321】
-
-### 1.2 配置一致性核对
-
-- **CLI 示例**：本 runbook 中的训练命令使用 `--dataset` / `--model-path` / `--cgm-model-path` 等选项，均与 CLI 定义保持一致，默认值也与脚本内的常量（如 `DEFAULT_TRAIN_DATASET_PATH`, `DEFAULT_CGM_MODEL_PATH`）相符。【F:scripts/train_graphplanner_rllm.py†L100-L175】
-- **评估命令**：示例中的 `--batch-size` 会在评估脚本中被同步到 Hydra 的 `data.train_batch_size` 与 `data.val_batch_size`，同时 `--docker-manifest`、`--dataset-split` 等参数均被 `_resolve_eval_dataset()` 正确消费，不会与 YAML 字段冲突。【F:scripts/eval_graphplanner_rllm.py†L107-L153】【F:scripts/eval_graphplanner_rllm.py†L214-L285】
-- **YAML 模板**：`configs/experiments/planner_8g.yaml` 中的字段命名与 `graph_planner.infra.config` 的 dataclass 定义一致（例如 `paths.dataset_train`, `training.grad_accum_steps`, `logging.wandb.watch`），脚本在 `_apply_*_overrides()` 中均设有对应分支，不存在悬空配置；额外的 `verl_overrides.trainer.gradient_accumulation_steps` 也会被透传到 Hydra。【F:graph_planner/infra/config.py†L39-L204】【F:configs/experiments/planner_8g.yaml†L1-L80】
-
-## 2. YAML 字段总览
-
-YAML 顶层字段与含义如下，所有路径均默认为仓库相对路径：
-
-| Section | 字段 | 说明 |
-|---------|------|------|
-| `experiment` | `name`, `seed`, `notes` | 运行标识与随机种子 |
-| `paths` | `dataset_train`, `dataset_val`, `planner_model`, `planner_tokenizer`, `cgm_model`, `cgm_tokenizer` | 数据与模型路径 |
-| `backends` | `planner_backend`, `cgm_backend`, `dtype`, `device_map_*`, `max_gpu_memory` | HF / 远程推理后端、精度与显存限制 |
-| `planner_sampling` | `temperature`, `top_p`, `top_k`, `max_input_tokens`, `max_new_tokens`, `stop`, `stop_ids`, `repetition_penalty`, `do_sample`, `stop_on_invalid_json` | Planner 采样策略 |
-| `cgm_generation` | `temperature`, `top_p`, `top_k`, `max_new_tokens`, `num_return_sequences`, `do_sample` | CGM 生成策略 |
-| `training` | `total_epochs`, `train_batch_size`, `grad_accum_steps`, `precision`, `lr`, `weight_decay`, `warmup_steps`, `clip_grad_norm`, `kl_coef`, `entropy_coef`, `value_coef`, `clip_coef`, `target_kl`, `total_steps`, `resume_from`, `gradient_checkpointing` | 训练超参与 Verl/GRPO 相关系数 |
-| `env` | `max_steps`, `reward_scale`, `failure_penalty`, `step_penalty`, `timeout_penalty`, `repo_op_limit`, `disable_cgm_synthesis`, `apply_patches`, `docker_manifest`, `prepull_containers`, `prepull_max_workers`, `prepull_retries`, `prepull_delay`, `prepull_timeout` | 环境奖励、工具开关与容器预拉取设置 |
-| `parallel` | `tensor_parallel_planner`, `tensor_parallel_cgm`, `replicas`, `parallel_agents`, `rollout_workers`, `workflow_parallel` | 模型并行与 rollout 并发 |
-| `resources` | `num_gpus`, `num_nodes`, `ray_num_gpus`, `ray_num_cpus`, `ray_memory`, `ray_object_store_memory` | 物理/ Ray 资源预算 |
-| `logging` | `wandb.*`, `log_backend`, `output_dir`, `save_interval`, `eval_interval` | 日志与输出目录；`wandb.watch` 支持 `{enabled, log, log_freq}` |
-| `planner` / `cgm` | 与上表一致 | 可选的代理专属覆盖；若存在仅在对应代理运行时生效 |
-| `telemetry` | `log_gpu`, `log_ray`, `log_patch_stats`, `log_planner_parse_errors`, `log_cgm_errors` | 监控开关 |
-| `verl_overrides` | 任意 Hydra key | 直接透传到 Verl/rLLM 配置 |
-
-> **提示**：`logging.output_dir` 为 run 目录的父路径，实际运行目录 = `output_dir / wandb.run_name`。脚本会将 `resolved_run_dir` 与 `resolved_config_path` 写回配置，便于外部工具查找。
-
-### 示例 YAML（片段）
-
-```yaml
-experiment:
-  name: planner_grpo
-  seed: 1234
-paths:
-  dataset_train: datasets/r2e_gym/train.jsonl
-  dataset_val: datasets/r2e_gym/val.jsonl
-  planner_model: models/Qwen3-14B
-  cgm_model: models/CodeFuse-CGM
-training:
-  total_epochs: 1
-  train_batch_size: 4
-  grad_accum_steps: 8
-  precision: bf16
-parallel:
-  tensor_parallel_planner: 4
-  tensor_parallel_cgm: 4
-  replicas: 1
-  parallel_agents: 4
-resources:
-  num_gpus: 8
-  ray_num_gpus: 8
-logging:
-  output_dir: outputs
-  wandb:
-    enabled: true
-    project: graph-planner
-    run_name: planner-grpo-8g
-```
-
-## 3. 启动方式
-
-### 3.1 CLI + YAML（默认）
-
-```bash
-PYTHONPATH=. python scripts/train_graphplanner_rllm.py \
-  --agent planner \
-  --config-file configs/experiments/planner_8g.yaml \
-  --dataset datasets/r2e_gym/train.jsonl \
-  --model-path models/Qwen3-14B \
-  --cgm-model-path models/CodeFuse-CGM \
+PYTHONPATH=. python scripts/train_planner_grpo.py \
+  --config configs/experiments/planner_grpo_4gpu.yaml \
+  --overrides data.train_files=[/abs/path/train.jsonl] \
   --print-config
 ```
 
-CLI 可继续覆盖 YAML 中的任意字段；最终合并配置会打印在屏幕上，并写入 `outputs/<run_name>/resolved_config.yaml`。若仅需审计配置后退出，请使用 `--print-config-only`。
+脚本会完成以下步骤：
 
-### 3.2 YAML-only 模式
+1. 加载 YAML + dotlist，确保训练/验证文件不为空。【F:scripts/train_planner_grpo.py†L381-L396】
+2. 注册 JSONL 到 Verl registry（若尚未 materialize），并根据配置生成 docker manifest。【F:scripts/train_planner_grpo.py†L322-L362】【F:scripts/train_planner_grpo.py†L212-L235】
+3. 检查 FSDP/tensor parallel 配置，计算有效 batch size 并输出到日志。【F:scripts/train_planner_grpo.py†L237-L284】【F:scripts/train_planner_grpo.py†L284-L312】
+4. 汇总 Planner/CGM 环境变量，必要时注入 Ray runtime env，确保远端 worker 与主进程一致。【F:scripts/train_planner_grpo.py†L110-L210】【F:scripts/train_planner_grpo.py†L312-L352】
+5. 根据 `--ray-address` 决定是否启动本地 Ray 实例，然后交给 rLLM 的 `AgentTrainer` 执行 GRPO 训练循环。【F:scripts/train_planner_grpo.py†L424-L468】
 
-```bash
-PYTHONPATH=. python scripts/train_graphplanner_rllm.py \
-  --config-file configs/experiments/planner_8g.yaml \
-  --yaml-only \
-  --print-config
-```
+## 3. 监控与常见检查
 
-仅使用 YAML（外加 `--wandb-offline` 的快速切换）；脚本会记录所有被忽略的 CLI 参数名称，方便排查。如需单纯验证配置，可将最后一行改为 `--print-config-only`。
+- **批量尺寸**：脚本会在日志中输出 `Batch configuration -> ...`，如果 `data.train_batch_size` 与计算值不符，会额外打印告警提示需要对齐梯度累积或 FSDP world size。【F:scripts/train_planner_grpo.py†L258-L312】
+- **Ray 环境变量**：`runtime_env` 会被打印出来，确认模型路径、温度和设备映射均已同步到远程 worker。【F:scripts/train_planner_grpo.py†L312-L352】
+- **W&B / 本地日志**：配置文件中的 `trainer.logger` 默认包含 `console` 与 `wandb`，可按需修改或在 dotlist 中禁用。
 
-### 3.3 冻结配置复现
+## 4. 故障排查建议
 
-已生成的 `outputs/<run_name>/resolved_config.yaml` 可直接复用：
+1. **数据路径异常**：如果 `data.*` 指向的 JSONL 不存在，脚本会在 materialize 阶段抛出 `FileNotFoundError`。请确认路径与仓库根目录的相对/绝对形式一致，或直接在 dotlist 中传入绝对路径。
+2. **FSDP 配置错误**：当 `tensor_parallel_planner != 1` 或 actor/ref strategy 不是 `fsdp` 时会直接报错。请确保只使用 FSDP 组合，并在多节点场景手动调整 `trainer.nnodes` 与 `trainer.n_gpus_per_node`。
+3. **Ray 地址**：在 `--dry-run` 阶段可以验证路径与环境变量，一旦通过 `--print-config` 或 `--dry-run` 检查无误，再去掉开关启动真实训练；若连接远程集群失败，请检查 `RAY_ADDRESS` 环境变量或 CLI 覆写。
 
-```bash
-PYTHONPATH=. python scripts/train_graphplanner_rllm.py \
-  --config-file outputs/planner-grpo-8g/resolved_config.yaml \
-  --yaml-only
-```
-
-同理，`scripts/eval_graphplanner_rllm.py` 也支持 `--config-file` 与 `--yaml-only`，默认在 run 目录下生成新的 `resolved_config.yaml`。
-
-## 4. 并行预检
-
-`graph_planner.infra.parallel.preflight_check` 会在启动前验证 GPU/Ray 配置：
-
-- `tensor_parallel_planner + tensor_parallel_cgm <= num_gpus * num_nodes`
-- `replicas * max(tensor_parallel) <= num_gpus * num_nodes`
-- `workflow_parallel >= max(parallel_agents, rollout_workers)`
-- `ray_num_gpus >= replicas`
-- `ray_num_cpus >= rollout_workers * 4`
-
-若校验失败，将抛出 `ValueError` 并给出三条修复建议（降低 TP/replicas、降低并发、提升 Ray 资源）。
-
-## 5. W&B 监控
-
-`infra.metrics` 在训练与评估脚本中自动初始化 W&B，并记录：
-
-- **并行状态**：`parallel/tensor_parallel_*`, `parallel/agents`, `parallel/workers`, `resources/num_gpus` 等
-- **GPU/Ray 心跳**：通过 `pynvml` 与 `ray.available_resources()` 获取 `gpu/<idx>/util`, `gpu/<idx>/mem_GB`, `ray/cpus_avail`, `ray/gpus_avail`
-- **补丁链路指标**：训练期间环境会继续上报 `patch_*`, `planner_parse_error_rate`, `reject/*` 等字段
-- **Verl 指标**：rLLM/Verl 原生的 `train/kl`, `train/entropy`, `train/clipfrac`, `train/policy_loss`, `train/value_loss`, `train/grad_norm`, `reward/*`, `lr` 等
-
-设置 `logging.wandb.offline: true` 或 `--wandb-offline` 可在完全离线环境下写入本地 W&B 日志（默认为 `wandb/` 目录）。
-
-### 面板建议
-
-推荐在 W&B Dashboard 中建立如下图表：
-
-1. **Training**：`train/kl`, `train/entropy`, `train/clipfrac`, `lr`
-2. **Policy Quality**：`reward/mean`, `reward/std`, 自定义 `patch_success_rate`
-3. **Throughput**：`parallel/agents`, `parallel/workers`, `episodes_per_min`
-4. **System**：`gpu/*`, `ray/*` 心跳曲线
-
-## 6. GPU 配置示例
-
-| 场景 | 关键字段 | 命令示例 |
-|------|----------|---------|
-| 单卡调试（Planner + CGM 本地权重） | `tensor_parallel_* = 1`, `parallel_agents = 1`, `rollout_workers = 1`, `num_gpus = 1`, `device_map_* = [0]` | `PYTHONPATH=. python scripts/train_graphplanner_rllm.py --config-file configs/experiments/planner_debug.yaml --yaml-only` |
-| 4×A800 烟雾测试（Planner + CGM 各 2 卡） | `tensor_parallel_planner = 2`, `tensor_parallel_cgm = 2`, `parallel_agents = 2`, `rollout_workers = 2`, `num_gpus = 4`, `device_map_planner = [0,1]`, `device_map_cgm = [2,3]` | `PYTHONPATH=. python scripts/train_graphplanner_rllm.py --config-file configs/experiments/test4g.yaml --yaml-only --print-config-only` |
-| 8×A800（Planner 训练 + CGM 推理） | `tensor_parallel_planner = 4`, `tensor_parallel_cgm = 4`, `parallel_agents = 4`, `rollout_workers = 4`, `num_gpus = 8`, `device_map_planner = [0,1,2,3]`, `device_map_cgm = [4,5,6,7]` | `PYTHONPATH=. python scripts/train_graphplanner_rllm.py --config-file configs/experiments/planner_cgm_8g.yaml --yaml-only --print-config-only` |
-| 16×A800（Planner 14B + CGM 73B） | `tensor_parallel_planner = 8`, `tensor_parallel_cgm = 8`, `parallel_agents = 8`, `rollout_workers = 8`, `workflow_parallel = 10`, `num_gpus = 16`, `device_map_planner = [0,1,2,3,4,5,6,7]`, `device_map_cgm = [8,9,10,11,12,13,14,15]` | `PYTHONPATH=. python scripts/train_graphplanner_rllm.py --config-file configs/experiments/gp_full_73b14b_16g.yaml --yaml-only --print-config-only` |
-
-> **注意**：上表中的 YAML 样例需要同时指定 `paths.planner_model: models/Qwen3-14B` 与 `paths.cgm_model: models/CodeFuse-CGM`，仓库已在 `models/` 目录下预留路径。`paths.*` 字段表示「在本地文件系统中放置模型权重的目录」，既可以是绝对路径，也可以是相对于仓库根目录的相对路径；启动脚本会在写入环境变量之前调用 `resolve_repo_path` 把它们转成绝对路径，再覆盖默认的 `config/graph_planner_cfg.json`。
-
-> **环境变量传播**：`graph_planner.planner|cgm.propagate_via_ray` 控制是否把各自的 `env` 块写入 Ray 的 `runtime_env.env_vars`。若值为 `true`，所有 rollout/learner worker 都能读到与主进程一致的 `PLANNER_MODEL_PATH`、`CGM_DEVICE_MAP` 等覆盖；若为 `false`，远端 worker 会退回到 `config/graph_planner_cfg.json` 中的默认值，仅主进程使用 YAML 中的覆盖。通常在训练时两者都保持 `true`，除非明确希望远端 worker 使用默认模型。
-
-## 7. 离线评估与复现
-
-评估脚本使用同一套配置，额外将 `trainer.val_only = True`、`train_batch_size = batch_size`。建议在 YAML 中为评估 run 设定独立 `logging.wandb.run_name`（例如 `planner-grpo-eval`），以便区分训练/验证轨迹。
-
-使用 SWE-bench Verified 数据集进行评测时，可复用训练阶段的 YAML 并显式指定数据与容器清单（示例采用 `test` 切分，对应 Hugging Face 发布的验证基准）：
-
-```bash
-PYTHONPATH=. python scripts/eval_graphplanner_rllm.py \
-  --agent planner \
-  --config-file configs/experiments/planner_8g.yaml \
-  --dataset datasets/swebench/test.jsonl \
-  --docker-manifest datasets/swebench/docker_images_test.txt \
-  --dataset-split test \
-  --batch-size 8 \
-  --print-config
-```
-
-如需切换到其它 split（例如 `validation` 或 `_verified` 版本），只需将 `--dataset` 与 `--dataset-split` 指向相应的 SWE-bench JSONL 与 split 名称。若只想审计配置，可将最后一行改为 `--print-config-only`。
-
-> **说明**：并行与 GPU 资源设置沿用 YAML（如 `configs/experiments/planner_8g.yaml` 中的 8 卡配置），除非需要在命令行上临时覆写。若希望完全冻结 YAML 并忽略 CLI 覆写，可额外指定 `--yaml-only`；但这样也会忽略 `--dataset`、`--docker-manifest` 等选项，因此仅当 YAML 已包含评估数据与容器清单时再启用。
-
-### Agent 选择
-
-- `--agent planner` 会注册 `GraphPlannerRLLMAgent`/`GraphPlannerRLLMEnv`，默认启用 Planner→CGM 的协作链路。只要指定了 `--cgm-model-path`（或 YAML 中的 `paths.cgm_model`），脚本会通过环境变量把 CGM 模型注入到 Planner 环境里，从而在 repo 内部需要生成补丁时调用 CGM。若显式添加 `--disable-cgm-synthesis` 则仅运行 Planner。 
-- `--agent cgm` 则直接实例化 `CGMRLLMAgent`/`CGMRLLMEnv`，跳过 Planner，适用于单独评估 CGM 的仓库修复能力。
-
-### Docker 启动逻辑
-
-- 脚本会在最终配置的 `env.docker_manifest` 写入容器清单路径。优先使用 `--docker-manifest` 显式提供的文件；若未指定，则回退到 `<dataset 目录>/docker_images.txt`。
-- 当清单文件存在时，调用 `load_docker_manifest` 读取镜像列表；若不存在，则遍历数据集（以及可选的 `--val-dataset`）并通过 `collect_docker_images` 汇总镜像，再落盘至上述路径。
-- 指定 `--prepull-containers` 后，会在启动评估前批量 `docker pull` 清单里的镜像，相关并发/重试参数可通过 `--prepull-max-workers`、`--prepull-retries` 等选项调节。
-
-## 8. 快速排错
-
-- **并行配置失败**：根据异常消息调节 `tensor_parallel_*`、`replicas`、`parallel_agents`、`rollout_workers` 或提高 `resources.ray_*`。
-- **W&B 无法连接外网**：设置 `logging.wandb.offline: true` 或 `--wandb-offline`，离线日志仍会写入。
-- **YAML-only 忽略参数**：日志中会列出被忽略的 CLI 参数名称，确保 YAML 已覆盖所需字段。
-
-## 9. 相关脚本
-
-- `scripts/train_graphplanner_rllm.py`：训练入口，支持断点恢复、早停、梯度累积等。
-- `scripts/eval_graphplanner_rllm.py`：评估入口，仅执行 rollout 与指标统计。主要逻辑如下：
-  1. 解析命令行参数，构建默认训练配置，并按照「默认值 → YAML → CLI」的顺序合并；如启用 `--yaml-only` 则忽略除路径以外的 CLI 覆写。
-  2. 根据 agent 类型自动补全模型权重路径，确定日志输出目录，并将最终配置序列化到 `resolved_config.yaml` 以便复现。
-  3. 解析并注册评测数据集（调用 `load_task_entries` / `ensure_dataset_registered`），获取 Verl parquet 路径与样本数量，同时可按需预拉取 docker 镜像。
-  4. 载入 rLLM 训练配置，设置 `trainer.val_only = True`、`total_training_steps = 0` 等参数以强制进入纯验证模式，并应用模型、并行、日志等覆写。
-  5. 调用 `_configure_agent_env` 生成 agent/env 构造参数，打印运行摘要，初始化 W&B/Ray/GPU 监控指标后如 `--print-config-only` 则直接退出；若仅使用 `--print-config`，配置会打印后继续启动流程。
-  6. 执行 `_sanity_checks`，实例化 `rllm.trainer.agent_trainer.AgentTrainer` 并运行 `trainer.train()`（此时仅进行推理 rollout 与指标收集），最后优雅关闭 W&B 句柄。
-- `scripts/validate_contracts.py` / `scripts/validate_patches.py`：协议与补丁快速校验。
-
-如需了解更底层的协议与动作实现，请参考 `docs/graph_planner_architecture_pipeline.md` 的配套章节。
+以上步骤可以覆盖从数据准备到训练启动的关键流程，帮助团队在最小配置集下快速复现 Graph Planner 的 GRPO 实验。

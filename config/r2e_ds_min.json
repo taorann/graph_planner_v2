@@ -1,5 +1,0 @@
-{
-  "docker_image": "python:3.10",
-  "repo_name": "local-repo",
-  "parsed_commit_content": "{\"file_diffs\":[],\"old_commit_hash\":\"0000000\",\"new_commit_hash\":\"0000001\",\"commit_message\":\"dummy\",\"commit_date\":\"1970-01-01T00:00:00Z\",\"metadata\":{}}"
-}
