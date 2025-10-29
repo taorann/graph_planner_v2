@@ -8,6 +8,34 @@ paths:
   cgm_model: models/CodeFuse-CGM
   cgm_tokenizer: models/CodeFuse-CGM
 
+system:
+  topology:
+    groups:
+      planner:
+        gpus: [0, 1]
+        fsdp_size: 2
+        vllm:
+          tp: 2
+          gpu_memory_utilization: 0.90
+          max_model_len: 32768
+      cgm:
+        gpus: [2, 3]
+        vllm:
+          tp: 2
+          gpu_memory_utilization: 0.85
+          max_model_len: 32768
+  rollout:
+    batch_size_per_worker: 2
+    num_workers_per_group: 1
+  pipeline:
+    async_mode: false
+    max_policy_version_lag: 0
+    rollout_prefetch: 1
+
+env:
+  pool_size_per_worker: 1
+  reuse_container: true
+
 graph_planner:
   planner:
     # When set to ``true`` the launcher forwards these variables into Ray's
@@ -53,13 +81,14 @@ data:
     - datasets/r2e_gym/train.jsonl
   val_files:
     - datasets/r2e_gym/val.jsonl
-  dataloader_num_workers: 8
+  dataloader_num_workers: 4
   train_batch_size: 8
-  val_batch_size: 512
-  max_prompt_length: 4096
+  val_batch_size: 64
+  max_prompt_length: 8192
   max_response_length: 32768
   filter_overlong_prompts: true
   filter_overlong_prompts_workers: 32
+  drop_last_train: false
 
 actor_rollout_ref:
   model:
@@ -82,6 +111,7 @@ actor_rollout_ref:
     kl_loss_coef: 0.0
     ulysses_sequence_parallel_size: 1
     fsdp_config:
+      fsdp_size: ${system.topology.groups.planner.fsdp_size}
       use_orig_params: true
       sync_module_states: true
       param_offload: true
@@ -96,8 +126,9 @@ actor_rollout_ref:
       do_sample: false
       temperature: 0.0
     enforce_eager: false
-    gpu_memory_utilization: 0.6
-    tensor_model_parallel_size: 1
+    tensor_model_parallel_size: ${system.topology.groups.planner.vllm.tp}
+    gpu_memory_utilization: ${system.topology.groups.planner.vllm.gpu_memory_utilization}
+    max_model_len: ${system.topology.groups.planner.vllm.max_model_len}
     log_prob_micro_batch_size: ${actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu}
     log_prob_use_dynamic_bsz: true
     log_prob_micro_batch_size_per_gpu: 1
