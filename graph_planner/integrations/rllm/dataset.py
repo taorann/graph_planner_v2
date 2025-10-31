@@ -165,7 +165,14 @@ def _normalize_rows(df: pd.DataFrame) -> pd.DataFrame:
             "issue_id": row.get("issue_id") or row.get("id"),
             "issue_title": row.get("issue_title") or row.get("title"),
         }
-        out["prompt"].append(prompt)
+        if isinstance(prompt, str):
+            messages = [{"role": "user", "content": prompt}]
+        elif isinstance(prompt, list):
+            messages = prompt
+        else:
+            messages = [{"role": "user", "content": str(prompt)}]
+
+        out["prompt"].append(messages)
         out["extra_info"].append(json.dumps(_as_str_dict(extra), ensure_ascii=False))
     return pd.DataFrame(out)
 
