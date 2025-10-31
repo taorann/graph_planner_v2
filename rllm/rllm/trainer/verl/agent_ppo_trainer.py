@@ -1,13 +1,12 @@
 import asyncio
 import json
+import logging
 import math
 import os
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from functools import reduce
 from pprint import pprint
-from queue import Queue
-from threading import Thread
 
 import numpy as np
 import torch
@@ -32,6 +31,9 @@ from verl.trainer.ppo.ray_trainer import (
 )
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 class AgentPPOTrainer(RayPPOTrainer):
     def __init__(
         self,
@@ -50,6 +52,10 @@ class AgentPPOTrainer(RayPPOTrainer):
         role_worker_allocation: dict[str, list[int]] | None = None,
     ):
         super().__init__(config=config, tokenizer=tokenizer, role_worker_mapping=role_worker_mapping, resource_pool_manager=resource_pool_manager, ray_worker_group_cls=ray_worker_group_cls, reward_fn=reward_fn, val_reward_fn=val_reward_fn)
+        self.config = config
+        # async rollout removed → use sync-only
+        self.rollout_mode = "sync"
+        LOGGER.info("[AgentPPOTrainer] rollout_mode=sync (async path removed)")
         self.env_class = env_class
         self.agent_class = agent_class
         self.env_args = env_args or {}
@@ -57,7 +63,6 @@ class AgentPPOTrainer(RayPPOTrainer):
         self.role_worker_allocation = role_worker_allocation or {}
 
         assert self.config.actor_rollout_ref.hybrid_engine, "Only hybrid engine is supported"
-        assert self.config.actor_rollout_ref.rollout.mode == "async", "Only async rollout mode is supported"
 
         if self.config.rllm.stepwise_advantage.enable:
             print("Using step-level advantage, max_prompt_length and max_response_length will be applied step-wise")
@@ -163,17 +168,13 @@ class AgentPPOTrainer(RayPPOTrainer):
         # Create environments in parallel while preserving order
         envs = [None] * len(env_args)
         with ThreadPoolExecutor(max_workers=64) as executor:
-            env_futures = [executor.submit(_create_env, i) for i in range(len(env_args))]
-            for future in as_completed(env_futures):
-                idx, env = future.result()
+            for idx, env in executor.map(_create_env, range(len(env_args))):
                 envs[idx] = env
 
         # Create agents in parallel while preserving order
         agents = [None] * len(envs)
         with ThreadPoolExecutor(max_workers=64) as executor:
-            agent_futures = [executor.submit(_create_agent, i) for i in range(len(envs))]
-            for future in as_completed(agent_futures):
-                idx, agent = future.result()
+            for idx, agent in executor.map(_create_agent, range(len(envs))):
                 agents[idx] = agent
         self.agent_execution_engine.update_envs_and_agents(envs, agents)
         return envs
@@ -607,13 +608,7 @@ class AgentPPOTrainer(RayPPOTrainer):
         if timing_raw is None:
             timing_raw = {}
         with marked_timer("collect_trajectory", timing_raw):
-            trajectories = []
-            if self.async_rollout_mode:
-                gen_seq_generator = self.generate_agent_trajectories_async(timing_raw=timing_raw, meta_info=meta_info, mode="Token")
-                for _, trajectory in enumerate(gen_seq_generator):
-                    trajectories.append(trajectory)
-            else:
-                raise ValueError("Only async rollout mode is supported")
+            trajectories = self._generate_agent_sequences(timing_raw=timing_raw, meta_info=meta_info, mode="Token")
         # Sort trajectories by their idx, to ensure they are in order.
         trajectories.sort(key=lambda x: x["idx"])
 
@@ -635,10 +630,7 @@ class AgentPPOTrainer(RayPPOTrainer):
         if uids is None:
             uids = []
         with marked_timer("collect_trajectory", timing_raw):
-            steps = []
-            gen_seq_generator = self.generate_agent_trajectories_async(timing_raw=timing_raw, meta_info=meta_info, mode="Step")
-            for _, trajectory in enumerate(gen_seq_generator):
-                steps.append(trajectory)
+            steps = self._generate_agent_sequences(timing_raw=timing_raw, meta_info=meta_info, mode="Step")
         # Sort trajectories by their idx, to ensure they are in order.
         steps.sort(key=lambda x: x["idx"])
 
@@ -871,41 +863,23 @@ class AgentPPOTrainer(RayPPOTrainer):
 
             print("".join(response_parts))
 
-    def generate_agent_trajectories_async(self, timing_raw=None, meta_info=None, mode="Token"):
-        """
-        Generates agent trajectories asynchronously using the agent execution engine.
+    def _generate_agent_sequences(self, timing_raw=None, meta_info=None, mode="Token"):
+        """Collect agent rollout items synchronously from the async execution engine."""
 
-        This method runs the asynchronous `trajectory_generator` in a
-        separate thread and yields the results synchronously through a queue.
-        This allows the main training loop (which might be synchronous) to consume
-        asynchronously generated trajectories.
-
-        Args:
-            timing_raw (dict, optional): Dictionary to store timing information. Defaults to {}.
-            meta_info (dict, optional): Additional metadata for the generation process. Defaults to None.
-
-        Yields:
-            Any: Items generated by the `trajectory_generator`, typically
-                 representing parts or results of agent trajectories in token format.
-        """
         if timing_raw is None:
             timing_raw = {}
-        queue = Queue()
 
-        def runner():
-            async def consume():
-                async for item in self.agent_execution_engine.trajectory_generator(timing_raw=timing_raw, mode=mode, meta_info=meta_info):
-                    queue.put(item)
-                queue.put(None)  # sentinel to signal done
+        async def _consume():
+            results: list[dict] = []
+            async for item in self.agent_execution_engine.trajectory_generator(
+                timing_raw=timing_raw,
+                mode=mode,
+                meta_info=meta_info,
+            ):
+                results.append(item)
+            return results
 
-            asyncio.run(consume())
-
-        Thread(target=runner, daemon=True).start()
-        while True:
-            item = queue.get()
-            if item is None:
-                break
-            yield item
+        return asyncio.run(_consume())
 
     def _transform_agent_steps(self, steps: list[dict], uids: np.ndarray):
         from verl.utils.torch_functional import pad_sequence_to_length

@@ -1114,16 +1114,9 @@ class RayPPOTrainer:
             print(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
 
             # pad to be divisible by dp_size
-            size_divisor = (
-                self.actor_rollout_wg.world_size
-                if not self.async_rollout_mode
-                else self.config.actor_rollout_ref.rollout.agent.num_workers
-            )
+            size_divisor = self.actor_rollout_wg.world_size
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
-            if not self.async_rollout_mode:
-                test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
-            else:
-                test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
+            test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
 
             # unpad
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
@@ -1299,11 +1292,10 @@ class RayPPOTrainer:
         self.actor_rollout_wg.init_model()
 
         # create async rollout manager and request scheduler
-        self.async_rollout_mode = False
+        self.async_rollout_manager = None
         if self.config.actor_rollout_ref.rollout.mode == "async":
             from verl.experimental.agent_loop import AgentLoopManager
 
-            self.async_rollout_mode = True
             self.async_rollout_manager = AgentLoopManager(
                 config=self.config,
                 worker_group=self.actor_rollout_wg,
@@ -1430,7 +1422,6 @@ class RayPPOTrainer:
         self.rm_wg = None
 
         # Disable old rollout.mode=="async" path under topology; use snapshot pipeline switches instead
-        self.async_rollout_mode = False
         self.async_rollout_manager = None
         pipeline_cfg = _oc_get(_oc_get(self.config, "system", {}), "pipeline", {})
         self.async_pipeline_mode = bool(_oc_get(pipeline_cfg, "async_mode", False))
@@ -1522,10 +1513,7 @@ class RayPPOTrainer:
         gen_batch = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
 
         with marked_timer("gen", timing_raw, color="red"):
-            if not self.async_rollout_mode:
-                gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-            else:
-                gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
+            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
             timing_raw.update(gen_batch_output.meta_info.get("timing", {}))
             gen_batch_output.meta_info.pop("timing", None)
 
@@ -1533,10 +1521,7 @@ class RayPPOTrainer:
             with marked_timer("gen_max", timing_raw, color="purple"):
                 gen_baseline_batch = deepcopy(gen_batch)
                 gen_baseline_batch.meta_info["do_sample"] = False
-                if not self.async_rollout_mode:
-                    gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
-                else:
-                    gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
+                gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
                 batch = batch.union(gen_baseline_output)
                 reward_baseline_tensor = self.reward_fn(batch)
                 reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
@@ -1970,58 +1955,24 @@ class RayPPOTrainer:
                         return None
                     train_iter = iter(self.train_dataloader)
 
-        if not self.async_pipeline_mode:
-            while self.global_steps < self.total_training_steps:
-                next_payload = _next_batch()
-                if next_payload is None:
-                    break
-                epoch_idx, batch_dict = next_payload
-                metrics: dict = {}
-                timing_raw: dict = {}
-                do_profile = bool(
-                    self.config.trainer.profile_steps
-                    and (self.global_steps + 1) in self.config.trainer.profile_steps
-                )
+        while self.global_steps < self.total_training_steps:
+            next_payload = _next_batch()
+            if next_payload is None:
+                break
+            epoch_idx, batch_dict = next_payload
+            metrics: dict = {}
+            timing_raw: dict = {}
+            do_profile = bool(
+                self.config.trainer.profile_steps
+                and (self.global_steps + 1) in self.config.trainer.profile_steps
+            )
 
-                with marked_timer("start_profile", timing_raw):
-                    self._start_profiling(do_profile)
+            with marked_timer("start_profile", timing_raw):
+                self._start_profiling(do_profile)
 
-                snapshot_id = self.publish_snapshot()
+            snapshot_id = self.publish_snapshot()
 
-                with marked_timer("step", timing_raw):
-                    batch = self._collect_rollout_batch(
-                        batch_dict=batch_dict,
-                        snapshot_id=snapshot_id,
-                        epoch=epoch_idx,
-                        metrics=metrics,
-                        timing_raw=timing_raw,
-                    )
-                    finished = self._learn_from_rollout(
-                        batch=batch,
-                        metrics=metrics,
-                        timing_raw=timing_raw,
-                        logger=logger,
-                        progress_bar=progress_bar,
-                    )
-
-                with marked_timer("stop_profile", timing_raw):
-                    self._stop_profiling(do_profile)
-
-                if finished:
-                    break
-        else:
-            rollout_fut = None
-            learn_fut = None
-            pending_payload = None
-            rollout_exhausted = False
-
-            def rollout_async(snapshot_id: int):
-                payload = _next_batch()
-                if payload is None:
-                    return None
-                epoch_idx, batch_dict = payload
-                metrics: dict = {}
-                timing_raw: dict = {}
+            with marked_timer("step", timing_raw):
                 batch = self._collect_rollout_batch(
                     batch_dict=batch_dict,
                     snapshot_id=snapshot_id,
@@ -2029,50 +1980,16 @@ class RayPPOTrainer:
                     metrics=metrics,
                     timing_raw=timing_raw,
                 )
-                container = {
-                    "batch": batch,
-                    "metrics": metrics,
-                    "timing_raw": timing_raw,
-                }
-                return ray.put(container)
+                finished = self._learn_from_rollout(
+                    batch=batch,
+                    metrics=metrics,
+                    timing_raw=timing_raw,
+                    logger=logger,
+                    progress_bar=progress_bar,
+                )
 
-            def learner_step_async(container_ref):
-                return container_ref
+            with marked_timer("stop_profile", timing_raw):
+                self._stop_profiling(do_profile)
 
-            snapshot_id = self.publish_snapshot()
-            rollout_fut = rollout_async(snapshot_id)
-
-            while self.global_steps < self.total_training_steps:
-                wait_list = [f for f in [rollout_fut, learn_fut] if f is not None]
-                if not wait_list:
-                    break
-                ready, _ = ray.wait(wait_list, num_returns=1)
-                if rollout_fut and rollout_fut in ready:
-                    pending_payload = ray.get(rollout_fut)
-                    rollout_fut = None
-                    if pending_payload is not None and learn_fut is None:
-                        learn_fut = learner_step_async(ray.put(pending_payload))
-                    if pending_payload is None:
-                        rollout_exhausted = True
-                    if not rollout_exhausted:
-                        next_snapshot = self.cur_snapshot_id
-                        rollout_fut = rollout_async(next_snapshot)
-                if learn_fut and learn_fut in ready:
-                    payload = ray.get(learn_fut)
-                    learn_fut = None
-                    if payload is None:
-                        break
-                    timing_raw = payload["timing_raw"]
-                    with marked_timer("step", timing_raw):
-                        finished = self._learn_from_rollout(
-                            batch=payload["batch"],
-                            metrics=payload["metrics"],
-                            timing_raw=timing_raw,
-                            logger=logger,
-                            progress_bar=progress_bar,
-                        )
-                    self.publish_snapshot()
-                    if finished:
-                        break
-                if rollout_exhausted and learn_fut is None and rollout_fut is None:
-                    break
+            if finished:
+                break
