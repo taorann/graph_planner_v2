@@ -89,6 +89,9 @@ data:
   filter_overlong_prompts: true
   filter_overlong_prompts_workers: 32
   drop_last_train: false
+  return_raw_chat: false
+  return_full_prompt: false
+  need_tools_kwargs: false
 
 actor_rollout_ref:
   model:
