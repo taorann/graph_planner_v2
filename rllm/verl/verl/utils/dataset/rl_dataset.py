@@ -63,7 +63,24 @@ def collate_fn(data_list: list[dict]) -> dict:
     for key, val in non_tensors.items():
         non_tensors[key] = np.array(val, dtype=object)
 
-    return {**tensors, **non_tensors}
+    batch = {**tensors, **non_tensors}
+
+    # ---- Pack non-training extras into `meta` to keep top-level clean ----
+    meta_keys = ("tools_kwargs", "interaction_kwargs", "extra_info", "data_source", "raw_prompt_ids")
+    metas: list[dict] = []
+    if data_list:
+        for row in data_list:
+            meta_entry = {}
+            for key in meta_keys:
+                if key in row:
+                    meta_entry[key] = row[key]
+            metas.append(meta_entry)
+        if metas:
+            batch["meta"] = np.array(metas, dtype=object)
+            for key in meta_keys:
+                batch.pop(key, None)
+
+    return batch
 
 
 class RLHFDataset(Dataset):

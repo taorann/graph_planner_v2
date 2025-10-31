@@ -892,14 +892,39 @@ class RayPPOTrainer:
 
             batch = base_collate(sanitized)
 
-            try:
-                batch["meta"] = metas
-            except Exception:
-                try:
-                    batch = dict(batch)
-                    batch["meta"] = metas
-                except Exception:
-                    batch = {"data": batch, "meta": metas}
+            if metas:
+                existing_meta = batch.get("meta") if isinstance(batch, Mapping) else None
+                if existing_meta is None:
+                    existing_meta = np.array([{} for _ in range(len(metas))], dtype=object)
+                elif isinstance(existing_meta, list):
+                    existing_meta = np.array(existing_meta, dtype=object)
+                elif isinstance(existing_meta, np.ndarray):
+                    if existing_meta.dtype != object:
+                        existing_meta = existing_meta.astype(object)
+                else:
+                    existing_meta = np.array([existing_meta] * len(metas), dtype=object)
+
+                merged_meta: list[dict] = []
+                for idx, extra in enumerate(metas):
+                    base_meta = {}
+                    if idx < len(existing_meta):
+                        base_meta = existing_meta[idx]
+                    if hasattr(base_meta, "item"):
+                        base_meta = base_meta.item()
+                    if isinstance(base_meta, Mapping):
+                        base_meta = dict(base_meta)
+                    elif isinstance(base_meta, dict):
+                        base_meta = dict(base_meta)
+                    elif base_meta is None:
+                        base_meta = {}
+                    else:
+                        base_meta = {"value": base_meta}
+                    if extra is not None:
+                        base_meta["extra_info"] = extra
+                    merged_meta.append(base_meta)
+
+                batch = dict(batch)
+                batch["meta"] = np.array(merged_meta, dtype=object)
             return batch
 
         collate_fn = _with_extra_info
@@ -1434,7 +1459,41 @@ class RayPPOTrainer:
     ) -> DataProto:
         """Prepare a rollout batch and run planner inference for a training step."""
 
+        metas = batch_dict.pop("meta", None)
         batch: DataProto = DataProto.from_single_dict(batch_dict)
+
+        def _normalize_meta_entries(meta_obj):
+            if meta_obj is None:
+                return []
+            if isinstance(meta_obj, np.ndarray):
+                entries = meta_obj.tolist()
+            elif isinstance(meta_obj, list | tuple):
+                entries = list(meta_obj)
+            else:
+                entries = [meta_obj]
+            normalized: list[dict] = []
+            for entry in entries:
+                if hasattr(entry, "item"):
+                    entry = entry.item()
+                if isinstance(entry, Mapping):
+                    normalized.append(dict(entry))
+                elif isinstance(entry, dict):
+                    normalized.append(dict(entry))
+                elif entry is None:
+                    normalized.append({})
+                else:
+                    normalized.append({"extra_info": entry})
+            return normalized
+
+        meta_entries = _normalize_meta_entries(metas)
+        if meta_entries:
+            meta_array = np.array(meta_entries, dtype=object)
+            batch.non_tensor_batch["meta"] = meta_array
+            meta_keys = ("tools_kwargs", "interaction_kwargs", "extra_info", "data_source", "raw_prompt_ids")
+            for key in meta_keys:
+                values = [meta.get(key, None) for meta in meta_entries]
+                if any(val is not None for val in values):
+                    batch.non_tensor_batch[key] = np.array(values, dtype=object)
 
         batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
         non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
