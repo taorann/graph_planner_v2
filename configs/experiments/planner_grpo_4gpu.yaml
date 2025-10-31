@@ -146,6 +146,8 @@ actor_rollout_ref:
       optimizer_offload: true
 
 rllm:
+  stepwise_advantage:
+    enable: false
   env:
     name: graph_planner_repoenv
   agent:
