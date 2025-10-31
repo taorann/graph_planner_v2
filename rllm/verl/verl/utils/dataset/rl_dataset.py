@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import copy
+import json
 import logging
 import os
 import re
@@ -214,6 +215,8 @@ class RLHFDataset(Dataset):
         """
         row_dict: dict = self.dataframe[item]
         messages = self._build_messages(row_dict)
+        if isinstance(messages, str):
+            messages = [{"role": "user", "content": messages}]
         model_inputs = {}
 
         if self.processor is not None:
@@ -316,12 +319,25 @@ class RLHFDataset(Dataset):
             row_dict["full_prompts"] = raw_prompt  # array of strings
 
         # add index for each prompt
-        index = row_dict.get("extra_info", {}).get("index", 0)
-        tools_kwargs = row_dict.get("extra_info", {}).get("tools_kwargs", {})
-        interaction_kwargs = row_dict.get("extra_info", {}).get("interaction_kwargs", {})
-        need_tools_kwargs = row_dict.get("extra_info", {}).get("need_tools_kwargs", self.need_tools_kwargs)
+        extra = row_dict.get("extra_info", {})
+        if isinstance(extra, str):
+            try:
+                extra = json.loads(extra)
+            except Exception:
+                extra = {}
+        elif extra is None:
+            extra = {}
+
+        index = extra.get("index", row_dict.get("index", 0))
+        tools_kwargs = extra.get("tools_kwargs", {})
+        interaction_kwargs = extra.get("interaction_kwargs", {})
+        need_tools_kwargs = extra.get("need_tools_kwargs", self.need_tools_kwargs)
         if need_tools_kwargs and not tools_kwargs:
-            logger.warning("tools_kwargs is empty for index {}, data source: {}", index, row_dict["data_source"])
+            logger.warning(
+                "tools_kwargs is empty for index {}, data source: {}",
+                index,
+                row_dict.get("data_source", "unknown"),
+            )
         row_dict["index"] = index
         row_dict["tools_kwargs"] = tools_kwargs
         row_dict["interaction_kwargs"] = interaction_kwargs
