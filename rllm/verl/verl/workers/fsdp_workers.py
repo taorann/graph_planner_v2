@@ -895,7 +895,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         adapter_ctx = self.actor.actor_module.disable_adapter() if is_lora else nullcontext()
         data = data.to(get_device_id())
         # we should always recompute old_log_probs when it is HybridEngine
-        # 统一走 actor_logprob_micro_batch_size（若配置了 rollout/ref 专用，会在 __init__ 中被覆盖）
+        # Always use the unified, role-aware micro batch size resolved in __init__
         data.meta_info["micro_batch_size"] = self.actor_logprob_micro_batch_size
         data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
