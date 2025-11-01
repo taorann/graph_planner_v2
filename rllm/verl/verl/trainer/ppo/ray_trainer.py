@@ -1909,6 +1909,12 @@ class RayPPOTrainer:
         to construct the PPO dataflow.
         The light-weight advantage computation is done on the driver process.
         """
+        # Auto-init guard: ensure worker groups exist if entrypoint forgot to call init_workers()
+        if not hasattr(self, "actor_rollout_wg"):
+            print(
+                "[AgentPPOTrainer] init_workers() was not called by the entrypoint; auto-initializing now."
+            )
+            self.init_workers()
         from omegaconf import OmegaConf
 
         from verl.utils.tracking import Tracking

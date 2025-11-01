@@ -407,7 +407,16 @@ if ray is not None:
                 role_worker_allocation=role_worker_mapping,
             )
 
-            trainer.fit()
+            # ensure workers are initialized before training starts
+            trainer.init_workers()
+
+            try:
+                trainer.fit()
+            finally:
+                try:
+                    trainer.shutdown()
+                except Exception:
+                    pass
 
             return trainer
 
