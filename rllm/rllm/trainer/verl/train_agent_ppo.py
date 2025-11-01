@@ -407,7 +407,7 @@ if ray is not None:
                 role_worker_allocation=role_worker_mapping,
             )
 
-            # ensure workers are initialized before training starts
+            # ensure workers
             trainer.init_workers()
 
             try:
