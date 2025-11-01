@@ -1209,7 +1209,7 @@ class RayPPOTrainer:
 
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
-        profile_option = OmegaConf.select(self.config, "trainer.npu_profile.options", None)
+        profile_option = OmegaConf.select(self.config, "trainer.npu_profile.options", default=None)
 
         # create actor and rollout
         if self.hybrid_engine:
@@ -1326,7 +1326,7 @@ class RayPPOTrainer:
             max_colocate_count=1,
         )
 
-        profile_option = OmegaConf.select(self.config, "trainer.npu_profile.options", None)
+        profile_option = OmegaConf.select(self.config, "trainer.npu_profile.options", default=None)
 
         planner_cls = RayClassWithInitArgs(
             cls=self.role_worker_mapping[Role.ActorRollout],
@@ -1919,7 +1919,7 @@ class RayPPOTrainer:
             self.init_workers()
 
         profile_steps = OmegaConf.select(self.config, "trainer.profile_steps", None)
-        enable_npu_profile = bool(OmegaConf.select(self.config, "trainer.npu_profile.enable", False))
+        enable_npu_profile = bool(OmegaConf.select(self.config, "trainer.npu_profile.enable", default=False))
         from omegaconf import OmegaConf
 
         from verl.utils.tracking import Tracking
