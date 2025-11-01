@@ -557,6 +557,16 @@ def compute_advantage(
 
 
 class RayPPOTrainer:
+
+def _safe_spawn(wg, *, prefix_set=None, world_size=None, **kwargs):
+    """Compat wrapper: newer RayWorkerGroup.spawn(...) may not accept `world_size`."""
+    try:
+        if world_size is None:
+            return wg.spawn(prefix_set=prefix_set, **kwargs)
+        return _safe_spawn(wg, prefix_set=prefix_set, world_size=world_size, **kwargs)
+    except TypeError:
+        # Older signature: drop world_size
+        return wg.spawn(prefix_set=prefix_set, **kwargs)
     """Distributed PPO trainer using Ray for scalable reinforcement learning.
 
     This trainer orchestrates distributed PPO training across multiple nodes and GPUs,
@@ -1342,7 +1352,7 @@ class RayPPOTrainer:
             ray_cls_with_init=planner_cls,
             device_name=self.device_name,
         )
-        spawned = planner_wg_root.spawn(prefix_set={"actor_rollout"}, world_size=fsdp_world)
+        spawned = _safe_spawn(planner_wg_root, prefix_set={"actor_rollout"}, world_size=fsdp_world)
         planner_wg = spawned["actor_rollout"]
         planner_wg.init_model()
 
