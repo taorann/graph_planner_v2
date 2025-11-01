@@ -18,8 +18,10 @@ PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
 
+import inspect
 import json
 import json as _json
+import logging
 import os
 import uuid
 from collections import defaultdict
@@ -67,15 +69,126 @@ from rllm.verl.verl.workers.cgm_service import CGMService
 
 WorkerType = type[Worker]
 
-def _safe_spawn(wg, *, prefix_set=None, world_size=None, **kwargs):
-    """Compat wrapper: newer RayWorkerGroup.spawn(...) may not accept `world_size`."""
+
+LOG = logging.getLogger(__name__)
+
+def _safe_spawn(wg, prefix_set=None, world_size=None, _visited=None, **kwargs) -> list:
+    if wg is None:
+        return []
+
+    if _visited is None:
+        _visited = set()
+
+    obj_id = id(wg)
+    if obj_id in _visited:
+        return []
+    _visited.add(obj_id)
+
+    def _matches_prefix(group) -> bool:
+        if not prefix_set:
+            return True
+        names = []
+        for attr in ("name", "prefix"):
+            value = getattr(group, attr, None)
+            if isinstance(value, str):
+                names.append(value)
+        if not names:
+            return False
+        for prefix in prefix_set:
+            if not isinstance(prefix, str):
+                continue
+            for value in names:
+                if value == prefix or value.startswith(prefix):
+                    return True
+        return False
+
+    def _call_spawn(group):
+        methods = ("spawn", "start", "create")
+        for name in methods:
+            method = getattr(group, name, None)
+            if method is None:
+                continue
+            call_kwargs = dict(kwargs)
+            try:
+                sig = inspect.signature(method)
+            except (TypeError, ValueError):
+                sig = None
+            parameters = sig.parameters if sig is not None else {}
+            if prefix_set is not None and "prefix_set" in parameters:
+                call_kwargs["prefix_set"] = prefix_set
+            elif prefix_set is not None and "prefix_set" not in parameters:
+                call_kwargs.pop("prefix_set", None)
+            if world_size is not None and "world_size" in parameters:
+                call_kwargs["world_size"] = world_size
+            elif "world_size" not in parameters:
+                call_kwargs.pop("world_size", None)
+            try:
+                result = method(**call_kwargs)
+            except TypeError:
+                continue
+            return result
+        return None
+
+    results: list[Any] = []
+
+    if _matches_prefix(wg):
+        spawn_result = _call_spawn(wg)
+        if isinstance(spawn_result, (list, tuple, set)):
+            results.extend(spawn_result)
+        elif spawn_result is not None:
+            results.append(spawn_result)
+
+    def _iter_children(group):
+        for attr in ("children", "subgroups", "members", "groups"):
+            if not hasattr(group, attr):
+                continue
+            value = getattr(group, attr)
+            if value is None:
+                continue
+            if isinstance(value, Mapping):
+                for child in value.values():
+                    yield child
+            elif isinstance(value, (list, tuple, set)):
+                for child in value:
+                    yield child
+            else:
+                yield value
+
+    for child in _iter_children(wg):
+        results.extend(
+            _safe_spawn(
+                child,
+                prefix_set=prefix_set,
+                world_size=world_size,
+                _visited=_visited,
+                **kwargs,
+            )
+        )
+
+    return results
+
+
+def _get_sp_from_cfg(cfg) -> int:
+    actor_rollout_ref = _oc_get(cfg, "actor_rollout_ref", None)
+    actor = _oc_get(actor_rollout_ref, "actor", None)
+    if actor is None:
+        return 1
+    enable = bool(_oc_get(actor, "enable_sequence_parallel", False) or False)
+    sp_raw = _oc_get(actor, "ulysses_sequence_parallel_size", 1) or 1
     try:
-        if world_size is None:
-            return wg.spawn(prefix_set=prefix_set, **kwargs)
-        return _safe_spawn(wg, prefix_set=prefix_set, world_size=world_size, **kwargs)
-    except TypeError:
-        # Older signature: drop world_size
-        return wg.spawn(prefix_set=prefix_set, **kwargs)
+        sp = int(sp_raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"actor.ulysses_sequence_parallel_size must be integer-compatible, got {sp_raw!r}"
+        ) from exc
+    if not enable or sp <= 1:
+        if sp > 1 and not enable:
+            LOG.info(
+                "[trainer] SequenceParallel requested (sp=%s) but disabled by flag; forcing sp=1",
+                sp,
+            )
+        return 1
+    return max(1, sp)
 
 
 @dataclass
@@ -273,68 +386,161 @@ def _oc_del(mapping, key):
 
 
 def _normalize_actor_batch_keys(actor_cfg) -> None:
-    """
-    Normalize synonyms and drop legacy keys to avoid mutual-exclusion checks:
-      - Prefer 'ppo_micro_batch_size_per_gpu' over 'micro_batch_size_per_gpu'
-      - Prefer 'ppo_micro_batch_size' over 'micro_batch_size'
-      - If per-gpu is set, drop any global key to avoid conflicts (new VERL style)
-    """
-    # Normalize per-gpu
-    ppo_pg = _oc_get(actor_cfg, "ppo_micro_batch_size_per_gpu", None)
-    gen_pg = _oc_get(actor_cfg, "micro_batch_size_per_gpu", None)
-    if ppo_pg is None and gen_pg is not None:
-        _oc_set(actor_cfg, "ppo_micro_batch_size_per_gpu", gen_pg)
+    """Emit compatibility warnings for legacy vs. modern micro-batch keys."""
 
-    # Normalize global (legacy)
-    ppo_g = _oc_get(actor_cfg, "ppo_micro_batch_size", None)
-    gen_g = _oc_get(actor_cfg, "micro_batch_size", None)
-    if ppo_g is None and gen_g is not None:
-        _oc_set(actor_cfg, "ppo_micro_batch_size", gen_g)
+    if actor_cfg is None:
+        return
 
-    # If per-gpu exists, drop any global to honor new rule and avoid mutual exclusion
-    if _oc_has(actor_cfg, "ppo_micro_batch_size_per_gpu"):
-        if _oc_has(actor_cfg, "ppo_micro_batch_size"):
-            _oc_del(actor_cfg, "ppo_micro_batch_size")
-        if _oc_has(actor_cfg, "micro_batch_size"):
-            _oc_del(actor_cfg, "micro_batch_size")
+    modern_per_gpu = _oc_get(actor_cfg, "ppo_micro_batch_size_per_gpu", None)
+    legacy_per_gpu_keys = [
+        ("micro_batch_size_per_gpu", _oc_get(actor_cfg, "micro_batch_size_per_gpu", None)),
+        ("micro_batch_size", _oc_get(actor_cfg, "micro_batch_size", None)),
+        ("mbs", _oc_get(actor_cfg, "mbs", None)),
+    ]
 
-    # Drop generic legacy keys unconditionally after normalization
-    if _oc_has(actor_cfg, "micro_batch_size_per_gpu"):
-        _oc_del(actor_cfg, "micro_batch_size_per_gpu")
-    if _oc_has(actor_cfg, "micro_batch_size"):
-        _oc_del(actor_cfg, "micro_batch_size")
+    if modern_per_gpu is not None:
+        for key, value in legacy_per_gpu_keys:
+            if value is not None:
+                LOG.warning(
+                    "actor.%s is ignored because actor.ppo_micro_batch_size_per_gpu is set; keeping the modern key",
+                    key,
+                )
+                break
+
+    modern_global = _oc_get(actor_cfg, "ppo_micro_batch_size", None)
+    legacy_global = _oc_get(actor_cfg, "micro_batch_size", None)
+    if modern_global is not None and legacy_global is not None:
+        LOG.warning(
+            "actor.micro_batch_size is ignored because actor.ppo_micro_batch_size is set; keeping the modern key"
+        )
+
+
+def _compute_dp_world(cfg, *, suppress_log: bool = False) -> int:
+    sp = max(1, _get_sp_from_cfg(cfg))
+    actor_rollout_ref = _oc_get(cfg, "actor_rollout_ref", None)
+    actor_cfg = _oc_get(actor_rollout_ref, "actor", None)
+    fsdp_cfg = _oc_get(actor_cfg, "fsdp_config", None)
+    fsdp_size_raw = _oc_get(fsdp_cfg, "fsdp_size", 0)
+
+    dp_world = 0
+    try:
+        fsdp_size = int(fsdp_size_raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"actor.fsdp_config.fsdp_size must be integer-compatible, got {fsdp_size_raw!r}"
+        ) from exc
+
+    if fsdp_size > 0:
+        dp_world = fsdp_size // sp
+        if dp_world <= 0:
+            if not suppress_log:
+                LOG.warning(
+                    "[trainer] fsdp_size=%s with sp=%s produced dp_world=%s; forcing dp_world=1",
+                    fsdp_size,
+                    sp,
+                    dp_world,
+                )
+            dp_world = 1
+    else:
+        trainer_cfg = _oc_get(cfg, "trainer", None)
+        n_gpus_raw = _oc_get(trainer_cfg, "n_gpus_per_node", 1)
+        nnodes_raw = _oc_get(trainer_cfg, "nnodes", 1)
+        try:
+            n_gpus = int(n_gpus_raw)
+            nnodes = int(nnodes_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"trainer.n_gpus_per_node ({n_gpus_raw!r}) and trainer.nnodes ({nnodes_raw!r}) must be integer-compatible"
+            ) from exc
+        dp_world = (n_gpus * nnodes) // sp
+        if dp_world <= 0:
+            if not suppress_log:
+                LOG.warning(
+                    "[trainer] Derived non-positive dp_world=%s from n_gpus_per_node=%s, nnodes=%s, sp=%s; forcing 1",
+                    dp_world,
+                    n_gpus,
+                    nnodes,
+                    sp,
+                )
+            dp_world = 1
+        else:
+            if not suppress_log:
+                LOG.info(
+                    "[trainer] Using trainer.n_gpus_per_node=%s and trainer.nnodes=%s to derive dp_world=%s with sp=%s",
+                    n_gpus,
+                    nnodes,
+                    dp_world,
+                    sp,
+                )
+
+    return max(1, dp_world)
 
 
 def _resolve_micro_batch_sizes(cfg) -> Tuple[int | None, int | None]:
-    """
-    Return (global_micro, per_gpu_micro) with graceful fallback.
-    If global is missing, derive it as per_gpu * dp_world (not multiplied by grad_accum).
-    """
-    actor = cfg.actor_rollout_ref.actor
-    per_gpu = _oc_get(actor, "ppo_micro_batch_size_per_gpu", None)
-    global_mb = _oc_get(actor, "ppo_micro_batch_size", None)
+    """Return (global_micro, per_gpu_micro) using DP/SP-aware derivation."""
 
-    # Derive a global value only if missing and per-gpu present
-    if (global_mb is None) and (per_gpu is not None):
-        try:
-            dp_world = int(cfg.trainer.n_gpus_per_node) * int(cfg.trainer.nnodes)
-            if dp_world <= 0:
-                dp_world = 1
-        except Exception:
-            dp_world = 1
-        try:
-            global_mb = int(per_gpu) * dp_world
-        except Exception:
-            global_mb = None
+    actor_rollout_ref = _oc_get(cfg, "actor_rollout_ref", None)
+    actor_cfg = _oc_get(actor_rollout_ref, "actor", None)
+    if actor_cfg is None:
+        return None, None
 
-    try:
-        global_mb = int(global_mb) if global_mb is not None else None
-    except Exception:
-        global_mb = None
-    try:
-        per_gpu = int(per_gpu) if per_gpu is not None else None
-    except Exception:
-        per_gpu = None
+    per_gpu_candidates = [
+        ("actor.ppo_micro_batch_size_per_gpu", _oc_get(actor_cfg, "ppo_micro_batch_size_per_gpu", None)),
+        ("actor.micro_batch_size_per_gpu", _oc_get(actor_cfg, "micro_batch_size_per_gpu", None)),
+        ("actor.micro_batch_size", _oc_get(actor_cfg, "micro_batch_size", None)),
+        ("actor.mbs", _oc_get(actor_cfg, "mbs", None)),
+    ]
+
+    per_gpu = None
+    per_gpu_source = None
+    for key, value in per_gpu_candidates:
+        if value is None:
+            continue
+        try:
+            per_gpu = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{key} must be integer-compatible, got {value!r}") from exc
+        per_gpu_source = key
+        break
+
+    if per_gpu is None:
+        return None, None
+    if per_gpu <= 0:
+        raise ValueError(f"{per_gpu_source} resolved to non-positive value {per_gpu}")
+
+    global_candidates = [
+        ("actor.ppo_micro_batch_size", _oc_get(actor_cfg, "ppo_micro_batch_size", None)),
+        ("ppo.micro_batch_size", _oc_get(_oc_get(cfg, "ppo", None), "micro_batch_size", None)),
+    ]
+
+    global_mb = None
+    global_source = None
+    for key, value in global_candidates:
+        if value is None:
+            continue
+        try:
+            global_mb = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{key} must be integer-compatible, got {value!r}") from exc
+        global_source = key
+        break
+
+    dp_world = _compute_dp_world(cfg)
+
+    if global_mb is None:
+        derived = per_gpu * dp_world
+        LOG.info(
+            "[trainer] Deriving actor.ppo_micro_batch_size=%s from %s=%s with dp_world=%s",
+            derived,
+            per_gpu_source,
+            per_gpu,
+            dp_world,
+        )
+        global_mb = derived
+    elif global_mb <= 0:
+        raise ValueError(
+            f"{global_source} resolved to non-positive value {global_mb}"
+        )
 
     return global_mb, per_gpu
 
@@ -830,6 +1036,71 @@ class RayPPOTrainer:
         # Make sure nested blocks exist with safe defaults
         _ensure("actor_rollout_ref.rollout.agent.num_workers", 8)
         _ensure("actor_rollout_ref.rollout.multi_turn.enable", False)
+
+        actor_cfg = _get("actor_rollout_ref.actor", None)
+        if actor_cfg is not None:
+            _normalize_actor_batch_keys(actor_cfg)
+
+            global_micro, per_gpu_micro = _resolve_micro_batch_sizes(cfg)
+            if per_gpu_micro is not None:
+                dp_world = _compute_dp_world(cfg, suppress_log=True)
+                existing_global = _oc_get(actor_cfg, "ppo_micro_batch_size", None)
+                if existing_global is None and global_micro is not None:
+                    try:
+                        with open_dict(actor_cfg):
+                            actor_cfg["ppo_micro_batch_size"] = global_micro
+                    except Exception:
+                        LOG.debug("[trainer] actor.ppo_micro_batch_size not updated due to struct constraints")
+
+                mini_raw = _get("actor_rollout_ref.actor.ppo_mini_batch_size", None)
+                if mini_raw is not None:
+                    try:
+                        mini_batch = int(mini_raw)
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(
+                            f"actor.ppo_mini_batch_size must be integer-compatible, got {mini_raw!r}"
+                        ) from exc
+
+                    rollout_n_raw = _get("actor_rollout_ref.rollout.n", 1) or 1
+                    try:
+                        rollout_n = int(rollout_n_raw)
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(
+                            f"actor_rollout_ref.rollout.n must be integer-compatible, got {rollout_n_raw!r}"
+                        ) from exc
+
+                    numerator = mini_batch * rollout_n
+                    quotient_est = numerator / (dp_world * per_gpu_micro)
+
+                    if numerator <= 0:
+                        raise ValueError(
+                            "actor.ppo_mini_batch_size must be positive after normalization: "
+                            f"mini={mini_batch}, per_gpu={per_gpu_micro}, dp_world={dp_world}, "
+                            f"rollout_n={rollout_n}, quotient={quotient_est}"
+                        )
+
+                    if numerator % dp_world != 0:
+                        raise ValueError(
+                            "actor.ppo_mini_batch_size * rollout.n must be divisible by DP world size: "
+                            f"mini={mini_batch}, per_gpu={per_gpu_micro}, dp_world={dp_world}, "
+                            f"rollout_n={rollout_n}, quotient={quotient_est}"
+                        )
+
+                    normalized = numerator // dp_world
+                    if normalized % per_gpu_micro != 0:
+                        raise ValueError(
+                            "Normalized actor mini batch must be divisible by per-GPU micro batch: "
+                            f"mini={mini_batch}, per_gpu={per_gpu_micro}, dp_world={dp_world}, "
+                            f"rollout_n={rollout_n}, quotient={quotient_est}"
+                        )
+
+                    final_quot = normalized // per_gpu_micro
+                    if final_quot <= 0:
+                        raise ValueError(
+                            "Normalized actor mini batch quotient must be positive: "
+                            f"mini={mini_batch}, per_gpu={per_gpu_micro}, dp_world={dp_world}, "
+                            f"rollout_n={rollout_n}, quotient={final_quot}"
+                        )
 
         # val kwargs: default do_sample -> False; if temperature > 0, you may flip it later in your pipeline
         if not _has("actor_rollout_ref.rollout.val_kwargs.do_sample"):
@@ -2017,3 +2288,26 @@ class RayPPOTrainer:
 
             if finished:
                 break
+
+
+def _demo_resolve_mb():
+    cfg = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "actor": {
+                    "fsdp_config": {"fsdp_size": 8},
+                    "enable_sequence_parallel": False,
+                    "ulysses_sequence_parallel_size": 2,
+                    "ppo_micro_batch_size_per_gpu": 2,
+                }
+            },
+            "trainer": {"n_gpus_per_node": 4, "nnodes": 1},
+        }
+    )
+    global_mb, per_gpu = _resolve_micro_batch_sizes(cfg)
+    assert (global_mb, per_gpu) == (16, 2), (global_mb, per_gpu)
+    print("[demo] resolved micro batch sizes:", global_mb, per_gpu)
+
+
+if __name__ == "__main__":
+    _demo_resolve_mb()
