@@ -32,7 +32,7 @@ from typing import Any, Mapping, Optional, Tuple
 import numpy as np
 import ray
 import torch
-from omegaconf import OmegaConf, open_dict
+from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
 from torch.utils.data import Dataset, Sampler
 from torch.utils.data._utils.collate import default_collate as _default_collate
 from torchdata.stateful_dataloader import StatefulDataLoader
@@ -1209,6 +1209,8 @@ class RayPPOTrainer:
 
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
+        profile_option = OmegaConf.select(self.config, "trainer.npu_profile.options", None)
+
         # create actor and rollout
         if self.hybrid_engine:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRollout)
@@ -1216,7 +1218,7 @@ class RayPPOTrainer:
                 cls=self.role_worker_mapping[Role.ActorRollout],
                 config=self.config.actor_rollout_ref,
                 role="actor_rollout",
-                profile_option=self.config.trainer.npu_profile.options,
+                profile_option=profile_option,
             )
             self.resource_pool_to_cls[resource_pool]["actor_rollout"] = actor_rollout_cls
         else:
@@ -1235,7 +1237,7 @@ class RayPPOTrainer:
                 self.role_worker_mapping[Role.RefPolicy],
                 config=self.config.actor_rollout_ref,
                 role="ref",
-                profile_option=self.config.trainer.npu_profile.options,
+                profile_option=profile_option,
             )
             self.resource_pool_to_cls[resource_pool]["ref"] = ref_policy_cls
 
@@ -1324,11 +1326,13 @@ class RayPPOTrainer:
             max_colocate_count=1,
         )
 
+        profile_option = OmegaConf.select(self.config, "trainer.npu_profile.options", None)
+
         planner_cls = RayClassWithInitArgs(
             cls=self.role_worker_mapping[Role.ActorRollout],
             config=self.config.actor_rollout_ref,
             role="actor_rollout",
-            profile_option=self.config.trainer.npu_profile.options,
+            profile_option=profile_option,
         )
         if env_vars:
             planner_cls.update_options({"runtime_env": {"env_vars": env_vars}})
@@ -1909,6 +1913,13 @@ class RayPPOTrainer:
         to construct the PPO dataflow.
         The light-weight advantage computation is done on the driver process.
         """
+        # Auto-init guard: ensure worker groups exist if entrypoint forgot to call init_workers()
+        if not hasattr(self, "actor_rollout_wg"):
+            print("[AgentPPOTrainer] init_workers() was not called by the entrypoint; auto-initializing now.")
+            self.init_workers()
+
+        profile_steps = OmegaConf.select(self.config, "trainer.profile_steps", None)
+        enable_npu_profile = bool(OmegaConf.select(self.config, "trainer.npu_profile.enable", False))
         from omegaconf import OmegaConf
 
         from verl.utils.tracking import Tracking
@@ -1963,8 +1974,9 @@ class RayPPOTrainer:
             metrics: dict = {}
             timing_raw: dict = {}
             do_profile = bool(
-                self.config.trainer.profile_steps
-                and (self.global_steps + 1) in self.config.trainer.profile_steps
+                enable_npu_profile
+                and profile_steps
+                and (self.global_steps + 1) in profile_steps
             )
 
             with marked_timer("start_profile", timing_raw):
