@@ -72,10 +72,12 @@ def _safe_spawn(wg, *, prefix_set=None, world_size=None, **kwargs):
     try:
         if world_size is None:
             return wg.spawn(prefix_set=prefix_set, **kwargs)
-        return _safe_spawn(wg, prefix_set=prefix_set, world_size=world_size, **kwargs)
+        return wg.spawn(prefix_set=prefix_set, world_size=world_size, **kwargs)
     except TypeError:
         # Older signature: drop world_size
-        return wg.spawn(prefix_set=prefix_set, **kwargs)
+        if world_size is not None:
+            return wg.spawn(prefix_set=prefix_set, **kwargs)
+        raise
 
 
 @dataclass
