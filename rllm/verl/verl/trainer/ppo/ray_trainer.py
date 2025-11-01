@@ -72,7 +72,7 @@ WorkerType = type[Worker]
 
 LOG = logging.getLogger(__name__)
 
-def _safe_spawn(wg, prefix_set=None, world_size=None, _visited=None, **kwargs) -> list:
+def _safe_spawn(wg, prefix_set=None, world_size=None, _visited=None, **kwargs):
     if wg is None:
         return []
 
@@ -129,14 +129,25 @@ def _safe_spawn(wg, prefix_set=None, world_size=None, _visited=None, **kwargs) -
             return result
         return None
 
-    results: list[Any] = []
+    results_map: dict[str, Any] = {}
+    results_list: list[Any] = []
+
+    def _collect(value: Any) -> None:
+        if value is None:
+            return
+        if isinstance(value, Mapping):
+            for key, item in value.items():
+                results_map[key] = item
+            return
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                _collect(item)
+            return
+        results_list.append(value)
 
     if _matches_prefix(wg):
         spawn_result = _call_spawn(wg)
-        if isinstance(spawn_result, (list, tuple, set)):
-            results.extend(spawn_result)
-        elif spawn_result is not None:
-            results.append(spawn_result)
+        _collect(spawn_result)
 
     def _iter_children(group):
         for attr in ("children", "subgroups", "members", "groups"):
@@ -155,17 +166,16 @@ def _safe_spawn(wg, prefix_set=None, world_size=None, _visited=None, **kwargs) -
                 yield value
 
     for child in _iter_children(wg):
-        results.extend(
-            _safe_spawn(
-                child,
-                prefix_set=prefix_set,
-                world_size=world_size,
-                _visited=_visited,
-                **kwargs,
-            )
+        child_result = _safe_spawn(
+            child,
+            prefix_set=prefix_set,
+            world_size=world_size,
+            _visited=_visited,
+            **kwargs,
         )
+        _collect(child_result)
 
-    return results
+    return results_map if results_map else results_list
 
 
 def _get_sp_from_cfg(cfg) -> int:
