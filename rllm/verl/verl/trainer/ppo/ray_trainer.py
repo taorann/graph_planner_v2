@@ -74,7 +74,7 @@ LOG = logging.getLogger(__name__)
 
 def _safe_spawn(wg, prefix_set=None, world_size=None, _visited=None, **kwargs):
     if wg is None:
-        return []
+        return {} if prefix_set else []
 
     if _visited is None:
         _visited = set()
@@ -175,7 +175,84 @@ def _safe_spawn(wg, prefix_set=None, world_size=None, _visited=None, **kwargs):
         )
         _collect(child_result)
 
-    return results_map if results_map else results_list
+    if results_map:
+        return results_map
+
+    if prefix_set:
+        inferred: dict[str, Any] = {}
+        str_prefixes = [p for p in prefix_set if isinstance(p, str)]
+        for item in results_list:
+            names: list[str] = []
+            for attr in ("name", "prefix", "sub_cls_name"):
+                value = getattr(item, attr, None)
+                if isinstance(value, str):
+                    names.append(value)
+            for prefix in list(str_prefixes):
+                if prefix in inferred:
+                    continue
+                for name in names:
+                    if name == prefix or name.startswith(prefix):
+                        inferred[prefix] = item
+                        break
+        if not inferred and len(str_prefixes) == 1 and len(results_list) == 1:
+            inferred[str_prefixes[0]] = results_list[0]
+        if inferred:
+            return inferred
+
+    return results_list
+
+
+def _safe_spawn_map(wg, wanted_prefixes, world_size=None, **kwargs) -> dict[str, Any]:
+    """Return a prefix-keyed mapping of spawned worker groups."""
+
+    prefix_set = set(wanted_prefixes or ())
+    spawn_result = _safe_spawn(
+        wg,
+        prefix_set=prefix_set if prefix_set else None,
+        world_size=world_size,
+        **kwargs,
+    )
+    if isinstance(spawn_result, Mapping):
+        return dict(spawn_result)
+
+    if isinstance(spawn_result, (list, tuple, set)):
+        items = list(spawn_result)
+    elif spawn_result is None:
+        items = []
+    else:
+        items = [spawn_result]
+
+    mapping: dict[str, Any] = {}
+    str_prefixes = [p for p in prefix_set if isinstance(p, str)]
+
+    def _candidate_names(obj: Any) -> list[str]:
+        names: list[str] = []
+        for attr in ("name", "prefix", "sub_cls_name"):
+            value = getattr(obj, attr, None)
+            if isinstance(value, str):
+                names.append(value)
+        return names
+
+    for item in items:
+        names = _candidate_names(item)
+        for prefix in str_prefixes:
+            if prefix in mapping:
+                continue
+            if any(name == prefix or name.startswith(prefix) for name in names):
+                mapping[prefix] = item
+                break
+
+    if not mapping and len(str_prefixes) == 1 and len(items) == 1:
+        mapping[str_prefixes[0]] = items[0]
+
+    if not mapping and str_prefixes:
+        for prefix, item in zip(str_prefixes, items):
+            mapping.setdefault(prefix, item)
+
+    if not mapping:
+        mapping = {f"worker_{idx}": item for idx, item in enumerate(items)}
+
+    return mapping
 
 
 def _get_sp_from_cfg(cfg) -> int:
@@ -1635,8 +1712,70 @@ class RayPPOTrainer:
             ray_cls_with_init=planner_cls,
             device_name=self.device_name,
         )
-        spawned = _safe_spawn(planner_wg_root, prefix_set={"actor_rollout"}, world_size=fsdp_world)
-        planner_wg = spawned["actor_rollout"]
+        wanted_prefixes = {
+            "actor_rollout",
+            "actor_rollout_ref",
+            "actor",
+            "rollout",
+            "ref",
+        }
+        spawned = _safe_spawn_map(
+            planner_wg_root,
+            wanted_prefixes=wanted_prefixes,
+            world_size=fsdp_world,
+        )
+
+        planner_wg = None
+        for key in ("actor_rollout", "actor_rollout_ref", "actor", "rollout"):
+            candidate = spawned.get(key)
+            if candidate is not None:
+                planner_wg = candidate
+                break
+
+        if planner_wg is None:
+            def _dump_tree(root, depth=0, lines=None, visited=None):
+                lines = [] if lines is None else lines
+                visited = set() if visited is None else visited
+
+                obj_id = id(root)
+                if obj_id in visited:
+                    lines.append(f"{'  ' * depth}- <cycle>")
+                    return lines
+                visited.add(obj_id)
+
+                def _name_for(node):
+                    for attr in ("name", "prefix", "_name", "sub_cls_name"):
+                        value = getattr(node, attr, None)
+                        if isinstance(value, str):
+                            return value
+                    return node.__class__.__name__
+
+                lines.append(f"{'  ' * depth}- {_name_for(root)}")
+
+                for attr in ("children", "subgroups", "members", "groups"):
+                    if not hasattr(root, attr):
+                        continue
+                    value = getattr(root, attr)
+                    if value is None:
+                        continue
+                    if isinstance(value, Mapping):
+                        for child in value.values():
+                            _dump_tree(child, depth + 1, lines, visited)
+                    elif isinstance(value, (list, tuple, set)):
+                        for child in value:
+                            _dump_tree(child, depth + 1, lines, visited)
+                    else:
+                        _dump_tree(value, depth + 1, lines, visited)
+                return lines
+
+            tree_lines = _dump_tree(planner_wg_root)
+            tree_dump = "\n".join(tree_lines)
+            raise RuntimeError(
+                "Planner worker group not found. "
+                f"Expected one of {sorted(wanted_prefixes)}, got keys={list(spawned.keys())}.\n"
+                f"Discovered tree:\n{tree_dump}"
+            )
+
         planner_wg.init_model()
 
         # Optional: keep n_gpus metrics correct when bypassing resource_pool_manager defaults
