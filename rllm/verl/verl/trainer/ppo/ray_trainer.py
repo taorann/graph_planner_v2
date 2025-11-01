@@ -67,6 +67,16 @@ from rllm.verl.verl.workers.cgm_service import CGMService
 
 WorkerType = type[Worker]
 
+def _safe_spawn(wg, *, prefix_set=None, world_size=None, **kwargs):
+    """Compat wrapper: newer RayWorkerGroup.spawn(...) may not accept `world_size`."""
+    try:
+        if world_size is None:
+            return wg.spawn(prefix_set=prefix_set, **kwargs)
+        return _safe_spawn(wg, prefix_set=prefix_set, world_size=world_size, **kwargs)
+    except TypeError:
+        # Older signature: drop world_size
+        return wg.spawn(prefix_set=prefix_set, **kwargs)
+
 
 @dataclass
 class VLLMGroupConfig:
@@ -558,15 +568,7 @@ def compute_advantage(
 
 class RayPPOTrainer:
 
-def _safe_spawn(wg, *, prefix_set=None, world_size=None, **kwargs):
-    """Compat wrapper: newer RayWorkerGroup.spawn(...) may not accept `world_size`."""
-    try:
-        if world_size is None:
-            return wg.spawn(prefix_set=prefix_set, **kwargs)
-        return _safe_spawn(wg, prefix_set=prefix_set, world_size=world_size, **kwargs)
-    except TypeError:
-        # Older signature: drop world_size
-        return wg.spawn(prefix_set=prefix_set, **kwargs)
+
     """Distributed PPO trainer using Ray for scalable reinforcement learning.
 
     This trainer orchestrates distributed PPO training across multiple nodes and GPUs,
