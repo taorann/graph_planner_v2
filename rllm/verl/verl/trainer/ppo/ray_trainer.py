@@ -19,12 +19,15 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import inspect
+import itertools
 import json
 import json as _json
 import logging
 import os
 import uuid
 from collections import defaultdict
+from collections.abc import Mapping as MappingABC, Sequence as SequenceABC
+from functools import lru_cache
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
@@ -72,9 +75,171 @@ WorkerType = type[Worker]
 
 LOG = logging.getLogger(__name__)
 
+
+_CONTAINER_ATTR_HINTS = (
+    "children",
+    "subgroups",
+    "members",
+    "groups",
+    "worker_groups",
+    "workers",
+    "pools",
+    "pool",
+    "resource_pools",
+    "resource_pool",
+    "actors",
+    "actor_groups",
+    "groups_dict",
+)
+
+_CONTAINER_KEYWORD_HINTS = (
+    "group",
+    "worker",
+    "pool",
+    "actor",
+    "member",
+    "child",
+    "rollout",
+    "ref",
+)
+
+_CONTAINER_PREVIEW_LIMIT = 32
+
+
+def _is_container(obj: Any) -> bool:
+    if obj is None:
+        return False
+    if isinstance(obj, MappingABC):
+        return True
+    if isinstance(obj, set):
+        return True
+    if isinstance(obj, SequenceABC) and not isinstance(obj, (str, bytes, bytearray)):
+        return True
+    return False
+
+
+def _yield_container_items(obj: Any):
+    if isinstance(obj, MappingABC):
+        for item in obj.values():
+            if item is not None:
+                yield item
+    elif isinstance(obj, set):
+        for item in obj:
+            if item is not None:
+                yield item
+    elif isinstance(obj, SequenceABC) and not isinstance(obj, (str, bytes, bytearray)):
+        for item in obj:
+            if item is not None:
+                yield item
+
+
+def _container_len(obj: Any) -> Any:
+    try:
+        return len(obj)
+    except Exception:
+        return "?"
+
+
+def _is_group_like(obj: Any) -> bool:
+    if obj is None:
+        return False
+    for attr in ("spawn", "start", "create", "name", "prefix"):
+        if hasattr(obj, attr):
+            return True
+    if _is_container(obj):
+        return True
+    for attr in _discover_container_attrs(obj.__class__):
+        if hasattr(obj, attr):
+            return True
+    return False
+
+
+@lru_cache(maxsize=256)
+def _discover_container_attrs(cls: type) -> tuple[str, ...]:
+    names: list[str] = []
+    for attr in _CONTAINER_ATTR_HINTS:
+        if hasattr(cls, attr):
+            names.append(attr)
+    annotations = getattr(cls, "__annotations__", {}) or {}
+    for attr in annotations:
+        if attr in names:
+            continue
+        low = attr.lower()
+        if any(keyword in low for keyword in _CONTAINER_KEYWORD_HINTS):
+            names.append(attr)
+    for attr in dir(cls):
+        if attr in names or attr.startswith("__"):
+            continue
+        low = attr.lower()
+        if any(keyword in low for keyword in _CONTAINER_KEYWORD_HINTS):
+            names.append(attr)
+    return tuple(dict.fromkeys(names))
+
+
+def _iter_group_children(group: Any):
+    if group is None:
+        return
+    if _is_container(group):
+        for child in _yield_container_items(group):
+            yield child
+        return
+
+    candidate_attrs = list(_discover_container_attrs(group.__class__))
+    if hasattr(group, "__dict__"):
+        for key in list(group.__dict__.keys())[:128]:
+            if not isinstance(key, str):
+                continue
+            if key in candidate_attrs:
+                continue
+            low = key.lower()
+            if any(keyword in low for keyword in _CONTAINER_KEYWORD_HINTS):
+                candidate_attrs.append(key)
+
+    seen: set[str] = set()
+    for attr in candidate_attrs:
+        if not isinstance(attr, str):
+            continue
+        if attr in seen:
+            continue
+        seen.add(attr)
+        if not hasattr(group, attr):
+            continue
+        try:
+            value = getattr(group, attr)
+        except Exception:
+            continue
+        if value is None:
+            continue
+        if _is_container(value):
+            iterator = _yield_container_items(value)
+            preview = list(itertools.islice(iterator, _CONTAINER_PREVIEW_LIMIT))
+            if not preview:
+                continue
+            has_group_like = any(_is_group_like(item) for item in preview)
+            if not has_group_like:
+                for item in iterator:
+                    preview.append(item)
+                    if _is_group_like(item):
+                        has_group_like = True
+                        break
+            if not has_group_like:
+                continue
+            for item in preview:
+                if item is not None:
+                    yield item
+            for item in iterator:
+                if item is not None:
+                    yield item
+            continue
+        if _is_group_like(value):
+            yield value
+
+
 def _safe_spawn(wg, prefix_set=None, world_size=None, _visited=None, **kwargs):
     if wg is None:
-        return {} if prefix_set else []
+        if prefix_set:
+            return {p: [] for p in prefix_set if isinstance(p, str)}
+        return []
 
     if _visited is None:
         _visited = set()
@@ -102,8 +267,24 @@ def _safe_spawn(wg, prefix_set=None, world_size=None, _visited=None, **kwargs):
                     return True
         return False
 
+    methods = ("spawn", "start", "create")
+
+    def _method_accepts_prefix(group) -> bool:
+        if not prefix_set:
+            return False
+        for name in methods:
+            method = getattr(group, name, None)
+            if method is None:
+                continue
+            try:
+                sig = inspect.signature(method)
+            except (TypeError, ValueError):
+                continue
+            if "prefix_set" in sig.parameters:
+                return True
+        return False
+
     def _call_spawn(group):
-        methods = ("spawn", "start", "create")
         for name in methods:
             method = getattr(group, name, None)
             if method is None:
@@ -129,43 +310,43 @@ def _safe_spawn(wg, prefix_set=None, world_size=None, _visited=None, **kwargs):
             return result
         return None
 
-    results_map: dict[str, Any] = {}
+    results_map: dict[str, list[Any]] = {}
     results_list: list[Any] = []
 
     def _collect(value: Any) -> None:
         if value is None:
             return
-        if isinstance(value, Mapping):
+        if isinstance(value, MappingABC):
             for key, item in value.items():
-                results_map[key] = item
+                if not isinstance(key, str):
+                    continue
+                if item is None:
+                    continue
+                bucket = results_map.setdefault(key, [])
+                if isinstance(item, MappingABC):
+                    for sub in item.values():
+                        if sub is None:
+                            continue
+                        if _is_container(sub):
+                            bucket.extend(_yield_container_items(sub))
+                        else:
+                            bucket.append(sub)
+                elif _is_container(item):
+                    bucket.extend(_yield_container_items(item))
+                else:
+                    bucket.append(item)
             return
-        if isinstance(value, (list, tuple, set)):
-            for item in value:
+        if _is_container(value):
+            for item in _yield_container_items(value):
                 _collect(item)
             return
         results_list.append(value)
 
-    if _matches_prefix(wg):
+    if not _is_container(wg) and (_matches_prefix(wg) or _method_accepts_prefix(wg)):
         spawn_result = _call_spawn(wg)
         _collect(spawn_result)
 
-    def _iter_children(group):
-        for attr in ("children", "subgroups", "members", "groups"):
-            if not hasattr(group, attr):
-                continue
-            value = getattr(group, attr)
-            if value is None:
-                continue
-            if isinstance(value, Mapping):
-                for child in value.values():
-                    yield child
-            elif isinstance(value, (list, tuple, set)):
-                for child in value:
-                    yield child
-            else:
-                yield value
-
-    for child in _iter_children(wg):
+    for child in _iter_group_children(wg):
         child_result = _safe_spawn(
             child,
             prefix_set=prefix_set,
@@ -179,7 +360,7 @@ def _safe_spawn(wg, prefix_set=None, world_size=None, _visited=None, **kwargs):
         return results_map
 
     if prefix_set:
-        inferred: dict[str, Any] = {}
+        inferred: dict[str, list[Any]] = {}
         str_prefixes = [p for p in prefix_set if isinstance(p, str)]
         for item in results_list:
             names: list[str] = []
@@ -188,69 +369,57 @@ def _safe_spawn(wg, prefix_set=None, world_size=None, _visited=None, **kwargs):
                 if isinstance(value, str):
                     names.append(value)
             for prefix in list(str_prefixes):
-                if prefix in inferred:
-                    continue
+                bucket = inferred.setdefault(prefix, [])
                 for name in names:
                     if name == prefix or name.startswith(prefix):
-                        inferred[prefix] = item
+                        bucket.append(item)
                         break
-        if not inferred and len(str_prefixes) == 1 and len(results_list) == 1:
-            inferred[str_prefixes[0]] = results_list[0]
+        if not inferred and len(str_prefixes) == 1 and results_list:
+            inferred[str_prefixes[0]] = list(results_list)
         if inferred:
             return inferred
 
     return results_list
 
 
-def _safe_spawn_map(wg, wanted_prefixes, world_size=None, **kwargs) -> dict[str, Any]:
+def _safe_spawn_map(wg, wanted_prefixes, world_size=None, **kwargs) -> dict[str, list[Any]]:
     """Return a prefix-keyed mapping of spawned worker groups."""
 
-    prefix_set = set(wanted_prefixes or ())
+    wanted = [p for p in (wanted_prefixes or []) if isinstance(p, str)]
+    prefix_set = set(wanted)
     spawn_result = _safe_spawn(
         wg,
         prefix_set=prefix_set if prefix_set else None,
         world_size=world_size,
         **kwargs,
     )
-    if isinstance(spawn_result, Mapping):
-        return dict(spawn_result)
 
-    if isinstance(spawn_result, (list, tuple, set)):
-        items = list(spawn_result)
-    elif spawn_result is None:
-        items = []
-    else:
-        items = [spawn_result]
+    mapping: dict[str, list[Any]] = {key: [] for key in wanted}
 
-    mapping: dict[str, Any] = {}
-    str_prefixes = [p for p in prefix_set if isinstance(p, str)]
-
-    def _candidate_names(obj: Any) -> list[str]:
-        names: list[str] = []
-        for attr in ("name", "prefix", "sub_cls_name"):
-            value = getattr(obj, attr, None)
-            if isinstance(value, str):
-                names.append(value)
-        return names
-
-    for item in items:
-        names = _candidate_names(item)
-        for prefix in str_prefixes:
-            if prefix in mapping:
+    if isinstance(spawn_result, MappingABC):
+        for key, value in spawn_result.items():
+            if key not in mapping or value is None:
                 continue
-            if any(name == prefix or name.startswith(prefix) for name in names):
-                mapping[prefix] = item
-                break
+            if isinstance(value, MappingABC):
+                for sub in value.values():
+                    if sub is None:
+                        continue
+                    if _is_container(sub):
+                        mapping[key].extend(_yield_container_items(sub))
+                    else:
+                        mapping[key].append(sub)
+            elif _is_container(value):
+                mapping[key].extend(_yield_container_items(value))
+            else:
+                mapping[key].append(value)
+        return mapping
 
-    if not mapping and len(str_prefixes) == 1 and len(items) == 1:
-        mapping[str_prefixes[0]] = items[0]
+    if isinstance(spawn_result, (list, tuple, set)) or spawn_result is None:
+        return mapping
 
-    if not mapping and str_prefixes:
-        for prefix, item in zip(str_prefixes, items):
-            mapping.setdefault(prefix, item)
-
-    if not mapping:
-        mapping = {f"worker_{idx}": item for idx, item in enumerate(items)}
+    if wanted and spawn_result is not None:
+        # No prefix information available; return explicit empty buckets.
+        return mapping
 
     return mapping
 
@@ -1727,15 +1896,21 @@ class RayPPOTrainer:
 
         planner_wg = None
         for key in ("actor_rollout", "actor_rollout_ref", "actor", "rollout"):
-            candidate = spawned.get(key)
-            if candidate is not None:
-                planner_wg = candidate
+            candidates = spawned.get(key) or []
+            if candidates:
+                planner_wg = candidates[0]
                 break
 
         if planner_wg is None:
-            def _dump_tree(root, depth=0, lines=None, visited=None):
+            def _dump_tree(root, depth=0, lines=None, visited=None, max_nodes=512):
                 lines = [] if lines is None else lines
                 visited = set() if visited is None else visited
+                if root is None:
+                    lines.append(f"{'  ' * depth}- <None>")
+                    return lines
+
+                if len(lines) >= max_nodes:
+                    return lines
 
                 obj_id = id(root)
                 if obj_id in visited:
@@ -1743,36 +1918,39 @@ class RayPPOTrainer:
                     return lines
                 visited.add(obj_id)
 
-                def _name_for(node):
+                indent = '  ' * depth
+                if _is_container(root):
+                    size = _container_len(root)
+                    lines.append(f"{indent}- <{root.__class__.__name__}> size={size}")
+                    child_iter = _yield_container_items(root)
+                else:
+                    display_name = None
                     for attr in ("name", "prefix", "_name", "sub_cls_name"):
-                        value = getattr(node, attr, None)
+                        value = getattr(root, attr, None)
                         if isinstance(value, str):
-                            return value
-                    return node.__class__.__name__
+                            display_name = value
+                            break
+                    if display_name is None:
+                        display_name = root.__class__.__name__
+                    lines.append(f"{indent}- {display_name} <{root.__class__.__name__}>")
+                    child_iter = _iter_group_children(root)
 
-                lines.append(f"{'  ' * depth}- {_name_for(root)}")
-
-                for attr in ("children", "subgroups", "members", "groups"):
-                    if not hasattr(root, attr):
-                        continue
-                    value = getattr(root, attr)
-                    if value is None:
-                        continue
-                    if isinstance(value, Mapping):
-                        for child in value.values():
-                            _dump_tree(child, depth + 1, lines, visited)
-                    elif isinstance(value, (list, tuple, set)):
-                        for child in value:
-                            _dump_tree(child, depth + 1, lines, visited)
-                    else:
-                        _dump_tree(value, depth + 1, lines, visited)
+                for idx, child in enumerate(child_iter):
+                    if len(lines) >= max_nodes:
+                        break
+                    if idx >= 64:
+                        lines.append(f"{'  ' * (depth + 1)}... (truncated)")
+                        break
+                    _dump_tree(child, depth + 1, lines, visited, max_nodes)
                 return lines
 
-            tree_lines = _dump_tree(planner_wg_root)
-            tree_dump = "\n".join(tree_lines)
+            counts = {key: len(value) for key, value in spawned.items()}
+            discovered_attrs = sorted(_discover_container_attrs(planner_wg_root.__class__))
+            tree_dump = "\n".join(_dump_tree(planner_wg_root))
             raise RuntimeError(
                 "Planner worker group not found. "
-                f"Expected one of {sorted(wanted_prefixes)}, got keys={list(spawned.keys())}.\n"
+                f"Expected one of {sorted(wanted_prefixes)}, got counts={counts}.\n"
+                f"Discovered container attrs on root: {discovered_attrs}\n"
                 f"Discovered tree:\n{tree_dump}"
             )
 
