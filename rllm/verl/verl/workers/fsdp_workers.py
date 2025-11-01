@@ -80,6 +80,46 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 device_name = get_device_name()
 
 
+def _cfg_select(cfg: DictConfig, path: str, default=None):
+    try:
+        val = OmegaConf.select(cfg, path)
+    except Exception:
+        return default
+    return default if val is None else val
+
+
+def _first_non_none(*vals):
+    for v in vals:
+        if v is not None:
+            return v
+    return None
+
+
+def _log(tag, msg):
+    try:
+        import logging
+
+        logging.getLogger(__name__).info("[%s] %s", tag, msg)
+    except Exception:
+        print(f"[{tag}] {msg}")
+
+
+def _get_sp(actor_cfg: DictConfig) -> int:
+    enable = bool(_cfg_select(actor_cfg, "enable_sequence_parallel", False))
+    sp_raw = _cfg_select(actor_cfg, "ulysses_sequence_parallel_size", 1) or 1
+    try:
+        sp = int(sp_raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"ulysses_sequence_parallel_size must be integer-compatible, got {sp_raw!r}"
+        ) from exc
+    if not enable or sp <= 1:
+        if sp > 1 and not enable:
+            _log("fsdp", f"SequenceParallel requested (sp={sp}) but disabled by flag; forcing sp=1")
+        return 1
+    return max(1, sp)
+
+
 def create_device_mesh(world_size, fsdp_size):
     if fsdp_size < 0 or fsdp_size >= world_size:
         device_mesh = init_device_mesh(device_name, mesh_shape=(world_size,), mesh_dim_names=["fsdp"])
@@ -131,9 +171,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.device_mesh = create_device_mesh(world_size=world_size, fsdp_size=self.config.actor.fsdp_config.fsdp_size)
 
         # build device mesh for Ulysses Sequence Parallel
+        self.ulysses_sequence_parallel_size = _get_sp(self.config.actor)
+        dp = max(1, world_size // max(1, self.ulysses_sequence_parallel_size))
         self.ulysses_device_mesh = None
-        self.ulysses_sequence_parallel_size = self.config.actor.get("ulysses_sequence_parallel_size", 1)
-        dp = world_size // self.ulysses_sequence_parallel_size
         if self.ulysses_sequence_parallel_size > 1:
             self.ulysses_device_mesh = init_device_mesh(
                 device_name, mesh_shape=(dp, self.ulysses_sequence_parallel_size), mesh_dim_names=["dp", "sp"]
@@ -170,41 +210,125 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             # TODO: it seems that manual offload is slowly than FSDP offload
             self._is_offload_param = self.config.ref.fsdp_config.get("param_offload", False)
 
+        mesh_size = max(1, int(self.device_mesh.size()))
+        sp_size = max(1, int(self.ulysses_sequence_parallel_size or 1))
+        dp_divisor = max(1, mesh_size // sp_size)
+
+        def _resolve_per_gpu(label: str, per_gpu_keys: list[str], global_keys: list[str], *, required: bool) -> int | None:
+            per_gpu_pairs = [(key, _cfg_select(self.config, key)) for key in per_gpu_keys]
+            per_gpu_value = _first_non_none(*(val for _, val in per_gpu_pairs))
+            per_gpu_source = next((key for key, val in per_gpu_pairs if val is not None), None)
+
+            global_pairs = [(key, _cfg_select(self.config, key)) for key in global_keys]
+            global_raw = _first_non_none(*(val for _, val in global_pairs))
+            global_source = next((key for key, val in global_pairs if val is not None), None)
+
+            chosen_source = None
+            raw_value = None
+            global_value = None
+
+            if per_gpu_source is not None:
+                chosen_source = per_gpu_source
+                raw_value = per_gpu_value
+            elif global_source is not None:
+                chosen_source = global_source
+                try:
+                    global_value = int(global_raw)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"{label} from {global_source} must be an integer-compatible value, got {global_raw!r}"
+                    ) from exc
+                if global_value <= 0:
+                    raise ValueError(
+                        f"{label} from {global_source} must be positive, got {global_value}"
+                    )
+                if global_value % dp_divisor != 0:
+                    raise ValueError(
+                        f"{label} from {global_source}={global_value} is not divisible by DP world size {dp_divisor}"
+                    )
+                raw_value = max(1, global_value // dp_divisor)
+            else:
+                if required:
+                    raise ValueError(
+                        f"Unable to resolve {label}; checked per-GPU keys {per_gpu_keys} and global keys {global_keys}"
+                    )
+                return None
+
+            try:
+                value = int(raw_value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"{label} from {chosen_source} must be an integer-compatible value, got {raw_value!r}"
+                ) from exc
+
+            if value <= 0:
+                raise ValueError(
+                    f"{label} resolved to non-positive value {value} (source={chosen_source}, "
+                    f"device_mesh_size={mesh_size}, global_value={global_value})"
+                )
+
+            return value
+
+        self.actor_ppo_micro_batch_size = _resolve_per_gpu(
+            "actor PPO micro batch size per GPU",
+            [
+                "actor.ppo_micro_batch_size_per_gpu",
+                "actor.micro_batch_size_per_gpu",
+                "actor.micro_batch_size",
+                "actor.mbs",
+            ],
+            ["actor.ppo_micro_batch_size", "ppo.micro_batch_size"],
+            required=True,
+        )
+
+        self.rollout_logprob_micro_batch_size = None
+        if self._is_rollout:
+            self.rollout_logprob_micro_batch_size = _resolve_per_gpu(
+                "rollout log_prob_micro_batch_size_per_gpu",
+                ["rollout.log_prob_micro_batch_size_per_gpu"],
+                ["rollout.log_prob_micro_batch_size"],
+                required=True,
+            )
+
+        self.ref_logprob_micro_batch_size = None
+        if self._is_ref:
+            self.ref_logprob_micro_batch_size = _resolve_per_gpu(
+                "ref log_prob_micro_batch_size_per_gpu",
+                ["ref.log_prob_micro_batch_size_per_gpu"],
+                ["ref.log_prob_micro_batch_size"],
+                required=True,
+            )
+
+        self.actor_logprob_micro_batch_size = self.actor_ppo_micro_batch_size
+        if self.rollout_logprob_micro_batch_size is not None:
+            self.actor_logprob_micro_batch_size = self.rollout_logprob_micro_batch_size
+        if self.ref_logprob_micro_batch_size is not None:
+            self.actor_logprob_micro_batch_size = self.ref_logprob_micro_batch_size
+
         # normalize config
         if self._is_actor:
             self.config.actor.ppo_mini_batch_size *= self.config.rollout.n
-            self.config.actor.ppo_mini_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
+            self.config.actor.ppo_mini_batch_size //= dp_divisor
             assert self.config.actor.ppo_mini_batch_size > 0, (
                 f"ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be larger than 0 after "
                 f"normalization"
             )
-            # micro bsz
-            if self.config.actor.ppo_micro_batch_size is not None:
-                self.config.actor.ppo_micro_batch_size //= (
-                    self.device_mesh.size() // self.ulysses_sequence_parallel_size
-                )
-                self.config.actor.ppo_micro_batch_size_per_gpu = self.config.actor.ppo_micro_batch_size
-
-            if self.config.actor.ppo_micro_batch_size_per_gpu is not None:
-                assert self.config.actor.ppo_mini_batch_size % self.config.actor.ppo_micro_batch_size_per_gpu == 0, (
+            if self.actor_ppo_micro_batch_size is not None:
+                assert self.config.actor.ppo_mini_batch_size % self.actor_ppo_micro_batch_size == 0, (
                     f"normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be divisible by "
-                    f"ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}"
+                    f"ppo_micro_batch_size_per_gpu {self.actor_ppo_micro_batch_size}"
                 )
-                assert self.config.actor.ppo_mini_batch_size // self.config.actor.ppo_micro_batch_size_per_gpu > 0, (
+                assert self.config.actor.ppo_mini_batch_size // self.actor_ppo_micro_batch_size > 0, (
                     f"normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be larger than "
-                    f"ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}"
+                    f"ppo_micro_batch_size_per_gpu {self.actor_ppo_micro_batch_size}"
                 )
 
         # normalize rollout config
-        if self._is_rollout and self.config.rollout.log_prob_micro_batch_size is not None:
-            self.config.rollout.log_prob_micro_batch_size //= (
-                self.device_mesh.size() // self.ulysses_sequence_parallel_size
-            )
-            self.config.rollout.log_prob_micro_batch_size_per_gpu = self.config.rollout.log_prob_micro_batch_size
+        if self._is_rollout and self.rollout_logprob_micro_batch_size is not None:
+            assert self.rollout_logprob_micro_batch_size > 0
         # normalize ref config
-        if self._is_ref and self.config.ref.log_prob_micro_batch_size is not None:
-            self.config.ref.log_prob_micro_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
-            self.config.ref.log_prob_micro_batch_size_per_gpu = self.config.ref.log_prob_micro_batch_size
+        if self._is_ref and self.ref_logprob_micro_batch_size is not None:
+            assert self.ref_logprob_micro_batch_size > 0
 
     def _build_model_optimizer(
         self,
@@ -771,7 +895,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         adapter_ctx = self.actor.actor_module.disable_adapter() if is_lora else nullcontext()
         data = data.to(get_device_id())
         # we should always recompute old_log_probs when it is HybridEngine
-        data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu
+        # 统一走 actor_logprob_micro_batch_size（若配置了 rollout/ref 专用，会在 __init__ 中被覆盖）
+        data.meta_info["micro_batch_size"] = self.actor_logprob_micro_batch_size
         data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
         data.meta_info["temperature"] = self.config.rollout.temperature
@@ -815,7 +940,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # Support all hardwares
         data = data.to(get_device_id())
 
-        micro_batch_size = self.config.ref.log_prob_micro_batch_size_per_gpu
+        micro_batch_size = self.ref_logprob_micro_batch_size
         data.meta_info["micro_batch_size"] = micro_batch_size
         data.meta_info["temperature"] = self.config.rollout.temperature
         data.meta_info["max_token_len"] = self.config.ref.log_prob_max_token_len_per_gpu
