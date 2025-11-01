@@ -1,36 +1,39 @@
-# Repository-local directories that contain the converted Hugging Face
-# checkpoints used during training. These may be absolute paths or paths
-# relative to the project root; the launch script resolves them before
-# exporting environment variables for Ray workers.
+# === graph_planner training config (updated) ===
+# 提示：本配置假定外部已执行 `export CUDA_VISIBLE_DEVICES=4,5,6,7`。
+
 paths:
   planner_model: models/Qwen3-14B
   planner_tokenizer: models/Qwen3-14B
-  cgm_model: models/CodeFuse-CGM
-  cgm_tokenizer: models/CodeFuse-CGM
+  cgm_model: /map-vepfs/taoran/CodeFuse-CGM/infra_model
+  cgm_tokenizer: /map-vepfs/taoran/CodeFuse-CGM/infra_model
 
 system:
   topology:
     groups:
       planner:
-        gpus: [0, 1]
+        gpus: [0, 1]                     # [UPDATED] 由 [4,5] 改为逻辑编号 [0,1]；结合 CUDA_VISIBLE_DEVICES=4,5,6,7 做重映射
         fsdp_size: 2
         vllm:
           tp: 2
-          gpu_memory_utilization: 0.90
-          max_model_len: 32768
+          gpu_memory_utilization: 0.65   # [UPDATED] 由 0.90 下调，降低启动/预热期显存峰值
+          max_model_len: 24576           # [UPDATED] 由 32768 下调；与 data.max_prompt+max_response 对齐
+          max_num_seqs: 32               # [NEW] 限制启动/调度并发，缓解 profile_run OOM
+          kv_cache_dtype: fp16           # [NEW] 使用 FP16 KV cache
+          enforce_eager: true            # [NEW] 规避 compile/cudagraph 带来的显存尖峰
       cgm:
-        gpus: [2, 3]
+        gpus: [2, 3]                     # [UPDATED] 由 [6,7] 改为逻辑编号 [2,3]
         vllm:
           tp: 2
-          gpu_memory_utilization: 0.85
-          max_model_len: 32768
+          gpu_memory_utilization: 0.60   # [UPDATED]
+          max_model_len: 16384           # [UPDATED]
+          max_num_seqs: 16               # [NEW]
+          kv_cache_dtype: fp16           # [NEW]
+          enforce_eager: true            # [NEW]
   rollout:
     batch_size_per_worker: 2
     num_workers_per_group: 1
   pipeline:
     async_mode: false
-    max_policy_version_lag: 0
-    rollout_prefetch: 1
 
 env:
   pool_size_per_worker: 1
@@ -38,10 +41,6 @@ env:
 
 graph_planner:
   planner:
-    # When set to ``true`` the launcher forwards these variables into Ray's
-    # runtime_env so every remote worker sees the same planner model
-    # configuration. Leave it ``true`` whenever you override the defaults below
-    # (paths, temperature, device map, etc.).
     propagate_via_ray: true
     env:
       PLANNER_MODEL_PATH: ${paths.planner_model}
@@ -50,7 +49,7 @@ graph_planner:
       PLANNER_MODEL_TOP_P: 0.95
       PLANNER_MODEL_MAX_INPUT_TOKENS: 4096
       PLANNER_MODEL_MAX_TOKENS: 512
-      PLANNER_MODEL_DEVICE_MAP: "[0, 1]"
+      # PLANNER_MODEL_DEVICE_MAP: "[4, 5]"    # [REMOVED] 避免与 topology 冲突；设备绑定统一由 system.topology 控制
   cgm:
     propagate_via_ray: true
     env:
@@ -61,8 +60,8 @@ graph_planner:
       CGM_TOP_P: 0.9
       CGM_MAX_TOKENS: 768
       CGM_MAX_INPUT_TOKENS: 8192
-      CGM_DEVICE: cuda:2
-      CGM_DEVICE_MAP: "[2, 3]"
+      # CGM_DEVICE: cuda:2                 # [REMOVED] 避免与 topology 冲突
+      # CGM_DEVICE_MAP: "[6, 7]"           # [REMOVED] 避免与 topology 冲突
 
 algorithm:
   adv_estimator: grpo
@@ -75,7 +74,6 @@ algorithm:
   lam: 1.0
   kl_penalty: kl
 
-
 data:
   train_files:
     - datasets/r2e_gym/train.jsonl
@@ -85,7 +83,7 @@ data:
   train_batch_size: 8
   val_batch_size: 64
   max_prompt_length: 8192
-  max_response_length: 32768
+  max_response_length: 16384        # [UPDATED] 由 32768 下调：确保 8192+16384=24576 ≤ planner.vllm.max_model_len
   filter_overlong_prompts: true
   filter_overlong_prompts_workers: 32
   drop_last_train: false
@@ -105,7 +103,7 @@ actor_rollout_ref:
     ppo_micro_batch_size_per_gpu: 1
     ppo_mini_batch_size: 8
     use_dynamic_bsz: false
-    ppo_max_token_len_per_gpu: 32000
+    ppo_max_token_len_per_gpu: 24576  # [UPDATED] 与 planner.vllm.max_model_len 对齐，避免长度不一致
     loss_agg_mode: seq-mean-token-sum
     optim:
       lr: 1.0e-06
@@ -121,14 +119,16 @@ actor_rollout_ref:
       optimizer_offload: true
   rollout:
     name: vllm
-    mode: async
+    mode: sync                     # [UPDATED] 由 async 改为 sync，减少并发时启动期内存压力
+    prompt_length: ${data.max_prompt_length}     # [NEW] 修复 Key 'prompt_length' not in struct
+    response_length: ${data.max_response_length} # [NEW] 修复 Key 'response_length' not in struct
+    enforce_eager: true            # [NEW] 与引擎设置一致
     temperature: 1.0
-    'n': 4
+    n: 4
     val_kwargs:
-      'n': 1
+      n: 1
       do_sample: false
       temperature: 0.0
-    enforce_eager: false
     tensor_model_parallel_size: ${system.topology.groups.planner.vllm.tp}
     gpu_memory_utilization: ${system.topology.groups.planner.vllm.gpu_memory_utilization}
     max_model_len: ${system.topology.groups.planner.vllm.max_model_len}
@@ -160,15 +160,15 @@ rllm:
 
 verl:
   role_worker_mapping:
-    rollout: [0, 1, 2, 3]
+    rollout: [0, 1, 2, 3]     # [UPDATED] 与重编号后的设备一致
 
 trainer:
-  device: cuda 
+  device: cuda
   total_epochs: 1000
   critic_warmup: 0
   logger:
-  - console
-  - wandb
+    - console
+    - wandb
   project_name: deepscaler-agent
   experiment_name: planner-only-grpo-4g
   val_before_train: false
@@ -207,8 +207,11 @@ ray:
       VLLM_ATTENTION_BACKEND: FLASH_ATTN
       VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
       VLLM_ENGINE_ITERATION_TIMEOUT_S: "100000000000"
-      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:False"
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"  # [UPDATED] True 更稳
       NCCL_ASYNC_ERROR_HANDLING: "1"
       TORCH_NCCL_BLOCKING_WAIT: "1"
       NCCL_DEBUG: WARN
       NCCL_IB_DISABLE: "1"
+      NCCL_P2P_DISABLE: "1"                # [NEW] 降低某些 P2P 通道带来的不稳定
+      VLLM_COMPILE_CACHE_DIR: "/tmp/vllm_cache_run"  # [NEW] 隔离本次编译缓存，避免旧 cache 形态不匹配
+      VLLM_LOGGING_LEVEL: "INFO"
