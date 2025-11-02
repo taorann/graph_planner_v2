@@ -6,6 +6,23 @@ import torch
 from typing import List, Dict
 
 
+if os.getenv("VLLM_SAMPLER_CAST_FP32", "0") == "1":
+    try:
+        from vllm.v1.sample.ops import topk_topp_sampler as _tts
+
+        _orig = _tts.TopkToppSampler.forward_native
+
+        def _forward_native_fp32(self, logits, sampling_metadata):
+            if logits.dtype in (torch.bfloat16, torch.float16):
+                logits = logits.float()
+            return _orig(self, logits, sampling_metadata)
+
+        _tts.TopkToppSampler.forward_native = _forward_native_fp32
+        print("[patch] vLLM sampler: logits -> float32 cast enabled")
+    except Exception as e:
+        print("[patch] sampler cast not applied:", e)
+
+
 @ray.remote(
     num_gpus=2,
     max_concurrency=64,
@@ -23,8 +40,9 @@ class PlannerEngine:
         self.llm = LLM(
             model=mp,
             tensor_parallel_size=2,
-            dtype="bfloat16",
+            dtype="float16",            # inference in fp16 to avoid BF16 logits.sort kernel edge
             trust_remote_code=True,
+            kv_cache_dtype="fp16",
         )
 
     def generate(self, prompts: List[str], **kw) -> List[str]:
@@ -33,6 +51,7 @@ class PlannerEngine:
         sp = SamplingParams(
             temperature=float(os.environ.get("PLANNER_MODEL_TEMPERATURE", "0.2")),
             top_p=float(os.environ.get("PLANNER_MODEL_TOP_P", "0.95")),
+            top_k=-1,
             max_tokens=int(os.environ.get("PLANNER_MODEL_MAX_TOKENS", "512")),
         )
         outs = self.llm.generate(prompts, sp)
@@ -62,7 +81,12 @@ class PlannerEngine:
 
         tp = tensor_parallel_size or int(os.environ.get("PLANNER_TP_SIZE", "2"))
         dt = (dtype or os.environ.get("PLANNER_DTYPE", "bfloat16")).lower()
-        dt_map = {"bfloat16": "bfloat16", "bf16": "bfloat16", "float16": "float16", "fp16": "float16"}
+        dt_map = {
+            "bfloat16": "bfloat16",
+            "bf16": "bfloat16",
+            "float16": "float16",
+            "fp16": "float16",
+        }
         dt_final = dt_map.get(dt, "bfloat16")
 
         self.llm = LLM(
@@ -70,6 +94,7 @@ class PlannerEngine:
             tensor_parallel_size=tp,
             dtype=dt_final,
             trust_remote_code=True,
+            kv_cache_dtype="fp16" if dt_final == "float16" else "auto",
         )
         return "ok"
 

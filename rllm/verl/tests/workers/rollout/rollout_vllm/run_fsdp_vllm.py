@@ -107,7 +107,14 @@ def main():
     state_dict = fsdp_model.state_dict()
 
     sampling_params = SamplingParams(
-        temperature=0, top_p=1, n=1, max_tokens=response_length, logprobs=1, ignore_eos=True, detokenize=False
+        temperature=0.7,
+        top_p=0.95,
+        top_k=-1,
+        n=1,
+        max_tokens=response_length,
+        logprobs=1,
+        ignore_eos=True,
+        detokenize=False,
     )
 
     print(actor_model_config)

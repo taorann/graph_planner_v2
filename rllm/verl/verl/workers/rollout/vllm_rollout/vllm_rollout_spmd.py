@@ -192,6 +192,9 @@ class vLLMRollout(BaseRollout):
             n=1,
             logprobs=0,  # can be set to 0 and let actor to recompute
             max_tokens=config.response_length,
+            temperature=float(config.get("temperature", 0.7)),
+            top_p=float(config.get("top_p", 0.95)),
+            top_k=int(config.get("top_k", -1)),
         )
 
         kwargs["detokenize"] = False
@@ -201,6 +204,12 @@ class vLLMRollout(BaseRollout):
             if hasattr(SamplingParams(), str(k)) and k != "seed":
                 kwargs[k] = config.get(k)
         kwargs["n"] = 1  # already repeat in ray_trainer
+        if kwargs.get("top_k") == 0:
+            kwargs["top_k"] = -1
+        if kwargs.get("temperature") is not None and kwargs["temperature"] <= 0:
+            kwargs["temperature"] = 1e-5
+        if kwargs.get("top_p") is not None and kwargs["top_p"] <= 0:
+            kwargs["top_p"] = 1e-5
         print(f"kwargs: {kwargs}")
         self.sampling_params = SamplingParams(**kwargs)
 
@@ -293,7 +302,7 @@ class vLLMRollout(BaseRollout):
                 "top_p": 1.0,
                 "top_k": -1,
                 "min_p": 0.0,
-                "temperature": 0,
+                "temperature": 1e-5,
                 "n": 1,  # if greedy, only 1 response
             }
         elif is_validate:
@@ -304,6 +313,12 @@ class vLLMRollout(BaseRollout):
                 "temperature": self.config.val_kwargs.temperature,
                 "n": 1,  # if validate, already repeat in ray_trainer
             }
+        if kwargs.get("top_k") == 0:
+            kwargs["top_k"] = -1
+        if kwargs.get("temperature") is not None and kwargs["temperature"] <= 0:
+            kwargs["temperature"] = 1e-5
+        if kwargs.get("top_p") is not None and kwargs["top_p"] <= 0:
+            kwargs["top_p"] = 1e-5
 
         lora_requests = None
         if self.lora_kwargs:

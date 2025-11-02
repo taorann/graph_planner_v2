@@ -17,7 +17,7 @@ system:
           tp: 2
           gpu_memory_utilization: 0.65   # [UPDATED] 由 0.90 下调，降低启动/预热期显存峰值
           max_model_len: 24576           # [UPDATED] 由 32768 下调；与 data.max_prompt+max_response 对齐
-          max_num_seqs: 32               # [NEW] 限制启动/调度并发，缓解 profile_run OOM
+          max_num_seqs: 16               # [NEW] 限制启动/调度并发，缓解 profile_run OOM
           kv_cache_dtype: fp16           # [NEW] 使用 FP16 KV cache
           enforce_eager: true            # [NEW] 规避 compile/cudagraph 带来的显存尖峰
       cgm:
@@ -41,7 +41,7 @@ env:
 
 graph_planner:
   planner:
-    propagate_via_ray: true
+    propagate_via_ray: false
     env:
       PLANNER_MODEL_PATH: ${paths.planner_model}
       PLANNER_MODEL_TOKENIZER_PATH: ${paths.planner_tokenizer}
@@ -110,6 +110,7 @@ actor_rollout_ref:
     entropy_coeff: 0.0
     use_kl_loss: false
     kl_loss_coef: 0.0
+    entropy_from_logits_with_chunking: false
     ulysses_sequence_parallel_size: 1
     fsdp_config:
       fsdp_size: ${system.topology.groups.planner.fsdp_size}
@@ -129,7 +130,7 @@ actor_rollout_ref:
       n: 1
       do_sample: false
       temperature: 0.0
-    tensor_model_parallel_size: ${system.topology.groups.planner.vllm.tp}
+    tensor_model_parallel_size: 2
     gpu_memory_utilization: ${system.topology.groups.planner.vllm.gpu_memory_utilization}
     max_model_len: ${system.topology.groups.planner.vllm.max_model_len}
     log_prob_micro_batch_size: ${actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu}
@@ -200,6 +201,10 @@ resources:
   ray_cpus: 16
   ray_gpus: 4
 
+planner:
+  serve:
+    enabled: false
+
 ray:
   runtime_env:
     env_vars:
@@ -208,7 +213,7 @@ ray:
       VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
       VLLM_ENGINE_ITERATION_TIMEOUT_S: "100000000000"
       PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"  # [UPDATED] True 更稳
-      NCCL_ASYNC_ERROR_HANDLING: "1"
+      TORCH_NCCL_ASYNC_ERROR_HANDLING: "1"
       TORCH_NCCL_BLOCKING_WAIT: "1"
       NCCL_DEBUG: WARN
       NCCL_IB_DISABLE: "1"
