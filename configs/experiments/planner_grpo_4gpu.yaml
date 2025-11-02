@@ -93,12 +93,18 @@ data:
 
 actor_rollout_ref:
   model:
+    dtype: float16
+    attn_implementation: flash_attention_2
     path: ${paths.planner_model}
     tokenizer_path: ${paths.planner_tokenizer}
     enable_gradient_checkpointing: true
     use_remove_padding: true
   hybrid_engine: true
   actor:
+    fsdp_mixed_precision:
+      param_dtype: float16
+      reduce_dtype: float32
+      buffer_dtype: float32
     strategy: fsdp
     ppo_micro_batch_size_per_gpu: 1
     ppo_mini_batch_size: 8
@@ -116,8 +122,8 @@ actor_rollout_ref:
       fsdp_size: ${system.topology.groups.planner.fsdp_size}
       use_orig_params: true
       sync_module_states: true
-      param_offload: true
-      optimizer_offload: true
+      param_offload: false
+      optimizer_offload: false
   rollout:
     name: vllm
     mode: sync                     # [UPDATED] 由 async 改为 sync，减少并发时启动期内存压力
