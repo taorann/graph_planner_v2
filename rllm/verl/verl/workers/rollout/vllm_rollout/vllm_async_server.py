@@ -227,10 +227,19 @@ class AsyncvLLMServer(AsyncServerBase):
             logprobs=0,
             repetition_penalty=1.0,
             max_new_tokens=config.response_length,
+            temperature=float(config.get("temperature", 0.7)),
+            top_p=float(config.get("top_p", 0.95)),
+            top_k=int(config.get("top_k", -1)),
         )
         for k in config.keys():
             if hasattr(SamplingParams(), str(k)):
                 kwargs[k] = config.get(k)
+        if kwargs.get("top_k") == 0:
+            kwargs["top_k"] = -1
+        if kwargs.get("temperature") is not None and kwargs["temperature"] <= 0:
+            kwargs["temperature"] = 1e-5
+        if kwargs.get("top_p") is not None and kwargs["top_p"] <= 0:
+            kwargs["top_p"] = 1e-5
         print(f"override_generation_config: {kwargs}")
 
         backend = os.environ.get("VERL_VLLM_DISTRIBUTED_BACKEND", "zeromq")
@@ -315,6 +324,12 @@ class AsyncvLLMServer(AsyncServerBase):
 
     async def generate(self, prompt_ids: list[int], sampling_params: dict[str, Any], request_id: str) -> list[int]:
         max_tokens = self.max_model_len - len(prompt_ids)
+        if sampling_params.get("top_k") == 0:
+            sampling_params["top_k"] = -1
+        if sampling_params.get("temperature") is not None and sampling_params["temperature"] <= 0:
+            sampling_params["temperature"] = 1e-5
+        if sampling_params.get("top_p") is not None and sampling_params["top_p"] <= 0:
+            sampling_params["top_p"] = 1e-5
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
         prompt = TokensPrompt(prompt_token_ids=prompt_ids)
         generator = self.engine.generate(prompt=prompt, sampling_params=sampling_params, request_id=request_id)

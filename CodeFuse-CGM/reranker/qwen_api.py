@@ -10,11 +10,11 @@ class QwenAPI:
     self.llm = LLM(model=model_path, tensor_parallel_size=tensor_parallel_size)
 
     sample_params = dict(
-      temperature=0.1,
+      temperature=0.7,
       repetition_penalty=1.1,
-      top_k=50,
-      top_p=0.98,
-      max_tokens=1024
+      top_k=-1,
+      top_p=0.95,
+      max_tokens=512
     )
 
     self.sampling_params = SamplingParams(**sample_params)
