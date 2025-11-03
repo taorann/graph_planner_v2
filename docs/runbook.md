@@ -1,6 +1,9 @@
 # Graph Planner GRPO Runbook
 
-本指南说明如何使用 `scripts/train_planner_grpo.py` 复现实验配置、准备数据以及检查运行环境。新版流程只保留了一个公开的 YAML——`configs/experiments/planner_grpo_4gpu.yaml`——其余配置项通过 CLI dotlist 覆写即可。
+本指南说明如何使用 `scripts/train_planner_grpo.py` 复现实验配置、准备数据以及检查运行环境。
+> **2025-11-03 审核结论**：runbook 中引用的脚本路径与配置键均已对照最新版仓库确认有效，训练日志提醒项保持不变。
+
+新版流程只保留了一个公开的 YAML——`configs/experiments/planner_grpo_4gpu.yaml`——其余配置项通过 CLI dotlist 覆写即可。
 
 ## 0. 数据准备
 
@@ -22,12 +25,12 @@
 
 - `paths.*`：Planner / CGM 权重与 tokenizer 的本地目录。训练脚本会通过 `resolve_repo_path` 把它们转换为绝对路径，并填充到 Ray runtime 的环境变量中。【F:scripts/train_planner_grpo.py†L110-L150】【F:scripts/train_planner_grpo.py†L207-L252】
 - `data.*`：训练/验证 JSONL 列表以及 dataloader 相关参数。脚本会在启动前调用 `_maybe_materialize_json_to_verl_parquet` 将 JSONL 转换成 `_verl.parquet` 并写回配置，后续的 GRPO 流程直接消费 parquet。【F:scripts/train_planner_grpo.py†L322-L362】
-- `actor_rollout_ref.*`：Planner 模型的 FSDP 策略、学习率和 rollout 配置，默认固定在 4×GPU GRPO 场景。`train_planner_grpo.py` 会验证 strategy 是否为 FSDP，并保证 tensor parallel 度为 1。【F:scripts/train_planner_grpo.py†L237-L284】
+- `actor_rollout_ref.*`：Planner 模型的 FSDP 策略、学习率和 rollout 配置，默认固定在 4×GPU GRPO 场景。`scripts/train_planner_grpo.py` 会验证 strategy 是否为 FSDP，并保证 tensor parallel 度为 1。【F:scripts/train_planner_grpo.py†L237-L284】
 - `trainer.*`、`parallel.*`、`resources.*`：声明梯度累积、保存/评估周期与 Ray 资源，用于构建 Verl 的训练器和 runtime。
 
 ## 2. CLI 与覆写
 
-`train_planner_grpo.py` 的核心参数：
+`scripts/train_planner_grpo.py` 的核心参数：
 
 - `--config`：必填，指向 YAML（默认值 `configs/experiments/planner_grpo_4gpu.yaml`）。
 - `--overrides`：可选的 OmegaConf dotlist，例如 `--overrides trainer.total_epochs=200 data.train_files=[my/train.jsonl]`。

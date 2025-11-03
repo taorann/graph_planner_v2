@@ -453,8 +453,12 @@ class VLLMGroupConfig:
     dp: int = 1
     gpu_memory_utilization: float | None = None
     max_model_len: int | None = None
+    max_num_seqs: int | None = None
+    kv_cache_dtype: str | None = None
+    enforce_eager: bool | None = None
     model_path: str | None = None
     adapters: Any | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -466,13 +470,7 @@ class TopologyGroupConfig:
 
 
 class StaticVLLMEngine:
-    """Lightweight stand-in for a vLLM engine.
-
-    The actual project wires a true vLLM engine inside Ray workers.  During
-    refactors we still keep a Python-side handle so that other components can
-    share metadata (TP degree, GPU placement, etc.) without eagerly
-    constructing heavyweight resources in the driver process.
-    """
+    """Metadata container that can optionally host a real inference runtime."""
 
     def __init__(
         self,
@@ -483,6 +481,9 @@ class StaticVLLMEngine:
         gpus: list[int],
         max_model_len: int | None = None,
         gpu_memory_utilization: float | None = None,
+        max_num_seqs: int | None = None,
+        kv_cache_dtype: str | None = None,
+        enforce_eager: bool | None = None,
         model_path: str | None = None,
         adapters: Any | None = None,
         extra_config: Mapping | None = None,
@@ -493,15 +494,62 @@ class StaticVLLMEngine:
         self.gpus = list(gpus)
         self.max_model_len = max_model_len
         self.gpu_memory_utilization = gpu_memory_utilization
+        self.max_num_seqs = max_num_seqs
+        self.kv_cache_dtype = kv_cache_dtype
+        self.enforce_eager = enforce_eager
         self.model_path = model_path
         self.adapters = adapters
         self.extra_config = dict(extra_config or {})
         self._latest_snapshot: int | None = None
+        self._runtime: Any | None = None
+        self._runtime_kind: str = "static"
+        self._sampling_defaults: dict[str, Any] = dict(
+            _oc_get(self.extra_config, "sampling_params", {}) or {}
+        )
 
     def set_snapshot(self, version: int, **metadata: Any) -> None:
         self._latest_snapshot = version
         if metadata:
             self.extra_config.setdefault("snapshot_metadata", {}).update(metadata)
+
+    # ------------------------------------------------------------------
+    # Runtime helpers
+    # ------------------------------------------------------------------
+    def attach_runtime(
+        self,
+        runtime: Any | None,
+        *,
+        kind: str = "static",
+        sampling_defaults: Mapping[str, Any] | None = None,
+    ) -> None:
+        self._runtime = runtime
+        self._runtime_kind = kind
+        if sampling_defaults is not None:
+            self._sampling_defaults = dict(sampling_defaults)
+
+    def has_runtime(self) -> bool:
+        return self._runtime is not None
+
+    def set_max_num_seqs(self, value: int) -> None:
+        self.max_num_seqs = value
+        runtime = self._runtime
+        if runtime is None:
+            return
+        if hasattr(runtime, "set_max_num_seqs"):
+            try:
+                runtime.set_max_num_seqs(value)
+            except Exception:
+                return
+
+    def generate(self, prompts, **kwargs):
+        runtime = self._runtime
+        if runtime is None:
+            raise RuntimeError(
+                f"vLLM runtime not available for group={self.group}; check deployment"
+            )
+        if self._runtime_kind == "vllm":
+            kwargs.setdefault("sampling_kwargs", self._sampling_defaults)
+        return runtime.generate(prompts, **kwargs)
 
 
 class PlannerToVLLMSyncer:
@@ -536,6 +584,96 @@ class PlannerToVLLMSyncer:
         return self._published_version
 
 
+class _VLLMRuntimeWrapper:
+    """Adapter that exposes a simplified ``generate`` API around vLLM."""
+
+    def __init__(self, llm, *, sampling_defaults: Mapping[str, Any] | None = None) -> None:
+        self._llm = llm
+        self._sampling_defaults = dict(sampling_defaults or {})
+
+    def set_max_num_seqs(self, value: int) -> None:
+        try:
+            engine = getattr(self._llm, "llm_engine", None)
+            scheduler = getattr(engine, "scheduler_config", None)
+            if scheduler is not None and hasattr(scheduler, "max_num_seqs"):
+                scheduler.max_num_seqs = int(value)
+        except Exception:
+            pass
+
+    def generate(self, prompts, *, sampling_kwargs: Mapping[str, Any] | None = None, **kwargs):
+        try:
+            from vllm import SamplingParams  # type: ignore
+        except Exception as exc:  # pragma: no cover - defensive
+            raise RuntimeError("vLLM SamplingParams unavailable; ensure vllm is installed") from exc
+
+        params = dict(self._sampling_defaults)
+        if sampling_kwargs:
+            params.update(dict(sampling_kwargs))
+        sampling_params = SamplingParams(**params)
+        outputs = self._llm.generate(prompts, sampling_params, **kwargs)
+        results: list[str] = []
+        for out in outputs:
+            text = None
+            if hasattr(out, "outputs") and out.outputs:
+                first = out.outputs[0]
+                text = getattr(first, "text", None)
+            if text is None:
+                text = getattr(out, "text", None)
+            if text is None:
+                text = str(out)
+            results.append(text)
+        return results
+
+
+class _CodeFuseRuntimeWrapper:
+    """Adapter that calls the CodeFuse CGM HTTP service."""
+
+    def __init__(self, client) -> None:
+        try:
+            from aci.schema import Plan
+        except Exception as exc:  # pragma: no cover - informative
+            raise RuntimeError("aci.schema.Plan is required for CodeFuse CGM runtime") from exc
+        self._client = client
+        self._plan_cls = Plan
+
+    def _coerce_plan(self, payload: Any):
+        if isinstance(payload, self._plan_cls):
+            return payload
+        if isinstance(payload, MappingABC):
+            try:
+                return self._plan_cls(**payload)
+            except Exception:
+                pass
+        return self._plan_cls(targets=[], budget={}, priority_tests=[])
+
+    def generate(self, prompts, **kwargs):
+        responses: list[dict[str, Any]] = []
+        for prompt in prompts:
+            if isinstance(prompt, str):
+                try:
+                    data = _json.loads(prompt)
+                except _json.JSONDecodeError:
+                    data = {}
+            elif isinstance(prompt, MappingABC):
+                data = dict(prompt)
+            else:
+                data = {}
+
+            collated = data.get("collated") or {}
+            plan_payload = data.get("plan_struct") or data.get("plan") or {}
+            plan = self._coerce_plan(plan_payload)
+            patch = self._client.generate_patch(
+                issue=data.get("issue"),
+                plan=plan,
+                plan_text=data.get("plan_text"),
+                subgraph_linearized=collated.get("chunks"),
+                snippets=collated.get("snippets"),
+                metadata=data.get("constraints"),
+            )
+            responses.append(dict(patch))
+        return responses
+
+
 def build_vllm_engine(
     *,
     group: str,
@@ -544,13 +682,18 @@ def build_vllm_engine(
     dp: int = 1,
     max_model_len: int | None = None,
     gpu_memory_utilization: float | None = None,
+    max_num_seqs: int | None = None,
+    kv_cache_dtype: str | None = None,
+    enforce_eager: bool | None = None,
     model_path: str | None = None,
     adapters: Any | None = None,
     extra_config: Mapping | None = None,
 ) -> StaticVLLMEngine:
-    """Construct a topology-aware vLLM engine placeholder.
-    TODO: replace with the repo's real vLLM launcher so planner/cgm engines actually run.
-    This function must create exactly ONE engine spanning the provided GPUs with TP=tp, DP=1."""
+    """Construct a topology-aware vLLM engine, attaching a runtime when possible."""
+
+    extra = dict(extra_config or {})
+    sampling_defaults = dict(extra.pop("sampling_params", {}) or {})
+    backend = str(extra.get("backend", "") or extra.get("runtime", "")).lower()
 
     engine = StaticVLLMEngine(
         group=group,
@@ -559,10 +702,64 @@ def build_vllm_engine(
         gpus=gpus,
         max_model_len=max_model_len,
         gpu_memory_utilization=gpu_memory_utilization,
+        max_num_seqs=max_num_seqs,
+        kv_cache_dtype=kv_cache_dtype,
+        enforce_eager=enforce_eager,
         model_path=model_path,
         adapters=adapters,
         extra_config=extra_config,
     )
+
+    runtime = None
+    runtime_kind = "static"
+
+    try:
+        if backend in {"codefuse", "codefuse-cgm"} or extra.get("endpoint"):
+            from graph_planner.integrations.codefuse_cgm.client import CodeFuseCGMClient
+
+            endpoint = extra.get("endpoint")
+            if not endpoint:
+                raise ValueError(
+                    f"system.topology.groups.{group}.vllm.endpoint must be provided for CodeFuse runtime"
+                )
+            client_kwargs = {"endpoint": endpoint}
+            for key in ("api_key", "model", "temperature", "max_tokens", "timeout_s"):
+                if extra.get(key) is not None:
+                    client_kwargs[key] = extra[key]
+            runtime = _CodeFuseRuntimeWrapper(CodeFuseCGMClient(**client_kwargs))
+            runtime_kind = "codefuse-cgm"
+        elif model_path:
+            from verl.third_party.vllm import LLM
+
+            llm_kwargs: dict[str, Any] = {
+                "model": model_path,
+                "tensor_parallel_size": tp,
+                "trust_remote_code": True,
+            }
+            if gpu_memory_utilization is not None:
+                llm_kwargs["gpu_memory_utilization"] = gpu_memory_utilization
+            if max_model_len is not None:
+                llm_kwargs["max_model_len"] = max_model_len
+            if kv_cache_dtype:
+                llm_kwargs["kv_cache_dtype"] = kv_cache_dtype
+            if enforce_eager is not None:
+                llm_kwargs["enforce_eager"] = bool(enforce_eager)
+            for key in ("dtype", "device", "max_num_batched_tokens", "max_num_seqs"):
+                if extra.get(key) is not None:
+                    llm_kwargs[key] = extra[key]
+            runtime = _VLLMRuntimeWrapper(LLM(**llm_kwargs), sampling_defaults=sampling_defaults)
+            runtime_kind = "vllm"
+    except Exception as exc:  # pragma: no cover - defensive
+        LOG.warning("Failed to create %s runtime for group=%s: %s", runtime_kind, group, exc)
+        runtime = None
+        runtime_kind = "static"
+
+    engine.attach_runtime(runtime, kind=runtime_kind, sampling_defaults=sampling_defaults)
+    if max_num_seqs is not None:
+        try:
+            engine.set_max_num_seqs(int(max_num_seqs))
+        except Exception:
+            pass
     return engine
 
 
@@ -1170,6 +1367,27 @@ class RayPPOTrainer:
             except Exception:
                 return []
 
+        def _as_int(value):
+            if value in (None, ""):
+                return None
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        def _as_bool(value):
+            if value is None:
+                return None
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                lowered = value.strip().lower()
+                if lowered in {"true", "1", "yes", "on"}:
+                    return True
+                if lowered in {"false", "0", "no", "off"}:
+                    return False
+            return None
+
         for name in ("planner", "cgm"):
             cfg = _oc_get(group_cfg, name, {})
             if cfg is None:
@@ -1179,14 +1397,31 @@ class RayPPOTrainer:
             vllm_cfg = _oc_get(cfg, "vllm", None)
             vllm = None
             if vllm_cfg is not None:
-                vllm = VLLMGroupConfig(
-                    tp=int(_oc_get(vllm_cfg, "tp", 1) or 1),
-                    dp=int(_oc_get(vllm_cfg, "dp", 1) or 1),
-                    gpu_memory_utilization=_oc_get(vllm_cfg, "gpu_memory_utilization", None),
-                    max_model_len=_oc_get(vllm_cfg, "max_model_len", None),
-                    model_path=_oc_get(vllm_cfg, "model_path", None),
-                    adapters=_oc_get(vllm_cfg, "adapters", None),
-                )
+                if isinstance(vllm_cfg, DictConfig):
+                    container = OmegaConf.to_container(vllm_cfg, resolve=True)
+                elif isinstance(vllm_cfg, MappingABC):
+                    container = dict(vllm_cfg)
+                else:
+                    container = None
+
+                if isinstance(container, MappingABC):
+                    cfg_dict = dict(container)
+
+                    def _pop(key: str, default=None):
+                        return cfg_dict.pop(key, default)
+
+                    vllm = VLLMGroupConfig(
+                        tp=int(_pop("tp", 1) or 1),
+                        dp=int(_pop("dp", 1) or 1),
+                        gpu_memory_utilization=_pop("gpu_memory_utilization", None),
+                        max_model_len=_pop("max_model_len", None),
+                        max_num_seqs=_as_int(_pop("max_num_seqs", None)),
+                        kv_cache_dtype=_pop("kv_cache_dtype", None),
+                        enforce_eager=_as_bool(_pop("enforce_eager", None)),
+                        model_path=_pop("model_path", None),
+                        adapters=_pop("adapters", None),
+                        extra={str(k): v for k, v in cfg_dict.items()},
+                    )
             result[name] = TopologyGroupConfig(name=name, gpus=gpus, fsdp_size=fsdp_size, vllm=vllm)
         return result
 
@@ -1850,13 +2085,46 @@ class RayPPOTrainer:
             raise ValueError("Planner topology must specify at least one GPU")
 
         env_vars: dict[str, str] = {}
-        if planner_cfg.gpus:
-            env_vars["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in planner_cfg.gpus)
+        global_env = OmegaConf.select(self.config, "system.runtime_env.env_vars", default=None)
+        if isinstance(global_env, DictConfig):
+            global_env = OmegaConf.to_container(global_env, resolve=True)
+        if isinstance(global_env, MappingABC):
+            env_vars.update({str(k): str(v) for k, v in global_env.items() if v is not None})
+
+        group_env = getattr(planner_cfg, "env_vars", None)
+        if isinstance(group_env, DictConfig):
+            group_env = OmegaConf.to_container(group_env, resolve=True)
+        if isinstance(group_env, MappingABC):
+            env_vars.update({str(k): str(v) for k, v in group_env.items() if v is not None})
+
         if self._run_id:
             env_vars["GRAPH_PLANNER_RUN_ID"] = str(self._run_id)
+        if planner_cfg.gpus:
+            env_vars["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in planner_cfg.gpus)
+        if "CUDA_VISIBLE_DEVICES" in env_vars:
+            preview = list(env_vars.keys())[:6]
+            print(
+                f"[topology] group=planner cuda_visible={env_vars['CUDA_VISIBLE_DEVICES']} env_keys={preview}..."
+            )
 
         fsdp_world = int(planner_cfg.fsdp_size or len(planner_cfg.gpus))
+        _oc_set(self.config, "actor_rollout_ref.actor.fsdp_config.fsdp_size", fsdp_world)
+        print(f"[planner] fsdp_size set to {fsdp_world} prior to worker init")
         print(f"FSDP planner world_size={fsdp_world} on GPUs {planner_cfg.gpus}")
+
+        rollout_tp = _oc_get(_oc_get(self.config, "actor_rollout_ref", {}), "rollout", {})
+        tp_value = _oc_get(rollout_tp, "tensor_model_parallel_size", None) if isinstance(rollout_tp, MappingABC) else None
+        if tp_value in (None, 0):
+            planner_tp = None
+            if getattr(planner_cfg, "vllm", None) is not None:
+                planner_tp = getattr(planner_cfg.vllm, "tp", None)
+            if planner_tp in (None, 0):
+                planner_tp = len(planner_cfg.gpus)
+            _oc_set(
+                self.config,
+                "actor_rollout_ref.rollout.tensor_model_parallel_size",
+                int(planner_tp),
+            )
 
         planner_pool = RayResourcePool(
             process_on_nodes=[len(planner_cfg.gpus)],
@@ -1977,8 +2245,12 @@ class RayPPOTrainer:
                 dp=planner_cfg.vllm.dp,
                 max_model_len=planner_cfg.vllm.max_model_len,
                 gpu_memory_utilization=planner_cfg.vllm.gpu_memory_utilization,
+                max_num_seqs=planner_cfg.vllm.max_num_seqs,
+                kv_cache_dtype=planner_cfg.vllm.kv_cache_dtype,
+                enforce_eager=planner_cfg.vllm.enforce_eager,
                 model_path=planner_cfg.vllm.model_path,
                 adapters=planner_cfg.vllm.adapters,
+                extra_config=planner_cfg.vllm.extra,
             )
             print(
                 "vLLM planner TP=%s on GPUs %s"
@@ -2003,8 +2275,12 @@ class RayPPOTrainer:
                 gpu_memory_utilization=(
                     cgm_cfg.vllm.gpu_memory_utilization if cgm_cfg.vllm else None
                 ),
+                max_num_seqs=cgm_cfg.vllm.max_num_seqs if cgm_cfg.vllm else None,
+                kv_cache_dtype=cgm_cfg.vllm.kv_cache_dtype if cgm_cfg.vllm else None,
+                enforce_eager=cgm_cfg.vllm.enforce_eager if cgm_cfg.vllm else None,
                 model_path=cgm_cfg.vllm.model_path if cgm_cfg.vllm else None,
                 adapters=cgm_cfg.vllm.adapters if cgm_cfg.vllm else None,
+                extra_config=cgm_cfg.vllm.extra if cgm_cfg.vllm else None,
             )
             print(
                 "vLLM CGM TP=%s on GPUs %s"
@@ -2015,13 +2291,37 @@ class RayPPOTrainer:
             )
             actor_name = f"CGMService::{self._run_id}"
             if ray.is_initialized():
-                cgm_env = {"CUDA_VISIBLE_DEVICES": ",".join(map(str, cgm_cfg.gpus))}
+                cgm_env: dict[str, str] = {}
+                global_env = OmegaConf.select(self.config, "system.runtime_env.env_vars", default=None)
+                if isinstance(global_env, DictConfig):
+                    global_env = OmegaConf.to_container(global_env, resolve=True)
+                if isinstance(global_env, MappingABC):
+                    cgm_env.update({str(k): str(v) for k, v in global_env.items() if v is not None})
+
+                group_env = getattr(cgm_cfg, "env_vars", None)
+                if isinstance(group_env, DictConfig):
+                    group_env = OmegaConf.to_container(group_env, resolve=True)
+                if isinstance(group_env, MappingABC):
+                    cgm_env.update({str(k): str(v) for k, v in group_env.items() if v is not None})
+
+                cgm_env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, cgm_cfg.gpus))
+                preview = list(cgm_env.keys())[:6]
+                print(
+                    f"[topology] group=cgm cuda_visible={cgm_env['CUDA_VISIBLE_DEVICES']} env_keys={preview}..."
+                )
+                system_cfg = _oc_get(self.config, "system", {})
+                topology_cfg = _oc_get(system_cfg, "topology", {})
+                groups_cfg = _oc_get(topology_cfg, "groups", {})
+                cgm_group_cfg = _oc_get(groups_cfg, "cgm", {})
+                vllm_cfg = _oc_get(cgm_group_cfg, "vllm", {}) or {}
+                if isinstance(vllm_cfg, DictConfig):
+                    vllm_cfg = OmegaConf.to_container(vllm_cfg, resolve=True)
                 self.cgm_actor = CGMService.options(
                     name=actor_name,
                     lifetime="detached",
                     num_gpus=len(cgm_cfg.gpus),
                     runtime_env={"env_vars": cgm_env},
-                ).remote(self.cgm_engine)
+                ).remote(self.cgm_engine, vllm_cfg=vllm_cfg)
                 print(f"[Topology] CGM actor '{actor_name}' spawned")
             else:
                 self.cgm_actor = None

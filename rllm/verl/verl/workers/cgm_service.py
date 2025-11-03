@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
 import threading
 import time
@@ -89,16 +90,98 @@ class _LocalCGMEngine:
 class CGMService:
     """Aggregate concurrent patch requests into small vLLM batches."""
 
-    def __init__(self, vllm_engine: Any, max_batch: int = 8, max_wait_ms: int = 10) -> None:
-        if vllm_engine is None or not hasattr(vllm_engine, "generate"):
+    def __init__(
+        self,
+        vllm_engine: Any,
+        max_batch: int = 8,
+        max_wait_ms: int = 10,
+        vllm_cfg: dict | None = None,
+    ) -> None:
+        raw_cfg = vllm_cfg or {}
+        if isinstance(raw_cfg, Mapping):
+            raw_cfg = dict(raw_cfg)
+        else:
+            try:
+                raw_cfg = dict(raw_cfg)
+            except Exception:
+                raw_cfg = {}
+        self.vllm_cfg: dict[str, Any] = {str(k): raw_cfg[k] for k in raw_cfg}
+        self._visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        try:
+            self._ngpus = len([tok for tok in self._visible.split(",") if tok != ""])
+        except Exception:
+            self._ngpus = 1
+        if self._ngpus <= 0:
+            self._ngpus = 1
+        candidate = vllm_engine
+        if candidate is None or not hasattr(candidate, "generate") or (
+            hasattr(candidate, "has_runtime") and not candidate.has_runtime()
+        ):
+            print("[cgm] Falling back to local CGM engine (no runtime attached)")
             self.engine = _LocalCGMEngine()
         else:
-            self.engine = vllm_engine
+            self.engine = candidate
+        self._apply_vllm_cfg()
         self.q: "queue.Queue[dict[str, Any]]" = queue.Queue()
         self.max_batch = max_batch
         self.max_wait_ms = max_wait_ms
         self.lock = threading.Lock()
         self.batching = False
+
+    def _apply_vllm_cfg(self) -> None:
+        cfg = self.vllm_cfg
+        tp_default = max(1, self._ngpus)
+
+        def _as_int(key: str, default: int) -> int:
+            value = cfg.get(key, default)
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        def _as_float(key: str, default: float) -> float:
+            value = cfg.get(key, default)
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        tp = _as_int("tp", tp_default)
+        gmu = _as_float("gpu_memory_utilization", 0.60)
+        mml = _as_int("max_model_len", 8192)
+        mns = _as_int("max_num_seqs", 2)
+        kvd = str(cfg.get("kv_cache_dtype", "fp16"))
+        eager = bool(cfg.get("enforce_eager", True))
+
+        print(
+            f"[cgm/vllm] tp={tp} gmu={gmu} max_model_len={mml} max_num_seqs={mns} "
+            f"kv_cache_dtype={kvd} eager={eager} vis={self._visible}"
+        )
+
+        engine = getattr(self, "engine", None)
+        if engine is None:
+            return
+
+        attr_map = {
+            "tp": tp,
+            "tensor_parallel_size": tp,
+            "gpu_memory_utilization": gmu,
+            "max_model_len": mml,
+            "max_num_seqs": mns,
+            "kv_cache_dtype": kvd,
+            "enforce_eager": eager,
+        }
+        for attr, value in attr_map.items():
+            if hasattr(engine, attr):
+                try:
+                    setattr(engine, attr, value)
+                except Exception:
+                    continue
+        if hasattr(engine, "set_max_num_seqs"):
+            try:
+                engine.set_max_num_seqs(mns)
+            except Exception:
+                pass
 
     def generate_patch(self, req: Dict[str, Any]) -> Dict[str, Any]:
         ev = threading.Event()

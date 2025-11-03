@@ -17,7 +17,7 @@ system:
           tp: 2
           gpu_memory_utilization: 0.65   # [UPDATED] 由 0.90 下调，降低启动/预热期显存峰值
           max_model_len: 24576           # [UPDATED] 由 32768 下调；与 data.max_prompt+max_response 对齐
-          max_num_seqs: 16               # [NEW] 限制启动/调度并发，缓解 profile_run OOM
+          max_num_seqs: 8                # [UPDATED] 限制启动/调度并发，缓解 profile_run OOM
           kv_cache_dtype: fp16           # [NEW] 使用 FP16 KV cache
           enforce_eager: true            # [NEW] 规避 compile/cudagraph 带来的显存尖峰
       cgm:
@@ -25,8 +25,8 @@ system:
         vllm:
           tp: 2
           gpu_memory_utilization: 0.60   # [UPDATED]
-          max_model_len: 16384           # [UPDATED]
-          max_num_seqs: 16               # [NEW]
+          max_model_len: 8192            # [UPDATED]
+          max_num_seqs: 2                # [UPDATED]
           kv_cache_dtype: fp16           # [NEW]
           enforce_eager: true            # [NEW]
   rollout:
@@ -127,6 +127,8 @@ actor_rollout_ref:
   rollout:
     name: vllm
     mode: sync                     # [UPDATED] 由 async 改为 sync，减少并发时启动期内存压力
+    batch_size_per_worker: 2
+    num_workers_per_group: 1
     prompt_length: ${data.max_prompt_length}     # [NEW] 修复 Key 'prompt_length' not in struct
     response_length: ${data.max_response_length} # [NEW] 修复 Key 'response_length' not in struct
     enforce_eager: true            # [NEW] 与引擎设置一致
