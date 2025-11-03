@@ -18,11 +18,12 @@ _VLLM_ENV_DEFAULTS = {
     "VLLM_ATTENTION_BACKEND": "FLASH_ATTN",
     "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
     "VLLM_ENGINE_ITERATION_TIMEOUT_S": "100000000000",
-    "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:False",
 }
 
 for _key, _value in _VLLM_ENV_DEFAULTS.items():
     os.environ.setdefault(_key, _value)
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -174,11 +175,65 @@ def _ensure_runtime_env(
     return runtime_env
 
 
-def _get_or_create_actor(name: str, cls):
+def _iter_gpu_ids(raw: Any) -> Iterable[int]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        tokens = [tok.strip() for tok in raw.split(",") if tok.strip()]
+    else:
+        try:
+            tokens = list(raw)
+        except TypeError:
+            tokens = [raw]
+    for tok in tokens:
+        try:
+            yield int(tok)
+        except (TypeError, ValueError):
+            continue
+
+
+def _count_topology_gpus(cfg: DictConfig) -> int:
+    groups = OmegaConf.select(cfg, "system.topology.groups", default=None)
+    if isinstance(groups, DictConfig):
+        groups = OmegaConf.to_container(groups, resolve=True)
+    gpu_ids: set[int] = set()
+    if isinstance(groups, Mapping):
+        for group in groups.values():
+            if isinstance(group, Mapping):
+                for gid in _iter_gpu_ids(group.get("gpus")):
+                    gpu_ids.add(gid)
+    return len(gpu_ids)
+
+
+def _should_spawn_shared_actors(cfg: DictConfig) -> bool:
+    env_flag = os.environ.get("GRAPH_PLANNER_SPAWN_SHARED_ACTORS")
+    if env_flag is not None:
+        return env_flag.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(OmegaConf.select(cfg, "graph_planner.shared_actors.spawn", default=False))
+
+
+def _ensure_shared_actor(name: str, cls, *, spawn_if_missing: bool):
+    if not ray.is_initialized():
+        return None
     try:
-        return ray.get_actor(name)
+        actor = ray.get_actor(name)
     except Exception:
-        return cls.options(name=name, lifetime="detached").remote()
+        actor = None
+
+    if actor is not None:
+        return actor
+
+    if not spawn_if_missing:
+        print(f"[shared-actors] {name} not running; skipping spawn (disabled)")
+        return None
+
+    try:
+        actor = cls.options(name=name, lifetime="detached").remote()
+        print(f"[shared-actors] spawned {name}")
+        return actor
+    except Exception as exc:
+        print(f"[shared-actors] failed to spawn {name}: {exc}")
+        return None
 
 
 def _maybe_wrap_save_with_reload(trainer) -> None:
@@ -346,6 +401,12 @@ def _register_datasets(train_files: Sequence[str], val_files: Sequence[str]) -> 
         for file_path in files:
             abs_path = resolve_repo_path(file_path) if file_path else file_path
             file_path = abs_path or file_path
+            if file_path and "://" not in str(file_path):
+                suffix = Path(str(file_path)).suffix.lower()
+                if suffix in {".json", ".jsonl", ".parquet"} and not Path(str(file_path)).expanduser().exists():
+                    raise FileNotFoundError(
+                        f"Dataset file not found: {file_path}. Run dataset preparation before training."
+                    )
             key = (split, file_path)
             if key in seen:
                 continue
@@ -369,16 +430,36 @@ def _assert_fsdp(cfg: DictConfig) -> None:
     tensor_parallel = int(OmegaConf.select(cfg, "parallel.tensor_parallel_planner", default=1))
     if tensor_parallel != 1:
         raise ValueError("tensor_parallel_planner must be 1 when training with FSDP")
-    rollout_tp = int(OmegaConf.select(cfg, "actor_rollout_ref.rollout.tensor_model_parallel_size", default=1))
-    if rollout_tp != 1:
-        LOGGER.warning(
-            "Overriding rollout tensor model parallel size to 1 for compatibility with FSDP"
-        )
-        OmegaConf.update(
-            cfg,
-            "actor_rollout_ref.rollout.tensor_model_parallel_size",
-            1,
-            merge=False,
+    rollout_tp_raw = OmegaConf.select(
+        cfg, "actor_rollout_ref.rollout.tensor_model_parallel_size", default=None
+    )
+    if rollout_tp_raw in (None, "", 0):
+        return
+
+    try:
+        rollout_tp = int(rollout_tp_raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "actor_rollout_ref.rollout.tensor_model_parallel_size must be integer-compatible"
+        ) from exc
+
+    if rollout_tp <= 0:
+        raise ValueError("rollout.tensor_model_parallel_size must be >= 1")
+
+    planner_gpus = OmegaConf.select(cfg, "system.topology.groups.planner.gpus", default=None)
+    planner_gpu_count = 0
+    if planner_gpus:
+        try:
+            planner_gpu_count = len(list(planner_gpus))
+        except TypeError:
+            planner_gpu_count = 0
+    if planner_gpu_count <= 0:
+        planner_gpu_count = int(OmegaConf.select(cfg, "actor_rollout_ref.actor.fsdp_config.fsdp_size", default=0) or 0)
+
+    if planner_gpu_count and (planner_gpu_count % rollout_tp != 0):
+        raise ValueError(
+            "rollout.tensor_model_parallel_size must divide planner GPU count; "
+            f"got tp={rollout_tp}, planner_gpus={planner_gpu_count}"
         )
 
 
@@ -502,6 +583,8 @@ def main() -> None:
         {k: cgm_env[k] for k in sorted(cgm_env)},
     )
 
+    spawn_shared_requested = _should_spawn_shared_actors(cfg)
+
     if args.print_config:
         print(OmegaConf.to_yaml(cfg))
         return
@@ -522,10 +605,34 @@ def main() -> None:
     ray.init(address=address, runtime_env=runtime_env or None, ignore_reinit_error=False)
 
     try:
-        planner_engine = _get_or_create_actor("planner_engine", PlannerEngine)
-        cgm_tool = _get_or_create_actor("cgm_tool", CGMTool)
-        _ = (planner_engine, cgm_tool)
-        print("[INIT] Shared actors ready: planner_engine & cgm_tool")
+        spawn_shared = spawn_shared_requested
+        if spawn_shared:
+            topology_gpu_budget = _count_topology_gpus(cfg)
+            try:
+                cluster_gpus = int(ray.cluster_resources().get("GPU", 0))
+            except Exception:
+                cluster_gpus = 0
+            if cluster_gpus and cluster_gpus <= topology_gpu_budget:
+                print(
+                    "[shared-actors] skipping spawn: topology consumes "
+                    f"{topology_gpu_budget} GPUs (cluster has {cluster_gpus})"
+                )
+                spawn_shared = False
+
+        planner_engine = _ensure_shared_actor(
+            "planner_engine",
+            PlannerEngine,
+            spawn_if_missing=spawn_shared,
+        )
+        cgm_tool = _ensure_shared_actor(
+            "cgm_tool",
+            CGMTool,
+            spawn_if_missing=spawn_shared,
+        )
+        if planner_engine or cgm_tool:
+            print("[INIT] Shared actors ready: planner_engine & cgm_tool")
+        else:
+            print("[INIT] Shared actors not attached (disabled or unavailable)")
 
         _register_datasets(train_files, val_files)
 

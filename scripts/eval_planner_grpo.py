@@ -14,12 +14,12 @@ _VLLM_ENV_DEFAULTS = {
     "VLLM_ATTENTION_BACKEND": "FLASH_ATTN",
     "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
     "VLLM_ENGINE_ITERATION_TIMEOUT_S": "100000000000",
-    "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:False",
 }
 
 for _key, _value in _VLLM_ENV_DEFAULTS.items():
     os.environ.setdefault(_key, _value)
 
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 

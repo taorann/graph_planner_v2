@@ -2,12 +2,15 @@
 
 ## 1. Graph Planner 本地工具实现
 
+> **2025-11-03 审核结论**：表格中的工具实现均在 `graph_planner/` 目录下确认存在，可作为当前提示协议的唯一事实来源。
+
 | 组件 | 作用 | 关键实现 | 当前用途 |
+
 | --- | --- | --- | --- |
-| `core/actions.py` | 定义 Planner 可以下发的 5 类动作（explore/memory/repair/submit/noop），规定每类字段与默认值，是文本协议与环境之间的结构桥梁。 | `ExploreAction`/`MemoryAction`/`RepairAction`/`SubmitAction`/`NoopAction` 模型约束了工具调用所需的 anchors、memory target/scope/intent、plan 等字段。【F:graph_planner/core/actions.py†L1-L40】 | Planner 环境根据动作类型分派到扩展、记忆维护、CGM 修复、提交或显式空操作。 |
-| `agents/rule_based/tool_policy.py` | 规则基线的“第 1 步”决策器，结合 issue 描述、失败栈与 token 预算，生成 anchors/terms/hop 等下一步探索配置并建议 `next_tool`。 | `decide(state, cfg)` 根据子图规模、失败路径与 token 软上限裁剪 anchors/terms，决定是否继续扩展或转入查看/测试。【F:graph_planner/agents/rule_based/tool_policy.py†L1-L200】 | 供规则版 Planner 与 RL 小头共享，确保后续工具调用有统一的输入。 |
-| `agents/rule_based/tool_selector.py` | “第 5 步”工具调度器，独立判定下一轮应执行 expand/view/search/edit/test/lint/noop，并附带优先测试列表。 | `choose_next_tool(state)` 按“刚修→test”“lint 失败→lint”“上下文不足→expand”等优先级切换工具；支持 RL 覆盖钩子。【F:graph_planner/agents/rule_based/tool_selector.py†L1-L200】 | 贯穿规则策略、RL 环境与评测脚本，决定 planner 动作序列。 |
-| `env/planner_env.py` | 运行时容器交互层，负责解析动作、执行 Sandbox 操作并回传 Observation。 | `_handle_repair` 先尝试直接应用 Planner 自带 patch，否则构造 `RepairRuntimeState` 调用文本协议修复链，最终把结果合并进 observation。【F:graph_planner/env/planner_env.py†L246-L305】 | 训练与评测时唯一的环境实现，向 rLLM 暴露 `BaseEnv` 接口。 |
+| `graph_planner/core/actions.py` | 定义 Planner 可以下发的 5 类动作（explore/memory/repair/submit/noop），规定每类字段与默认值，是文本协议与环境之间的结构桥梁。 | `ExploreAction`/`MemoryAction`/`RepairAction`/`SubmitAction`/`NoopAction` 模型约束了工具调用所需的 anchors、memory target/scope/intent、plan 等字段。【F:graph_planner/core/actions.py†L1-L40】 | Planner 环境根据动作类型分派到扩展、记忆维护、CGM 修复、提交或显式空操作。 |
+| `graph_planner/agents/rule_based/tool_policy.py` | 规则基线的“第 1 步”决策器，结合 issue 描述、失败栈与 token 预算，生成 anchors/terms/hop 等下一步探索配置并建议 `next_tool`。 | `decide(state, cfg)` 根据子图规模、失败路径与 token 软上限裁剪 anchors/terms，决定是否继续扩展或转入查看/测试。【F:graph_planner/agents/rule_based/tool_policy.py†L1-L200】 | 供规则版 Planner 与 RL 小头共享，确保后续工具调用有统一的输入。 |
+| `graph_planner/agents/rule_based/tool_selector.py` | “第 5 步”工具调度器，独立判定下一轮应执行 expand/view/search/edit/test/lint/noop，并附带优先测试列表。 | `choose_next_tool(state)` 按“刚修→test”“lint 失败→lint”“上下文不足→expand”等优先级切换工具；支持 RL 覆盖钩子。【F:graph_planner/agents/rule_based/tool_selector.py†L1-L200】 | 贯穿规则策略、RL 环境与评测脚本，决定 planner 动作序列。 |
+| `graph_planner/env/planner_env.py` | 运行时容器交互层，负责解析动作、执行 Sandbox 操作并回传 Observation。 | `_handle_repair` 先尝试直接应用 Planner 自带 patch，否则构造 `RepairRuntimeState` 调用文本协议修复链，最终把结果合并进 observation。【F:graph_planner/env/planner_env.py†L246-L305】 | 训练与评测时唯一的环境实现，向 rLLM 暴露 `BaseEnv` 接口。 |
 
 ## 2. 文本工具调用格式
 

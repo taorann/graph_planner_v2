@@ -31,7 +31,11 @@ from omegaconf import DictConfig, OmegaConf, open_dict
 from peft import LoraConfig, TaskType, get_peft_model
 from safetensors.torch import save_file
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp import (
+    FullyShardedDataParallel as FSDP,
+    MixedPrecision,
+    ShardingStrategy,
+)
 
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
@@ -496,21 +500,51 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # We wrap FSDP for rollout as well
         # --- MixedPrecision 与模型 dtype 对齐，避免 FSDP shard/flatten 时的 dtype 冲突 ---
-        mixed_precision_config = fsdp_config.get("mixed_precision", None)
-        if mixed_precision_config is not None:
-            param_dtype = PrecisionType.to_dtype(mixed_precision_config.get("param_dtype", torch_dtype))
-            reduce_dtype = PrecisionType.to_dtype(mixed_precision_config.get("reduce_dtype", "fp32"))
-            buffer_dtype = PrecisionType.to_dtype(mixed_precision_config.get("buffer_dtype", "fp32"))
-        else:
-            # 默认直接跟随模型权重 dtype（bf16 / fp16）
-            param_dtype = torch_dtype
-            reduce_dtype = torch.float32
-            buffer_dtype = torch.float32
+        try:
+            fsdp_cfg = OmegaConf.to_container(self.config.actor.fsdp_config, resolve=True)  # type: ignore[arg-type]
+        except Exception:
+            fsdp_cfg = getattr(self.config.actor, "fsdp_config", {}) or {}
+        if not isinstance(fsdp_cfg, dict):
+            try:
+                fsdp_cfg = dict(fsdp_cfg)
+            except Exception:
+                fsdp_cfg = {}
+
+        mp_cfg = fsdp_cfg.get("mixed_precision", {}) or {}
+        if not isinstance(mp_cfg, dict):
+            try:
+                mp_cfg = dict(mp_cfg)
+            except Exception:
+                mp_cfg = {}
+
+        def _to_dtype(value, default):
+            if isinstance(value, torch.dtype):
+                return value
+            if value is None:
+                return default
+            try:
+                key = str(value).lower()
+            except Exception:
+                return default
+            mapping = {
+                "bf16": torch.bfloat16,
+                "bfloat16": torch.bfloat16,
+                "fp16": torch.float16,
+                "float16": torch.float16,
+                "half": torch.float16,
+                "fp32": torch.float32,
+                "float32": torch.float32,
+            }
+            return mapping.get(key, default)
+
+        default_param_dtype = torch_dtype if torch_dtype is not None else torch.bfloat16
+        param_dtype = _to_dtype(mp_cfg.get("param_dtype"), default_param_dtype)
+        reduce_dtype = _to_dtype(mp_cfg.get("reduce_dtype"), torch.float32)
+        buffer_dtype = _to_dtype(mp_cfg.get("buffer_dtype"), torch.float32)
 
         if self.rank == 0:
             print(f"[fsdp.mp] param={param_dtype}, reduce={reduce_dtype}, buffer={buffer_dtype}")
 
-        from torch.distributed.fsdp import MixedPrecision
         mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
 
         auto_wrap_policy = get_fsdp_wrap_policy(
@@ -527,27 +561,56 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             print(f"wrap_policy: {auto_wrap_policy}")
 
         fsdp_mesh = self.device_mesh
-        sharding_strategy = get_sharding_strategy(fsdp_mesh)
+        base_sharding_strategy = get_sharding_strategy(fsdp_mesh)
+        shard_key = str(fsdp_cfg.get("sharding_strategy", "")).lower()
+        if shard_key in ("full_shard", "zero3", "fsdp"):
+            sharding_strategy = ShardingStrategy.FULL_SHARD
+        elif shard_key in ("hybrid_shard", "hybrid"):
+            sharding_strategy = ShardingStrategy.HYBRID_SHARD
+        else:
+            sharding_strategy = base_sharding_strategy
 
         # TODO: add transformer policy
         # We force reference policy to use CPUOffload to save memory.
         # We force turn off CPUOffload for actor because it causes incorrect results when using grad accumulation
-        cpu_offload = None if role == "actor" else CPUOffload(offload_params=True)
+        default_param_offload = role != "actor"
+        param_offload_flag = fsdp_cfg.get("param_offload", default_param_offload)
+        try:
+            param_offload_flag = bool(param_offload_flag)
+        except Exception:
+            param_offload_flag = default_param_offload
+        cpu_offload = CPUOffload(offload_params=True) if param_offload_flag else None
+        sync_flag = bool(fsdp_cfg.get("sync_module_states", True))
+        use_orig_params = bool(fsdp_cfg.get("use_orig_params", False))
+        forward_prefetch = bool(fsdp_cfg.get("forward_prefetch", False))
+
         fsdp_strategy = self.config.actor.strategy
         if fsdp_strategy == "fsdp":
+            if (
+                role == "actor"
+                and sync_flag
+                and any(param.device.type == "cpu" for param in actor_module.parameters())
+            ):
+                assert (
+                    get_device_id() is not None
+                ), "actor FSDP requires device_id when sync_module_states=True"
             actor_module_fsdp = FSDP(
                 actor_module,
                 cpu_offload=cpu_offload,
                 param_init_fn=init_fn,
                 auto_wrap_policy=auto_wrap_policy,
-                device_id=None,
-                sharding_strategy=sharding_strategy,  # zero3
+                device_id=get_device_id(),
+                sharding_strategy=sharding_strategy,
                 mixed_precision=mixed_precision,
-                sync_module_states=True,
+                sync_module_states=sync_flag,
                 device_mesh=self.device_mesh,
-                use_orig_params=self.config.actor.fsdp_config.get("use_orig_params", False),
-                forward_prefetch=self.config.actor.fsdp_config.get("forward_prefetch", False),
+                use_orig_params=use_orig_params,
+                forward_prefetch=forward_prefetch,
             )
+            if role == "actor":
+                print(
+                    f"[actor/fsdp] device_id={get_device_id()} sync_module_states={sync_flag} initialized OK"
+                )
         elif fsdp_strategy == "fsdp2":
             assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
             mp_policy = MixedPrecisionPolicy(
