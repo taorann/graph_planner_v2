@@ -367,11 +367,18 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             else:
                 self.tokenizer.chat_template = self.config.model.custom_chat_template
 
-        torch_dtype = fsdp_config.get("model_dtype", None)
-        if torch_dtype is None:
-            torch_dtype = torch.float32 if self._is_actor else torch.bfloat16
+        # --- dtype selection (FA2 友好 & 以参数 role 为准，避免 actor_rollout_ref 误判) ---
+        torch_dtype_cfg = fsdp_config.get("model_dtype", None)
+        if torch_dtype_cfg is None:
+            # CUDA 默认用 bf16，避免 FA2 的 fp32 限制；非 CUDA 环境退回 fp32
+            torch_dtype = torch.bfloat16 if device_name == "cuda" else torch.float32
         else:
-            torch_dtype = PrecisionType.to_dtype(torch_dtype)
+            torch_dtype = PrecisionType.to_dtype(torch_dtype_cfg)
+
+        # 调试打印，确保可见
+        if self.rank == 0:
+            print(f"[dtype] role={role}, resolved torch_dtype={torch_dtype}, device={device_name}")
+
 
         # override model kwargs
         actor_model_config = AutoConfig.from_pretrained(
@@ -433,7 +440,37 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
 
             # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
-            actor_module.to(torch_dtype)
+            # --- 确保模型先搬到本 GPU，再进入 FSDP，避免 CPU 张量触发 NCCL 广播报错 ---
+            dev_id = get_device_id()                 # int，比如 0/1/2/3
+            local_device = get_torch_device()        # torch.device，比如 cuda:0
+
+            if device_name == "cuda":
+                torch.cuda.set_device(dev_id)        # 绑定本线程到对应 GPU
+
+            # 显式同时设定 device 和 dtype（有些 buffer 只 .to(dtype) 不会迁 device）
+            # === ensure dtype compatible with flash-attn2, but leave device placement to FSDP ===
+            want_flash = getattr(actor_model_config, "attn_implementation", "") == "flash_attention_2"
+            if want_flash and torch_dtype == torch.float32:
+                print("[fsdp_workers] flash_attention_2 selected but dtype=fp32; switching actor dtype to bf16")
+                torch_dtype = torch.bfloat16
+
+            # 只改 dtype；设备放置交给 FSDP 的 device_id
+            # === ensure dtype compatible with flash-attn2, but leave device placement to FSDP ===
+            want_flash = getattr(actor_model_config, "attn_implementation", "") == "flash_attention_2"
+            if want_flash and torch_dtype == torch.float32:
+                print("[fsdp_workers] flash_attention_2 selected but dtype=fp32; switching actor dtype to bf16")
+                torch_dtype = torch.bfloat16
+
+            # 只改 dtype；设备放置交给 FSDP 的 device_id
+            actor_module.to(dtype=torch_dtype)
+
+
+            # 调试输出，确认设备与 dtype
+            if self.rank == 0:
+                uniq_devs = {p.device.type + (":" + str(p.device.index) if p.device.index is not None else "")
+                            for p in actor_module.parameters()}
+                print(f"[sanity] model devices={uniq_devs}, dtype of first param={next(actor_module.parameters()).dtype}")
+
 
             if enable_gradient_checkpointing:
                 actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
@@ -458,16 +495,22 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         log_gpu_memory_usage(f"After init {role} from HF AutoModel", logger=logger)
 
         # We wrap FSDP for rollout as well
+        # --- MixedPrecision 与模型 dtype 对齐，避免 FSDP shard/flatten 时的 dtype 冲突 ---
         mixed_precision_config = fsdp_config.get("mixed_precision", None)
         if mixed_precision_config is not None:
-            param_dtype = PrecisionType.to_dtype(mixed_precision_config.get("param_dtype", "bf16"))
+            param_dtype = PrecisionType.to_dtype(mixed_precision_config.get("param_dtype", torch_dtype))
             reduce_dtype = PrecisionType.to_dtype(mixed_precision_config.get("reduce_dtype", "fp32"))
             buffer_dtype = PrecisionType.to_dtype(mixed_precision_config.get("buffer_dtype", "fp32"))
         else:
-            param_dtype = torch.bfloat16
+            # 默认直接跟随模型权重 dtype（bf16 / fp16）
+            param_dtype = torch_dtype
             reduce_dtype = torch.float32
             buffer_dtype = torch.float32
 
+        if self.rank == 0:
+            print(f"[fsdp.mp] param={param_dtype}, reduce={reduce_dtype}, buffer={buffer_dtype}")
+
+        from torch.distributed.fsdp import MixedPrecision
         mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
 
         auto_wrap_policy = get_fsdp_wrap_policy(
@@ -497,7 +540,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 cpu_offload=cpu_offload,
                 param_init_fn=init_fn,
                 auto_wrap_policy=auto_wrap_policy,
-                device_id=get_device_id(),
+                device_id=None,
                 sharding_strategy=sharding_strategy,  # zero3
                 mixed_precision=mixed_precision,
                 sync_module_states=True,
