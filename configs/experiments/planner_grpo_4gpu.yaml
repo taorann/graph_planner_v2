@@ -41,7 +41,7 @@ env:
 
 graph_planner:
   shared_actors:
-    spawn: false  # Disable spawn for shared actors by default
+    spawn: true
   planner:
     propagate_via_ray: false
     env:
@@ -141,6 +141,7 @@ actor_rollout_ref:
       do_sample: false
       temperature: 0.0
     tensor_model_parallel_size: 2
+    enable_chunked_prefill: false 
     gpu_memory_utilization: ${system.topology.groups.planner.vllm.gpu_memory_utilization}
     max_model_len: ${system.topology.groups.planner.vllm.max_model_len}
     log_prob_micro_batch_size: ${actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu}
@@ -207,6 +208,12 @@ parallel:
   tensor_parallel_cgm: 2
 
 resources:
+  requests:
+    memory: "16Gi"  # 最低内存请求
+    cpu: "4"        # 最低 CPU 请求
+  limits:
+    memory: "32Gi"  # 最大内存限制
+    cpu: "8"        # 最大 CPU 限制
   num_gpus: 4
   ray_cpus: 16
   ray_gpus: 4

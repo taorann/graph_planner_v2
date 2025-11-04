@@ -2108,15 +2108,19 @@ class RayPPOTrainer:
                     "Planner FSDP world size exceeds configured GPU list; cannot assign unique GPUs"
                 )
             planner_worker_env_overrides = []
+            visible = ",".join(str(i) for i in planner_gpus)  # "0,1"
+            planner_worker_env_overrides = []
             for rank in range(fsdp_world):
-                gpu_id = planner_gpus[rank]
                 actor_env = {
-                    "CUDA_VISIBLE_DEVICES": str(gpu_id),
-                    "LOCAL_RANK": "0",
+                    # 每个worker都能看到这组卡
+                    "CUDA_VISIBLE_DEVICES": visible,
+                    # 但是通过rank来区分自己是谁
+                    "LOCAL_RANK": str(rank),
                     "RANK": str(rank),
                     "WORLD_SIZE": str(fsdp_world),
                 }
                 planner_worker_env_overrides.append(actor_env)
+
 
         _oc_set(self.config, "actor_rollout_ref.actor.fsdp_config.fsdp_size", fsdp_world)
         print(f"[planner] fsdp_size set to {fsdp_world} prior to worker init")
@@ -2136,11 +2140,16 @@ class RayPPOTrainer:
                 int(planner_tp),
             )
 
+        n_gpus_per_node = int(
+            OmegaConf.select(self.config, "trainer.n_gpus_per_node", default=len(planner_cfg.gpus))
+        )
+        
         planner_pool = RayResourcePool(
             process_on_nodes=[len(planner_cfg.gpus)],
             use_gpu=True,
             name_prefix=f"planner-{self._run_id}",
             max_colocate_count=1,
+            n_gpus_per_node=n_gpus_per_node,   # ← 关键补这一行
         )
 
         profile_option = OmegaConf.select(self.config, "trainer.npu_profile.options", default=None)

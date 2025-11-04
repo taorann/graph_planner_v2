@@ -594,20 +594,25 @@ def main() -> None:
         return
 
     address = _resolve_ray_address(args, cfg)
-
+    
     if address is None:
-        LOGGER.info(
-            "No Ray address provided via CLI/env/config; starting a fresh local Ray runtime."
+        LOGGER.info("No Ray address provided via CLI/env/config; starting a fresh local Ray runtime.")
+        # 强制本进程本地，不要自动发现
+        ray.init(
+            address="local",                 # ←← 这里以前是 None
+            runtime_env=runtime_env or None,
+            ignore_reinit_error=False,
+            namespace="graph-planner",
         )
     else:
         LOGGER.info("Connecting to Ray using address=%s", address)
+        ray.init(
+            address=address,
+            runtime_env=runtime_env or None,
+            ignore_reinit_error=False,
+            namespace="graph-planner",
+        )
 
-    ray.init(
-        address=address,
-        runtime_env=runtime_env or None,
-        ignore_reinit_error=False,
-        namespace="graph-planner",
-    )
 
     try:
         spawn_shared = spawn_shared_requested

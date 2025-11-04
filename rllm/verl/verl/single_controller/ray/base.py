@@ -90,6 +90,7 @@ class RayResourcePool(ResourcePool):
         max_colocate_count: int = 10,
         detached=False,
         accelerator_type: Optional[str] = None,
+        n_gpus_per_node: int | None = None,
     ) -> None:
         super().__init__(process_on_nodes, max_colocate_count)
         self.use_gpu = use_gpu
@@ -98,7 +99,11 @@ class RayResourcePool(ResourcePool):
         self.pgs = None
         self.detached = detached
         self.accelerator_type = accelerator_type
-
+        if n_gpus_per_node is not None:
+            self.n_gpus_per_node = int(n_gpus_per_node)
+        else:
+            self.n_gpus_per_node = 8  
+            
     def get_placement_groups(self, strategy="STRICT_PACK", name=None, device_name="cuda"):
         if self.pgs is not None:
             return self.pgs
