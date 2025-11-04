@@ -14,7 +14,7 @@ system:
         gpus: [0, 1]                     # [UPDATED] 由 [4,5] 改为逻辑编号 [0,1]；结合 CUDA_VISIBLE_DEVICES=4,5,6,7 做重映射
         fsdp_size: 2
         vllm:
-          tp: 2
+          tp: 1
           gpu_memory_utilization: 0.65   # [UPDATED] 由 0.90 下调，降低启动/预热期显存峰值
           max_model_len: 24576           # [UPDATED] 由 32768 下调；与 data.max_prompt+max_response 对齐
           max_num_seqs: 8                # [UPDATED] 限制启动/调度并发，缓解 profile_run OOM
