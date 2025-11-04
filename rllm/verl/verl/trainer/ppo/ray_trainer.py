@@ -2109,15 +2109,14 @@ class RayPPOTrainer:
                 )
             planner_worker_env_overrides = []
             for rank in range(fsdp_world):
-                gpu_id = planner_gpus[rank]
                 actor_env = {
-                    # Each worker only sees its assigned GPU
-                    "CUDA_VISIBLE_DEVICES": str(gpu_id),
                     "LOCAL_RANK": "0",
                     "RANK": str(rank),
                     "WORLD_SIZE": str(fsdp_world),
                 }
                 planner_worker_env_overrides.append(actor_env)
+
+
 
 
         _oc_set(self.config, "actor_rollout_ref.actor.fsdp_config.fsdp_size", fsdp_world)
@@ -2354,8 +2353,6 @@ class RayPPOTrainer:
         self.ref_policy_wg = None
         self.rm_wg = None
 
-        # Disable old rollout.mode=="async" path under topology; use snapshot pipeline switches instead
-        self.async_rollout_manager = None
         pipeline_cfg = _oc_get(_oc_get(self.config, "system", {}), "pipeline", {})
         self.async_pipeline_mode = bool(_oc_get(pipeline_cfg, "async_mode", False))
         self.pipeline_max_policy_version_lag = int(_oc_get(pipeline_cfg, "max_policy_version_lag", 0) or 0)

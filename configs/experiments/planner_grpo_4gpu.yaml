@@ -4,8 +4,8 @@
 paths:
   planner_model: models/Qwen3-14B
   planner_tokenizer: models/Qwen3-14B
-  cgm_model: /map-vepfs/taoran/CodeFuse-CGM/infra_model
-  cgm_tokenizer: /map-vepfs/taoran/CodeFuse-CGM/infra_model
+  cgm_model: models/CodeFuse-CGM
+  cgm_tokenizer: models/CodeFuse-CGM
 
 system:
   topology:
@@ -31,7 +31,7 @@ system:
           enforce_eager: true            # [NEW]
   rollout:
     batch_size_per_worker: 2
-    num_workers_per_group: 1
+    num_workers_per_group: 2
   pipeline:
     async_mode: false
 
@@ -103,6 +103,10 @@ actor_rollout_ref:
     use_remove_padding: true
   hybrid_engine: true
   actor:
+    ppo_epochs: 1
+    checkpoint:
+      load_contents: ["model", "optimizer", "lr_scheduler"]
+      save_contents: []
     fsdp_mixed_precision:
       param_dtype: float16
       reduce_dtype: float32
@@ -133,7 +137,7 @@ actor_rollout_ref:
     disable_log_stats: false     
     free_cache_engine: false    
     calculate_log_probs: true  
-    mode: sync                     # [UPDATED] 由 async 改为 sync，减少并发时启动期内存压力
+    mode: async                     # [UPDATED] 由 async 改为 sync，减少并发时启动期内存压力
     batch_size_per_worker: 2
     num_workers_per_group: 1
     prompt_length: ${data.max_prompt_length}     # [NEW] 修复 Key 'prompt_length' not in struct
@@ -147,7 +151,7 @@ actor_rollout_ref:
       temperature: 0.0
       top_k: -1                  # ←⑥ 新增
       top_p: 1.0                 # ←⑥ 新增
-    tensor_model_parallel_size: 2
+    tensor_model_parallel_size: 1
     enable_chunked_prefill: false 
     gpu_memory_utilization: ${system.topology.groups.planner.vllm.gpu_memory_utilization}
     max_model_len: ${system.topology.groups.planner.vllm.max_model_len}
@@ -171,9 +175,13 @@ actor_rollout_ref:
 rllm:
   stepwise_advantage:
     enable: false
+  disable_thinking: false            # ← new
+  mask_truncated_samples: false      # ← new
+  rejection_sample:                  # ← new  
   env:
     name: graph_planner_repoenv
   agent:
+    trajectory_timeout: 300  
     name: graph_planner_repoenv
     max_steps: 50
     overlong_filter: true
