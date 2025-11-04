@@ -75,7 +75,16 @@ def _pre_process_inputs(pad_token_id, prompt_token_ids: torch.Tensor) -> list[in
 
 
 class vLLMRollout(BaseRollout):
-    def __init__(self, model_path: str, config: DictConfig, tokenizer, model_hf_config, **kwargs):
+    def __init__(
+        self,
+        model_path: str,
+        config: DictConfig,
+        tokenizer: Any,
+        model_hf_config: Any,
+        *,
+        local_device_id: int = 0,
+        **kwargs,
+    ):
         """A vLLM rollout. It requires the module is supported by the vllm.
 
         Args:
@@ -87,6 +96,7 @@ class vLLMRollout(BaseRollout):
         """
         super().__init__()
         self.config = config
+        self.local_device_id = local_device_id
 
         tensor_parallel_size = self.config.get("tensor_model_parallel_size", 1)
         assert tensor_parallel_size <= torch.distributed.get_world_size(), (
@@ -162,6 +172,14 @@ class vLLMRollout(BaseRollout):
         if config.get("limit_images", None):  # support for multi-image data
             engine_kwargs["limit_mm_per_prompt"] = {"image": config.get("limit_images")}
 
+        if "device" in engine_kwargs:
+            logger.warning(
+                "Overriding vLLM engine device=%s with local_device_id=%s",
+                engine_kwargs["device"],
+                self.local_device_id,
+            )
+            engine_kwargs.pop("device", None)
+
         self.inference_engine = LLM(
             model=model_path,
             enable_sleep_mode=config.free_cache_engine,
@@ -180,6 +198,7 @@ class vLLMRollout(BaseRollout):
             enable_prefix_caching=True,
             trust_remote_code=trust_remote_code,
             seed=config.get("seed", 0),
+            device=f"cuda:{self.local_device_id}",
             **lora_kwargs,
             **engine_kwargs,
         )

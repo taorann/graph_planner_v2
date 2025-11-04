@@ -734,6 +734,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             from verl.workers.rollout.vllm_rollout import vLLMAsyncRollout
 
             vllm_rollout_cls = vLLMRollout if self.config.rollout.mode == "sync" else vLLMAsyncRollout
+            local_device_id = get_device_id()
             rollout = vllm_rollout_cls(
                 model_path=local_path,
                 config=self.config.rollout,
@@ -741,6 +742,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 model_hf_config=self.actor_model_config,
                 device_mesh=rollout_device_mesh,
                 trust_remote_code=trust_remote_code,
+                local_device_id=0 if local_device_id is None else int(local_device_id),
                 **lora_kwargs,
             )
 
