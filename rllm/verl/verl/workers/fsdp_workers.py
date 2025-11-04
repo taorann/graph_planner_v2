@@ -510,6 +510,19 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             except Exception:
                 fsdp_cfg = {}
 
+        sync_flag = bool(fsdp_cfg.get("sync_module_states", True))
+        if sync_flag and any(param.device.type == "cpu" for param in actor_module.parameters()):
+            dev_id = get_device_id()
+            if dev_id is not None:
+                try:
+                    torch.cuda.set_device(dev_id)
+                except Exception:
+                    pass
+                try:
+                    actor_module.to(f"cuda:{dev_id}")
+                except Exception:
+                    pass
+
         mp_cfg = fsdp_cfg.get("mixed_precision", {}) or {}
         if not isinstance(mp_cfg, dict):
             try:
@@ -580,7 +593,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         except Exception:
             param_offload_flag = default_param_offload
         cpu_offload = CPUOffload(offload_params=True) if param_offload_flag else None
-        sync_flag = bool(fsdp_cfg.get("sync_module_states", True))
         use_orig_params = bool(fsdp_cfg.get("use_orig_params", False))
         forward_prefetch = bool(fsdp_cfg.get("forward_prefetch", False))
 

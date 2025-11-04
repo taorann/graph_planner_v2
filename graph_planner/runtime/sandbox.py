@@ -52,18 +52,24 @@ class SandboxRuntime:
       - "docker"   : 纯 docker-py（最自由）
       - "auto"     : 有 ds 用 "repoenv"，否则 "docker"
     """
-    def __init__(self, cfg: SandboxConfig):
+    def __init__(self, cfg: SandboxConfig, force_backend: Optional[str] = None):
         self.cfg = cfg
-        mode = cfg.backend
-        if mode == "auto":
-            # 有 ds 就用 repoenv（官方评测优先），否则降级 docker
-            mode = "repoenv" if (_HAS_R2E and cfg.r2e_ds_json and os.path.exists(cfg.r2e_ds_json)) else "docker"
-        self._mode = mode
+        preferred_mode = force_backend or cfg.backend or "docker"
+        if preferred_mode == "auto":
+            preferred_mode = (
+                "repoenv" if (_HAS_R2E and cfg.r2e_ds_json and os.path.exists(cfg.r2e_ds_json)) else "docker"
+            )
+        self._mode = preferred_mode
 
         self._env = None  # only populated when using RepoEnv as the backend
 
         if self._mode == "repoenv":
-            self._init_repoenv_backend()
+            try:
+                self._init_repoenv_backend()
+            except Exception as e:
+                _dbg(f"repoenv init failed: {e!r}; falling back to docker")
+                self._mode = "docker"
+                self._init_docker_backend()
         elif self._mode == "r2e":
             self._init_r2e_backend()
         else:

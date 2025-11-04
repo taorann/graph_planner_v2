@@ -602,7 +602,12 @@ def main() -> None:
     else:
         LOGGER.info("Connecting to Ray using address=%s", address)
 
-    ray.init(address=address, runtime_env=runtime_env or None, ignore_reinit_error=False)
+    ray.init(
+        address=address,
+        runtime_env=runtime_env or None,
+        ignore_reinit_error=False,
+        namespace="graph-planner",
+    )
 
     try:
         spawn_shared = spawn_shared_requested
@@ -613,10 +618,7 @@ def main() -> None:
             except Exception:
                 cluster_gpus = 0
             if cluster_gpus and cluster_gpus <= topology_gpu_budget:
-                print(
-                    "[shared-actors] skipping spawn: topology consumes "
-                    f"{topology_gpu_budget} GPUs (cluster has {cluster_gpus})"
-                )
+                print("[shared-actors] skipping spawn due to insufficient GPU resources")
                 spawn_shared = False
 
         planner_engine = _ensure_shared_actor(
