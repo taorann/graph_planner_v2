@@ -11,6 +11,9 @@ system:
   topology:
     groups:
       planner:
+        num_gpus: 2
+        env_vars:
+          CUDA_VISIBLE_DEVICES: "0,1"
         gpus: [0, 1]                     # [UPDATED] 由 [4,5] 改为逻辑编号 [0,1]；结合 CUDA_VISIBLE_DEVICES=4,5,6,7 做重映射
         fsdp_size: 2
         vllm:
@@ -20,8 +23,15 @@ system:
           max_num_seqs: 8                # [UPDATED] 限制启动/调度并发，缓解 profile_run OOM
           kv_cache_dtype: fp16           # [NEW] 使用 FP16 KV cache
           enforce_eager: true            # [NEW] 规避 compile/cudagraph 带来的显存尖峰
+      rollout:
+        num_gpus: 0
+        env_vars:
+          CUDA_VISIBLE_DEVICES: "0,1"
       cgm:
         gpus: [2, 3]                     # [UPDATED] 由 [6,7] 改为逻辑编号 [2,3]
+        num_gpus: 2
+        env_vars:
+          CUDA_VISIBLE_DEVICES: "2,3"
         vllm:
           tp: 2
           gpu_memory_utilization: 0.60   # [UPDATED]
@@ -135,7 +145,7 @@ actor_rollout_ref:
     load_format: dummy
     dtype: float16               
     disable_log_stats: false     
-    free_cache_engine: false    
+    free_cache_engine: true    
     calculate_log_probs: true  
     mode: async                     # 改回异步以启用 AsyncActorRolloutRefWorker
     batch_size_per_worker: 2

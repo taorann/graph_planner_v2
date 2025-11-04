@@ -53,9 +53,11 @@ class AgentPPOTrainer(RayPPOTrainer):
     ):
         super().__init__(config=config, tokenizer=tokenizer, role_worker_mapping=role_worker_mapping, resource_pool_manager=resource_pool_manager, ray_worker_group_cls=ray_worker_group_cls, reward_fn=reward_fn, val_reward_fn=val_reward_fn)
         self.config = config
-        # async rollout removed → use sync-only
-        self.rollout_mode = "sync"
-        LOGGER.info("[AgentPPOTrainer] rollout_mode=sync (async path removed)")
+        
+        self.rollout_mode = getattr(
+            self.config.actor_rollout_ref.rollout, "mode", "sync"
+        )
+        LOGGER.info(f"[AgentPPOTrainer] rollout_mode={self.rollout_mode}")
         self.env_class = env_class
         self.agent_class = agent_class
         self.env_args = env_args or {}
