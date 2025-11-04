@@ -2110,6 +2110,7 @@ class RayPPOTrainer:
             planner_worker_env_overrides = []
             for rank in range(fsdp_world):
                 actor_env = {
+                    "CUDA_VISIBLE_DEVICES": "0",
                     "LOCAL_RANK": "0",
                     "RANK": str(rank),
                     "WORLD_SIZE": str(fsdp_world),
@@ -2348,6 +2349,8 @@ class RayPPOTrainer:
             self.cgm_actor = None
             print("[Topology] CGM vLLM disabled (no GPUs)")
         self.worker_groups["cgm"] = None
+
+        # NOTE: keep self.async_rollout_manager intact so async rollouts stay available.
 
         self.critic_wg = None
         self.ref_policy_wg = None

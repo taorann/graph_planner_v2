@@ -121,8 +121,17 @@ class AgentPPOTrainer(RayPPOTrainer):
     def init_workers(self):
         super().init_workers()
 
+        rollout_engine = getattr(self, "async_rollout_manager", None)
+        if rollout_engine is None:
+            rollout_engine = getattr(self, "actor_rollout_wg", None)
+
+        if rollout_engine is None:
+            raise RuntimeError(
+                "No rollout engine available: expected async_rollout_manager or actor_rollout_wg"
+            )
+
         self.agent_execution_engine = AsyncAgentExecutionEngine(
-            rollout_engine=self.async_rollout_manager,
+            rollout_engine=rollout_engine,
             config=self.config,
             engine_name="verl",
             tokenizer=self.tokenizer,
