@@ -128,6 +128,11 @@ actor_rollout_ref:
       optimizer_offload: false
   rollout:
     name: vllm
+    load_format: dummy
+    dtype: float16               
+    disable_log_stats: false     
+    free_cache_engine: false    
+    calculate_log_probs: true  
     mode: sync                     # [UPDATED] 由 async 改为 sync，减少并发时启动期内存压力
     batch_size_per_worker: 2
     num_workers_per_group: 1
@@ -140,6 +145,8 @@ actor_rollout_ref:
       n: 1
       do_sample: false
       temperature: 0.0
+      top_k: -1                  # ←⑥ 新增
+      top_p: 1.0                 # ←⑥ 新增
     tensor_model_parallel_size: 2
     enable_chunked_prefill: false 
     gpu_memory_utilization: ${system.topology.groups.planner.vllm.gpu_memory_utilization}
@@ -147,6 +154,7 @@ actor_rollout_ref:
     log_prob_micro_batch_size: ${actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu}
     log_prob_use_dynamic_bsz: true
     log_prob_micro_batch_size_per_gpu: 1
+    multi_stage_wake_up: false   # ←⑧ 新增
     agent:
       num_workers: 8
     multi_turn:
