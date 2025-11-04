@@ -40,6 +40,8 @@ env:
   reuse_container: true
 
 graph_planner:
+  shared_actors:
+    spawn: false  # Disable spawn for shared actors by default
   planner:
     propagate_via_ray: false
     env:

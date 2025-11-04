@@ -16,7 +16,7 @@ import inspect
 import logging
 import time
 from copy import deepcopy
-from typing import Any, Optional
+from typing import Any, Mapping, Optional, Sequence
 
 import ray
 from ray.experimental.state.api import get_actor
@@ -270,6 +270,7 @@ class RayWorkerGroup(WorkerGroup):
         worker_names=None,
         worker_handles: list[ray.actor.ActorHandle] = None,
         ray_wait_register_center_timeout: int = 300,
+        worker_env_overrides: Any = None,
         **kwargs,
     ) -> None:
         """Initialize a RayWorkerGroup.
@@ -302,6 +303,15 @@ class RayWorkerGroup(WorkerGroup):
         if worker_names is not None and (not self.fused_worker_used):
             assert self._is_init_with_detached_workers
             self._worker_names = worker_names
+
+        self._worker_env_overrides = worker_env_overrides
+        base_runtime_env = self.ray_cls_with_init._options.get("runtime_env", {}) if self.ray_cls_with_init else {}
+        if base_runtime_env:
+            self._base_runtime_env = deepcopy(base_runtime_env)
+            self._base_env_vars = dict(base_runtime_env.get("env_vars", {}) or {})
+        else:
+            self._base_runtime_env = {}
+            self._base_env_vars = {}
 
         if self._is_init_with_detached_workers:
             self._init_with_detached_workers(worker_names=worker_names, worker_handles=worker_handles)
@@ -365,14 +375,40 @@ class RayWorkerGroup(WorkerGroup):
                 rank += 1
 
                 # we pass in environment variable at option so that Worker can use environment variable to set
-                env_vars = {
-                    "WORLD_SIZE": str(world_size),
-                    "RANK": str(rank),
-                    "WG_PREFIX": self.name_prefix,
-                    "WG_BACKEND": "ray",
-                    "RAY_LOCAL_WORLD_SIZE": str(local_world_size),
-                    "RAY_LOCAL_RANK": str(local_rank),
-                }
+                runtime_env = deepcopy(self._base_runtime_env) if self._base_runtime_env else {}
+                env_vars = dict(runtime_env.get("env_vars", {}) or {})
+                env_vars.update(
+                    {
+                        "WORLD_SIZE": str(world_size),
+                        "RANK": str(rank),
+                        "WG_PREFIX": self.name_prefix,
+                        "WG_BACKEND": "ray",
+                        "RAY_LOCAL_WORLD_SIZE": str(local_world_size),
+                        "RAY_LOCAL_RANK": str(local_rank),
+                    }
+                )
+                overrides = self._worker_env_overrides
+                custom_env = None
+                if overrides is not None:
+                    if callable(overrides):
+                        custom_env = overrides(rank=rank, local_rank=local_rank)
+                    elif isinstance(overrides, Mapping):
+                        custom_env = overrides.get(rank) or overrides.get(str(rank))
+                    elif isinstance(overrides, Sequence) and not isinstance(overrides, (str, bytes)):
+                        if rank < len(overrides):
+                            custom_env = overrides[rank]
+                if custom_env:
+                    if isinstance(custom_env, Mapping):
+                        items = custom_env.items()
+                    else:
+                        try:
+                            items = dict(custom_env).items()
+                        except Exception:
+                            items = []
+                    for key, value in items:
+                        if value is None:
+                            continue
+                        env_vars[str(key)] = str(value)
                 if rank != 0:
                     env_vars["MASTER_ADDR"] = self._master_addr
                     env_vars["MASTER_PORT"] = self._master_port
@@ -387,15 +423,12 @@ class RayWorkerGroup(WorkerGroup):
                 if self.profile_steps and self.device_name == "cuda":
                     ray_cls_with_init.update_options(
                         {
-                            "runtime_env": {
-                                "env_vars": env_vars,
-                                "nsight": self.worker_nsight_options,
-                            },
+                            "runtime_env": {**runtime_env, "env_vars": env_vars, "nsight": self.worker_nsight_options},
                             "name": name,
                         }
                     )
                 else:
-                    ray_cls_with_init.update_options({"runtime_env": {"env_vars": env_vars}, "name": name})
+                    ray_cls_with_init.update_options({"runtime_env": {**runtime_env, "env_vars": env_vars}, "name": name})
 
                 if detached:
                     ray_cls_with_init.update_options({"lifetime": "detached"})

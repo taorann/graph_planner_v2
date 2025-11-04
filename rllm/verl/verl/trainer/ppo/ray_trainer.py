@@ -2099,15 +2099,25 @@ class RayPPOTrainer:
 
         if self._run_id:
             env_vars["GRAPH_PLANNER_RUN_ID"] = str(self._run_id)
-        if planner_cfg.gpus:
-            env_vars["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in planner_cfg.gpus)
-        if "CUDA_VISIBLE_DEVICES" in env_vars:
-            preview = list(env_vars.keys())[:6]
-            print(
-                f"[topology] group=planner cuda_visible={env_vars['CUDA_VISIBLE_DEVICES']} env_keys={preview}..."
-            )
-
         fsdp_world = int(planner_cfg.fsdp_size or len(planner_cfg.gpus))
+        planner_gpus = list(planner_cfg.gpus or [])
+        planner_worker_env_overrides = None
+        if planner_gpus:
+            if fsdp_world > len(planner_gpus):
+                raise ValueError(
+                    "Planner FSDP world size exceeds configured GPU list; cannot assign unique GPUs"
+                )
+            planner_worker_env_overrides = []
+            for rank in range(fsdp_world):
+                gpu_id = planner_gpus[rank]
+                actor_env = {
+                    "CUDA_VISIBLE_DEVICES": str(gpu_id),
+                    "LOCAL_RANK": "0",
+                    "RANK": str(rank),
+                    "WORLD_SIZE": str(fsdp_world),
+                }
+                planner_worker_env_overrides.append(actor_env)
+
         _oc_set(self.config, "actor_rollout_ref.actor.fsdp_config.fsdp_size", fsdp_world)
         print(f"[planner] fsdp_size set to {fsdp_world} prior to worker init")
         print(f"FSDP planner world_size={fsdp_world} on GPUs {planner_cfg.gpus}")
@@ -2148,6 +2158,7 @@ class RayPPOTrainer:
             resource_pool=planner_pool,
             ray_cls_with_init=planner_cls,
             device_name=self.device_name,
+            worker_env_overrides=planner_worker_env_overrides,
         )
         wanted_prefixes = {
             "actor_rollout",
