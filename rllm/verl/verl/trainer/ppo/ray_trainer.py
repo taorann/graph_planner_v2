@@ -2200,10 +2200,16 @@ class RayPPOTrainer:
         profile_option = OmegaConf.select(self.config, "trainer.npu_profile.options", default=None)
 
         use_dedicated_rollout = isinstance(rollout_cfg, MappingABC) and bool(rollout_cfg)
-
-        if use_dedicated_rollout and Role.Actor in self.role_worker_mapping:
+        has_separate_actor_cfg = _oc_get(self.config, "actor_rollout_ref.actor", None) is not None
+        
+        if use_dedicated_rollout and has_separate_actor_cfg:
+            # 即便 role_worker_mapping 里没挂 Role.Actor，也强行用 actor 的这段配置
+            actor_cls = self.role_worker_mapping.get(getattr(Role, "Actor", None), None)
+            if actor_cls is None:
+                # 没有专门的类，就还是用 rollout 的类，但走 actor 的配置
+                actor_cls = self.role_worker_mapping[Role.ActorRollout]
             planner_cls = RayClassWithInitArgs(
-                cls=self.role_worker_mapping[Role.Actor],
+                cls=actor_cls,
                 config=self.config.actor_rollout_ref.actor,
                 role="actor",
                 profile_option=profile_option,
@@ -2215,9 +2221,11 @@ class RayPPOTrainer:
                 role="actor_rollout",
                 profile_option=profile_option,
             )
+
         if env_vars:
             planner_cls.update_options({"runtime_env": {"env_vars": env_vars}})
-
+        planner_cls.update_options({"num_gpus": 1})
+            
         planner_wg_root = self.ray_worker_group_cls(
             resource_pool=planner_pool,
             ray_cls_with_init=planner_cls,
@@ -2310,7 +2318,10 @@ class RayPPOTrainer:
 
         self.worker_groups["planner"] = planner_wg
         self.planner_trainer = planner_wg
-        self.actor_rollout_wg = planner_wg
+        
+        # 只有没有拓扑版 rollout 时，才把 planner 当成 rollout 用
+        if not (isinstance(rollout_cfg, MappingABC) and rollout_cfg):
+            self.actor_rollout_wg = planner_wg
 
         rollout_wg: RayWorkerGroup | None = None
         if isinstance(rollout_cfg, MappingABC) and rollout_cfg:
@@ -2334,6 +2345,8 @@ class RayPPOTrainer:
                 profile_option=profile_option,
             )
 
+
+                
             rollout_env_vars = rollout_cfg.get("env_vars") if isinstance(rollout_cfg, MappingABC) else None
             if isinstance(rollout_env_vars, DictConfig):
                 rollout_env_vars = OmegaConf.to_container(rollout_env_vars, resolve=True)
@@ -2347,6 +2360,13 @@ class RayPPOTrainer:
             if runtime_env:
                 rollout_cls.update_options({"runtime_env": runtime_env})
 
+            # 在决定不用 GPU 的情况下，告诉 Ray 明确是 0
+            if not rollout_need_gpu:
+                rollout_cls.update_options({"num_gpus": 0})
+            else:
+                rollout_cls.update_options({"num_gpus": 1})
+                
+            
             rollout_wg = self.ray_worker_group_cls(
                 resource_pool=rollout_pool,
                 ray_cls_with_init=rollout_cls,
