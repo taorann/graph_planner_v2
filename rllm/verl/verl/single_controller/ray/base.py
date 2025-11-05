@@ -242,10 +242,58 @@ class RayClassWithInitArgs(ClassWithInitArgs):
         }
         options.update(self._options)
 
-        if use_gpu and device_name == "cuda":
-            options["num_gpus"] = num_gpus
-        if use_gpu and device_name == "npu":
-            options["resources"] = {"NPU": num_gpus}
+        def _to_float(value):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        effective_use_gpu = use_gpu
+        explicit_num_gpus_float = _to_float(options.get("num_gpus", None))
+        passed_num_gpus_float = _to_float(num_gpus)
+        resolved_num_gpus = (
+            explicit_num_gpus_float
+            if explicit_num_gpus_float is not None
+            else passed_num_gpus_float
+        )
+
+        if explicit_num_gpus_float is not None and explicit_num_gpus_float <= 0:
+            options.pop("num_gpus", None)
+            resolved_num_gpus = None
+            effective_use_gpu = False
+
+        if effective_use_gpu and device_name == "cuda":
+            if resolved_num_gpus is None or resolved_num_gpus <= 0:
+                options.pop("num_gpus", None)
+                effective_use_gpu = False
+            else:
+                options["num_gpus"] = resolved_num_gpus
+        elif effective_use_gpu and device_name == "npu":
+            if "resources" in options and isinstance(options["resources"], Mapping):
+                existing_resources = dict(options["resources"])
+            else:
+                existing_resources = {}
+
+            resolved_float = resolved_num_gpus
+            if resolved_float is None or resolved_float <= 0:
+                existing_resources.pop("NPU", None)
+                effective_use_gpu = False
+            else:
+                existing_resources["NPU"] = resolved_float
+
+            if existing_resources:
+                options["resources"] = existing_resources
+            else:
+                options.pop("resources", None)
+        else:
+            options.pop("num_gpus", None)
+            resources = options.get("resources")
+            if isinstance(resources, Mapping):
+                cleaned_resources = {k: v for k, v in resources.items() if k.upper() not in {"GPU", "NPU"}}
+                if cleaned_resources:
+                    options["resources"] = cleaned_resources
+                else:
+                    options.pop("resources", None)
 
         if len(self._additional_resource) > 1:
             for k, v in self._additional_resource.items():
@@ -438,12 +486,19 @@ class RayWorkerGroup(WorkerGroup):
                 if detached:
                     ray_cls_with_init.update_options({"lifetime": "detached"})
 
+                has_cuda_visible_override = "CUDA_VISIBLE_DEVICES" in env_vars
+                per_worker_num_gpus = num_gpus
+                effective_use_gpu = use_gpu
+                if has_cuda_visible_override and self.device_name == "cuda":
+                    per_worker_num_gpus = 0
+                    effective_use_gpu = False
+
                 # create a worker
                 worker = ray_cls_with_init(
                     placement_group=pg,
                     placement_group_bundle_idx=local_rank,
-                    use_gpu=use_gpu,
-                    num_gpus=num_gpus,
+                    use_gpu=effective_use_gpu,
+                    num_gpus=per_worker_num_gpus,
                     device_name=self.device_name,
                 )
                 self._workers.append(worker)
