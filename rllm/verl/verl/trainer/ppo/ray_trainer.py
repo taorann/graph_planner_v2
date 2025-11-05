@@ -2154,9 +2154,9 @@ class RayPPOTrainer:
                     "Planner FSDP world size exceeds configured GPU list; cannot assign unique GPUs"
                 )
             planner_worker_env_overrides = []
-            for rank in range(fsdp_world):
+            for rank, gpu_id in enumerate(planner_gpus[:fsdp_world]):
                 actor_env = {
-                    "CUDA_VISIBLE_DEVICES": "0",
+                    "CUDA_VISIBLE_DEVICES": str(gpu_id),
                     "LOCAL_RANK": "0",
                     "RANK": str(rank),
                     "WORLD_SIZE": str(fsdp_world),
