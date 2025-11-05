@@ -2156,7 +2156,7 @@ class RayPPOTrainer:
             planner_worker_env_overrides = []
             for rank, gpu_id in enumerate(planner_gpus[:fsdp_world]):
                 actor_env = {
-                    "CUDA_VISIBLE_DEVICES": str(gpu_id),
+                    "CUDA_VISIBLE_DEVICES": str(gpu_id),  
                     "LOCAL_RANK": "0",
                     "RANK": str(rank),
                     "WORLD_SIZE": str(fsdp_world),
@@ -2447,7 +2447,6 @@ class RayPPOTrainer:
                 if isinstance(group_env, MappingABC):
                     cgm_env.update({str(k): str(v) for k, v in group_env.items() if v is not None})
 
-                cgm_env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, cgm_group.gpus))
                 preview = list(cgm_env.keys())[:6]
                 print(
                     f"[topology] group=cgm cuda_visible={cgm_env['CUDA_VISIBLE_DEVICES']} env_keys={preview}..."

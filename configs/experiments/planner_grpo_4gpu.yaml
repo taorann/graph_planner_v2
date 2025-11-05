@@ -23,10 +23,10 @@ system:
           max_num_seqs: 8                # [UPDATED] 限制启动/调度并发，缓解 profile_run OOM
           kv_cache_dtype: fp16           # [NEW] 使用 FP16 KV cache
           enforce_eager: true            # [NEW] 规避 compile/cudagraph 带来的显存尖峰
-      rollout:
-        num_gpus: 0
-        env_vars:
-          CUDA_VISIBLE_DEVICES: "0,1"
+      # rollout:
+      #   num_gpus: 1
+      #   env_vars:
+      #     CUDA_VISIBLE_DEVICES: "0,1"
       cgm:
         gpus: [2, 3]                     # [UPDATED] 由 [6,7] 改为逻辑编号 [2,3]
         num_gpus: 2
