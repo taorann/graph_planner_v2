@@ -1305,7 +1305,11 @@ class RayPPOTrainer:
 
         # Topology-aware worker state (populated lazily in init_workers).
         self.topology_groups: dict[str, TopologyGroupConfig] = self._parse_topology_groups(self.config)
-        self.worker_groups: dict[str, RayWorkerGroup | None] = {"planner": None, "cgm": None}
+        self.worker_groups: dict[str, RayWorkerGroup | None] = {
+            "planner": None,
+            "rollout": None,
+            "cgm": None,
+        }
         self.planner_trainer: RayWorkerGroup | None = None
         self.planner_engine: StaticVLLMEngine | None = None
         self.planner_sync: PlannerToVLLMSyncer | None = None
@@ -2080,9 +2084,27 @@ class RayPPOTrainer:
     def _init_worker_groups_from_topology(self) -> None:
         """Create worker groups and engines as described by ``system.topology``."""
 
-        planner_cfg = self.topology_groups.get("planner")
-        if planner_cfg is None or not planner_cfg.gpus:
+        topology_cfg = OmegaConf.select(self.config, "system.topology.groups", default={}) or {}
+        if isinstance(topology_cfg, DictConfig):
+            topology_cfg = OmegaConf.to_container(topology_cfg, resolve=True)
+        if not isinstance(topology_cfg, MappingABC):
+            topology_cfg = {}
+
+        planner_group = self.topology_groups.get("planner")
+        if planner_group is None or not planner_group.gpus:
             raise ValueError("Planner topology must specify at least one GPU")
+
+        planner_cfg = topology_cfg.get("planner") or {}
+        if isinstance(planner_cfg, DictConfig):
+            planner_cfg = OmegaConf.to_container(planner_cfg, resolve=True)
+
+        rollout_cfg = topology_cfg.get("rollout")
+        if isinstance(rollout_cfg, DictConfig):
+            rollout_cfg = OmegaConf.to_container(rollout_cfg, resolve=True)
+
+        cgm_cfg_raw = topology_cfg.get("cgm") or {}
+        if isinstance(cgm_cfg_raw, DictConfig):
+            cgm_cfg_raw = OmegaConf.to_container(cgm_cfg_raw, resolve=True)
 
         env_vars: dict[str, str] = {}
         global_env = OmegaConf.select(self.config, "system.runtime_env.env_vars", default=None)
@@ -2091,7 +2113,11 @@ class RayPPOTrainer:
         if isinstance(global_env, MappingABC):
             env_vars.update({str(k): str(v) for k, v in global_env.items() if v is not None})
 
-        group_env = getattr(planner_cfg, "env_vars", None)
+        group_env = None
+        if isinstance(planner_cfg, MappingABC):
+            group_env = planner_cfg.get("env_vars")
+        elif isinstance(planner_cfg, DictConfig):
+            group_env = planner_cfg.get("env_vars")
         if isinstance(group_env, DictConfig):
             group_env = OmegaConf.to_container(group_env, resolve=True)
         if isinstance(group_env, MappingABC):
@@ -2099,8 +2125,8 @@ class RayPPOTrainer:
 
         if self._run_id:
             env_vars["GRAPH_PLANNER_RUN_ID"] = str(self._run_id)
-        fsdp_world = int(planner_cfg.fsdp_size or len(planner_cfg.gpus))
-        planner_gpus = list(planner_cfg.gpus or [])
+        fsdp_world = int(planner_group.fsdp_size or len(planner_group.gpus))
+        planner_gpus = list(planner_group.gpus or [])
         planner_worker_env_overrides = None
         if planner_gpus:
             if fsdp_world > len(planner_gpus):
@@ -2122,22 +2148,22 @@ class RayPPOTrainer:
 
         _oc_set(self.config, "actor_rollout_ref.actor.fsdp_config.fsdp_size", fsdp_world)
         print(f"[planner] fsdp_size set to {fsdp_world} prior to worker init")
-        print(f"FSDP planner world_size={fsdp_world} on GPUs {planner_cfg.gpus}")
+        print(f"FSDP planner world_size={fsdp_world} on GPUs {planner_group.gpus}")
 
         # extra guard: planner 的 vllm tp 不要比当前分配的 GPU 数大
-        if getattr(planner_cfg, "vllm", None) is not None:
-            current_tp = getattr(planner_cfg.vllm, "tp", None)
-            if current_tp is not None and current_tp > len(planner_cfg.gpus):
-                planner_cfg.vllm.tp = 1
+        if getattr(planner_group, "vllm", None) is not None:
+            current_tp = getattr(planner_group.vllm, "tp", None)
+            if current_tp is not None and current_tp > len(planner_group.gpus):
+                planner_group.vllm.tp = 1
 
         rollout_tp = _oc_get(_oc_get(self.config, "actor_rollout_ref", {}), "rollout", {})
         tp_value = _oc_get(rollout_tp, "tensor_model_parallel_size", None) if isinstance(rollout_tp, MappingABC) else None
         if tp_value in (None, 0):
             planner_tp = None
-            if getattr(planner_cfg, "vllm", None) is not None:
-                planner_tp = getattr(planner_cfg.vllm, "tp", None)
+            if getattr(planner_group, "vllm", None) is not None:
+                planner_tp = getattr(planner_group.vllm, "tp", None)
             if planner_tp in (None, 0):
-                planner_tp = len(planner_cfg.gpus)
+                planner_tp = len(planner_group.gpus)
             _oc_set(
                 self.config,
                 "actor_rollout_ref.rollout.tensor_model_parallel_size",
@@ -2145,7 +2171,7 @@ class RayPPOTrainer:
             )
 
         planner_pool = RayResourcePool(
-            process_on_nodes=[len(planner_cfg.gpus)],
+            process_on_nodes=[len(planner_group.gpus)],
             use_gpu=True,
             name_prefix=f"planner-{self._run_id}",
             max_colocate_count=1,
@@ -2245,7 +2271,7 @@ class RayPPOTrainer:
 
         # Optional: keep n_gpus metrics correct when bypassing resource_pool_manager defaults
         try:
-            self.resource_pool_manager.override_n_gpus(len(planner_cfg.gpus))
+            self.resource_pool_manager.override_n_gpus(len(planner_group.gpus))
         except Exception:
             pass
 
@@ -2256,26 +2282,70 @@ class RayPPOTrainer:
         self.planner_trainer = planner_wg
         self.actor_rollout_wg = planner_wg
 
-        if planner_cfg.vllm is not None:
+        rollout_wg: RayWorkerGroup | None = None
+        if isinstance(rollout_cfg, MappingABC) and rollout_cfg:
+            raw_num_gpus = rollout_cfg.get("num_gpus", 0)
+            try:
+                rollout_need_gpu = int(raw_num_gpus) > 0
+            except (TypeError, ValueError):
+                rollout_need_gpu = bool(raw_num_gpus)
+
+            rollout_pool = RayResourcePool(
+                process_on_nodes=[1],
+                use_gpu=rollout_need_gpu,
+                name_prefix=f"rollout-{self._run_id}",
+                max_colocate_count=1,
+            )
+
+            rollout_cls = RayClassWithInitArgs(
+                cls=self.role_worker_mapping[Role.ActorRollout],
+                config=self.config.actor_rollout_ref,
+                role="actor_rollout",
+                profile_option=profile_option,
+            )
+
+            rollout_env_vars = rollout_cfg.get("env_vars") if isinstance(rollout_cfg, MappingABC) else None
+            if isinstance(rollout_env_vars, DictConfig):
+                rollout_env_vars = OmegaConf.to_container(rollout_env_vars, resolve=True)
+
+            runtime_env = {}
+            merged_env = dict(env_vars)
+            if isinstance(rollout_env_vars, MappingABC):
+                merged_env.update({str(k): str(v) for k, v in rollout_env_vars.items() if v is not None})
+            if merged_env:
+                runtime_env["env_vars"] = merged_env
+            if runtime_env:
+                rollout_cls.update_options({"runtime_env": runtime_env})
+
+            rollout_wg = self.ray_worker_group_cls(
+                resource_pool=rollout_pool,
+                ray_cls_with_init=rollout_cls,
+                device_name=self.device_name,
+            )
+            rollout_wg.init_model()
+            self.worker_groups["rollout"] = rollout_wg
+            self.actor_rollout_wg = rollout_wg
+
+        if planner_group.vllm is not None:
             self.planner_engine = build_vllm_engine(
                 group="planner",
-                gpus=planner_cfg.gpus,
-                tp=planner_cfg.vllm.tp,
-                dp=planner_cfg.vllm.dp,
-                max_model_len=planner_cfg.vllm.max_model_len,
-                gpu_memory_utilization=planner_cfg.vllm.gpu_memory_utilization,
-                max_num_seqs=planner_cfg.vllm.max_num_seqs,
-                kv_cache_dtype=planner_cfg.vllm.kv_cache_dtype,
-                enforce_eager=planner_cfg.vllm.enforce_eager,
-                model_path=planner_cfg.vllm.model_path,
-                adapters=planner_cfg.vllm.adapters,
-                extra_config=planner_cfg.vllm.extra,
+                gpus=planner_group.gpus,
+                tp=planner_group.vllm.tp,
+                dp=planner_group.vllm.dp,
+                max_model_len=planner_group.vllm.max_model_len,
+                gpu_memory_utilization=planner_group.vllm.gpu_memory_utilization,
+                max_num_seqs=planner_group.vllm.max_num_seqs,
+                kv_cache_dtype=planner_group.vllm.kv_cache_dtype,
+                enforce_eager=planner_group.vllm.enforce_eager,
+                model_path=planner_group.vllm.model_path,
+                adapters=planner_group.vllm.adapters,
+                extra_config=planner_group.vllm.extra,
             )
             print(
                 "vLLM planner TP=%s on GPUs %s"
                 % (
-                    planner_cfg.vllm.tp,
-                    planner_cfg.gpus,
+                    planner_group.vllm.tp,
+                    planner_group.gpus,
                 )
             )
         else:
@@ -2283,29 +2353,29 @@ class RayPPOTrainer:
 
         self.planner_sync = PlannerToVLLMSyncer(self.planner_trainer, self.planner_engine)
 
-        cgm_cfg = self.topology_groups.get("cgm")
-        if cgm_cfg is not None and cgm_cfg.gpus:
+        cgm_group = self.topology_groups.get("cgm")
+        if cgm_group is not None and cgm_group.gpus:
             self.cgm_engine = build_vllm_engine(
                 group="cgm",
-                gpus=cgm_cfg.gpus,
-                tp=cgm_cfg.vllm.tp if cgm_cfg.vllm else 1,
-                dp=cgm_cfg.vllm.dp if cgm_cfg.vllm else 1,
-                max_model_len=cgm_cfg.vllm.max_model_len if cgm_cfg.vllm else None,
+                gpus=cgm_group.gpus,
+                tp=cgm_group.vllm.tp if cgm_group.vllm else 1,
+                dp=cgm_group.vllm.dp if cgm_group.vllm else 1,
+                max_model_len=cgm_group.vllm.max_model_len if cgm_group.vllm else None,
                 gpu_memory_utilization=(
-                    cgm_cfg.vllm.gpu_memory_utilization if cgm_cfg.vllm else None
+                    cgm_group.vllm.gpu_memory_utilization if cgm_group.vllm else None
                 ),
-                max_num_seqs=cgm_cfg.vllm.max_num_seqs if cgm_cfg.vllm else None,
-                kv_cache_dtype=cgm_cfg.vllm.kv_cache_dtype if cgm_cfg.vllm else None,
-                enforce_eager=cgm_cfg.vllm.enforce_eager if cgm_cfg.vllm else None,
-                model_path=cgm_cfg.vllm.model_path if cgm_cfg.vllm else None,
-                adapters=cgm_cfg.vllm.adapters if cgm_cfg.vllm else None,
-                extra_config=cgm_cfg.vllm.extra if cgm_cfg.vllm else None,
+                max_num_seqs=cgm_group.vllm.max_num_seqs if cgm_group.vllm else None,
+                kv_cache_dtype=cgm_group.vllm.kv_cache_dtype if cgm_group.vllm else None,
+                enforce_eager=cgm_group.vllm.enforce_eager if cgm_group.vllm else None,
+                model_path=cgm_group.vllm.model_path if cgm_group.vllm else None,
+                adapters=cgm_group.vllm.adapters if cgm_group.vllm else None,
+                extra_config=cgm_group.vllm.extra if cgm_group.vllm else None,
             )
             print(
                 "vLLM CGM TP=%s on GPUs %s"
                 % (
-                    cgm_cfg.vllm.tp if cgm_cfg.vllm else 1,
-                    cgm_cfg.gpus,
+                    cgm_group.vllm.tp if cgm_group.vllm else 1,
+                    cgm_group.gpus,
                 )
             )
             actor_name = f"CGMService::{self._run_id}"
@@ -2317,13 +2387,17 @@ class RayPPOTrainer:
                 if isinstance(global_env, MappingABC):
                     cgm_env.update({str(k): str(v) for k, v in global_env.items() if v is not None})
 
-                group_env = getattr(cgm_cfg, "env_vars", None)
+                group_env = None
+                if isinstance(cgm_cfg_raw, MappingABC):
+                    group_env = cgm_cfg_raw.get("env_vars")
+                elif isinstance(cgm_cfg_raw, DictConfig):
+                    group_env = cgm_cfg_raw.get("env_vars")
                 if isinstance(group_env, DictConfig):
                     group_env = OmegaConf.to_container(group_env, resolve=True)
                 if isinstance(group_env, MappingABC):
                     cgm_env.update({str(k): str(v) for k, v in group_env.items() if v is not None})
 
-                cgm_env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, cgm_cfg.gpus))
+                cgm_env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, cgm_group.gpus))
                 preview = list(cgm_env.keys())[:6]
                 print(
                     f"[topology] group=cgm cuda_visible={cgm_env['CUDA_VISIBLE_DEVICES']} env_keys={preview}..."
@@ -2338,7 +2412,7 @@ class RayPPOTrainer:
                 self.cgm_actor = CGMService.options(
                     name=actor_name,
                     lifetime="detached",
-                    num_gpus=len(cgm_cfg.gpus),
+                    num_gpus=len(cgm_group.gpus),
                     runtime_env={"env_vars": cgm_env},
                 ).remote(self.cgm_engine, vllm_cfg=vllm_cfg)
                 print(f"[Topology] CGM actor '{actor_name}' spawned")

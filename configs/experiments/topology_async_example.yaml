@@ -1,0 +1,28 @@
+actor_rollout_ref:
+  rollout:
+    name: vllm
+    mode: async
+
+system:
+  topology:
+    groups:
+      planner:
+        num_gpus: 2
+        gpus: [0, 1]
+        env_vars:
+          CUDA_VISIBLE_DEVICES: "0,1"
+        fsdp_size: 2
+
+      rollout:
+        num_gpus: 0
+        env_vars:
+          CUDA_VISIBLE_DEVICES: "0,1"
+
+      cgm:
+        num_gpus: 2
+        gpus: [2, 3]
+        env_vars:
+          CUDA_VISIBLE_DEVICES: "2,3"
+        vllm:
+          tp: 2
+          gpu_memory_utilization: 0.6
