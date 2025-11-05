@@ -9,6 +9,7 @@ import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
+os.environ["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] = "0"
 
 # ---------------------------------------------------------------------------
 # Ensure vLLM v1 behaviour is enabled before importing any engine wrappers.

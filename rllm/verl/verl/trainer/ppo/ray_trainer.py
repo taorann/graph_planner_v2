@@ -2156,7 +2156,7 @@ class RayPPOTrainer:
             planner_worker_env_overrides = []
             for rank, gpu_id in enumerate(planner_gpus[:fsdp_world]):
                 actor_env = {
-                    "CUDA_VISIBLE_DEVICES": str(gpu_id),  
+                    "CUDA_VISIBLE_DEVICES": str(gpu_id),    
                     "LOCAL_RANK": "0",
                     "RANK": str(rank),
                     "WORLD_SIZE": str(fsdp_world),
@@ -2191,7 +2191,7 @@ class RayPPOTrainer:
             )
 
         planner_pool = RayResourcePool(
-            process_on_nodes=[len(planner_group.gpus)],
+            process_on_nodes=[fsdp_world],
             use_gpu=True,
             name_prefix=f"planner-{self._run_id}",
             max_colocate_count=1,
@@ -2224,7 +2224,7 @@ class RayPPOTrainer:
 
         if env_vars:
             planner_cls.update_options({"runtime_env": {"env_vars": env_vars}})
-        planner_cls.update_options({"num_gpus": 1})
+        planner_cls.update_options({"num_gpus": 0})
             
         planner_wg_root = self.ray_worker_group_cls(
             resource_pool=planner_pool,
@@ -2338,13 +2338,32 @@ class RayPPOTrainer:
                 max_colocate_count=1,
             )
 
+            # === 关键改动开始：构造一份“只有 rollout 的配置” ===
+            # 原来是直接用 self.config.actor_rollout_ref
+            full_ar_cfg = self.config.actor_rollout_ref
+            # 转成普通 dict，方便删字段
+            if isinstance(full_ar_cfg, DictConfig):
+                full_ar_cfg = OmegaConf.to_container(full_ar_cfg, resolve=True)
+
+            # 拷一份，别动原 config
+            rollout_only_cfg = deepcopy(full_ar_cfg)
+            # 这几段是训练 actor 用的，我们不想在 rollout worker 上建 FSDP，就删掉
+            for key in ("actor", "ref", "model"):
+                rollout_only_cfg.pop(key, None)
+            # 有的版本里面还有这个字段，就顺手干掉
+            rollout_only_cfg.pop("hybrid_engine", None)
+
+            # 我们仍然要告诉 rollout 它的 rollout 段来自原来的配置
+            # （大部分字段你 YAML 里都写了）
+            # rollout_only_cfg 现在应该至少有：
+            #   rollout: { name: vllm, mode: async, ... }
+
             rollout_cls = RayClassWithInitArgs(
                 cls=self.role_worker_mapping[Role.ActorRollout],
-                config=self.config.actor_rollout_ref,
+                config=rollout_only_cfg,
                 role="actor_rollout",
                 profile_option=profile_option,
             )
-
 
                 
             rollout_env_vars = rollout_cfg.get("env_vars") if isinstance(rollout_cfg, MappingABC) else None
@@ -2474,6 +2493,19 @@ class RayPPOTrainer:
         self.worker_groups["cgm"] = None
 
         # NOTE: keep self.async_rollout_manager intact so async rollouts stay available.
+
+        self.async_rollout_manager = None
+        if (
+            _oc_get(self.config, "actor_rollout_ref.rollout.mode", None) == "async"
+            and getattr(self, "actor_rollout_wg", None) is not None
+        ):
+            from verl.experimental.agent_loop import AgentLoopManager
+
+            self.async_rollout_manager = AgentLoopManager(
+                config=self.config,
+                worker_group=self.actor_rollout_wg,
+            )
+
 
         self.critic_wg = None
         self.ref_policy_wg = None

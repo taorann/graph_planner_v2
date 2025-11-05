@@ -4,8 +4,8 @@
 paths:
   planner_model: models/Qwen3-14B
   planner_tokenizer: models/Qwen3-14B
-  cgm_model: models/CodeFuse-CGM
-  cgm_tokenizer: models/CodeFuse-CGM
+  cgm_model: /map-vepfs/taoran/CodeFuse-CGM/infra_model
+  cgm_tokenizer: /map-vepfs/taoran/CodeFuse-CGM/infra_model
 
 system:
   topology:
@@ -170,7 +170,19 @@ actor_rollout_ref:
     log_prob_micro_batch_size_per_gpu: 1
     multi_stage_wake_up: false   # ←⑧ 新增
     agent:
+      custom_async_server: false 
+      server_host: 0.0.0.0           # 给个默认
+      server_port: 18888             # 给个默认
       num_workers: 8
+      max_inflight_requests: 32
+      request_timeout_s: 60
+      queue_capacity: 128
+      retry_on_server_busy: true
+      retry_interval_s: 0.1
+      server_num_replicas: 1
+      server_concurrency: 8
+      server_device: "cuda"
+      server_runtime_env: {}
     multi_turn:
       enable: false
 
