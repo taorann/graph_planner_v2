@@ -1981,6 +1981,19 @@ class RayPPOTrainer:
         """
         if self.topology_groups.get("planner"):
             self._init_worker_groups_from_topology()
+
+            # create async rollout manager and request scheduler once worker groups are available
+            self.async_rollout_manager = None
+            if (
+                self.config.actor_rollout_ref.rollout.mode == "async"
+                and getattr(self, "actor_rollout_wg", None) is not None
+            ):
+                from verl.experimental.agent_loop import AgentLoopManager
+
+                self.async_rollout_manager = AgentLoopManager(
+                    config=self.config,
+                    worker_group=self.actor_rollout_wg,
+                )
             return
 
         self.resource_pool_manager.create_resource_pool()
@@ -2067,13 +2080,20 @@ class RayPPOTrainer:
             self.rm_wg = all_wg["rm"]
             self.rm_wg.init_model()
 
-        # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
-        self.actor_rollout_wg = all_wg["actor_rollout"]
-        self.actor_rollout_wg.init_model()
+        topo_groups = OmegaConf.select(self.config, "system.topology.groups", default=None)
+        has_dedicated_rollout = bool(topo_groups is not None and "rollout" in topo_groups)
 
-        # create async rollout manager and request scheduler
+        # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
+        if not has_dedicated_rollout and "actor_rollout" in all_wg:
+            self.actor_rollout_wg = all_wg["actor_rollout"]
+            self.actor_rollout_wg.init_model()
+
+        # create async rollout manager and request scheduler once worker groups are available
         self.async_rollout_manager = None
-        if self.config.actor_rollout_ref.rollout.mode == "async":
+        if (
+            self.config.actor_rollout_ref.rollout.mode == "async"
+            and getattr(self, "actor_rollout_wg", None) is not None
+        ):
             from verl.experimental.agent_loop import AgentLoopManager
 
             self.async_rollout_manager = AgentLoopManager(
@@ -2179,12 +2199,22 @@ class RayPPOTrainer:
 
         profile_option = OmegaConf.select(self.config, "trainer.npu_profile.options", default=None)
 
-        planner_cls = RayClassWithInitArgs(
-            cls=self.role_worker_mapping[Role.ActorRollout],
-            config=self.config.actor_rollout_ref,
-            role="actor_rollout",
-            profile_option=profile_option,
-        )
+        use_dedicated_rollout = isinstance(rollout_cfg, MappingABC) and bool(rollout_cfg)
+
+        if use_dedicated_rollout and Role.Actor in self.role_worker_mapping:
+            planner_cls = RayClassWithInitArgs(
+                cls=self.role_worker_mapping[Role.Actor],
+                config=self.config.actor_rollout_ref.actor,
+                role="actor",
+                profile_option=profile_option,
+            )
+        else:
+            planner_cls = RayClassWithInitArgs(
+                cls=self.role_worker_mapping[Role.ActorRollout],
+                config=self.config.actor_rollout_ref,
+                role="actor_rollout",
+                profile_option=profile_option,
+            )
         if env_vars:
             planner_cls.update_options({"runtime_env": {"env_vars": env_vars}})
 
