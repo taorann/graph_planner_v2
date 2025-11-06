@@ -13,7 +13,7 @@ import subprocess
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Sequence
 from urllib.error import URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -151,6 +151,120 @@ def _is_local_host(hostname: str | None) -> bool:
     return hostname.startswith("127.")
 
 
+def _parse_device_indices(value: str | None) -> list[int] | None:
+    if value is None:
+        return None
+
+    devices: list[int] = []
+    for part in str(value).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            devices.append(int(part))
+        except ValueError:
+            LOGGER.warning(
+                "Ignoring non-integer GPU identifier in planner_service_gpus: %s",
+                part,
+            )
+            return None
+
+    return devices or None
+
+
+def _query_gpu_memory(indices: Sequence[int] | None) -> list[tuple[float, float]] | None:
+    try:
+        output = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.free,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            text=True,
+        )
+    except FileNotFoundError:
+        LOGGER.warning(
+            "nvidia-smi not available; unable to probe GPU memory for planner auto-launch"
+        )
+        return None
+    except subprocess.CalledProcessError as exc:
+        LOGGER.warning(
+            "nvidia-smi command failed (returncode=%s); skipping GPU memory probe",
+            exc.returncode,
+        )
+        return None
+
+    rows: list[tuple[float, float]] = []
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        parts = [segment.strip() for segment in line.split(",")]
+        if len(parts) < 2:
+            continue
+        try:
+            free = float(parts[0])
+            total = float(parts[1])
+        except ValueError:
+            continue
+        rows.append((free, total))
+
+    if not rows:
+        return None
+
+    if indices is None:
+        return rows
+
+    selected: list[tuple[float, float]] = []
+    for index in indices:
+        if index < 0 or index >= len(rows):
+            LOGGER.warning(
+                "GPU index %s requested for planner auto-launch is unavailable (total GPUs: %s)",
+                index,
+                len(rows),
+            )
+            return None
+        selected.append(rows[index])
+
+    return selected
+
+
+def _compute_gpu_memory_utilization(
+    requested: float | None,
+    *,
+    devices: Sequence[int] | None,
+    headroom: float,
+) -> float | None:
+    if requested is None and headroom <= 0:
+        return None
+
+    stats = _query_gpu_memory(devices)
+    if not stats:
+        return requested
+
+    ratios = [free / total for free, total in stats if total > 0]
+    if not ratios:
+        return requested
+    max_available_ratio = min(ratios)
+    if headroom > 0:
+        max_available_ratio = max(0.0, max_available_ratio - headroom)
+
+    if requested is None:
+        return max_available_ratio if max_available_ratio > 0 else None
+
+    adjusted = min(requested, max_available_ratio)
+    if adjusted < 0:
+        adjusted = 0.0
+
+    if adjusted < requested - 1e-6:
+        LOGGER.info(
+            "Reducing planner service gpu_memory_utilization from %.3f to %.3f based on available memory",
+            requested,
+            adjusted,
+        )
+
+    return adjusted
+
+
 @contextlib.contextmanager
 def _auto_launch_planner_service(args: argparse.Namespace):
     if not getattr(args, "auto_launch_planner_service", False):
@@ -224,8 +338,24 @@ def _auto_launch_planner_service(args: argparse.Namespace):
     gpu_memory_utilization = getattr(
         args, "planner_service_gpu_memory_utilization", None
     )
-    if gpu_memory_utilization is not None:
-        cmd.extend(["--gpu-memory-utilization", str(gpu_memory_utilization)])
+    gpu_devices = _parse_device_indices(
+        getattr(args, "planner_service_gpus", None)
+    )
+    headroom_ratio = float(
+        getattr(args, "planner_service_gpu_memory_headroom", 0.05)
+    )
+    adjusted_gpu_memory_utilization = _compute_gpu_memory_utilization(
+        gpu_memory_utilization,
+        devices=gpu_devices,
+        headroom=headroom_ratio,
+    )
+    if adjusted_gpu_memory_utilization is not None:
+        cmd.extend(
+            [
+                "--gpu-memory-utilization",
+                str(adjusted_gpu_memory_utilization),
+            ]
+        )
 
     LOGGER.info("Auto-launching planner service with command: %s", shlex.join(cmd))
 
@@ -504,6 +634,15 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Optional gpu_memory_utilization override for an auto-launched planner service",
+    )
+    parser.add_argument(
+        "--planner-service-gpu-memory-headroom",
+        type=float,
+        default=0.05,
+        help=(
+            "Fractional headroom subtracted from detected free memory ratios before "
+            "launching the planner service to avoid oversubscribing GPUs"
+        ),
     )
     parser.add_argument("--max-prompt-tokens", type=int, default=4096)
     parser.add_argument("--max-response-tokens", type=int, default=4096)
@@ -1031,3 +1170,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
