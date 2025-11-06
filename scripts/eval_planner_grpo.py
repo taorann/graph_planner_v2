@@ -93,6 +93,58 @@ def _load_config(path: Path, overrides: Sequence[str] | None) -> DictConfig:
     return cfg
 
 
+def normalize_eval_config(cfg: DictConfig) -> DictConfig:
+    """Sanitize an evaluation config to avoid training-only settings."""
+
+    actor_rollout = OmegaConf.select(cfg, "actor_rollout_ref", default=None)
+    if actor_rollout is not None:
+        rollout_only = OmegaConf.select(cfg, "actor_rollout_ref.rollout", default=None)
+        cfg.actor_rollout_ref = {}
+        if rollout_only is not None:
+            cfg.actor_rollout_ref["rollout"] = rollout_only
+
+    pipeline = OmegaConf.select(cfg, "system.pipeline", default={}) or {}
+    pipeline = dict(pipeline)
+    pipeline["async_mode"] = False
+    pipeline["rollout_prefetch"] = 1
+    pipeline["max_policy_version_lag"] = 0
+    if "system" not in cfg:
+        cfg.system = {}
+    cfg.system["pipeline"] = pipeline
+
+    groups = OmegaConf.select(cfg, "system.topology.groups", default=None)
+    if groups and "planner" in groups:
+        if isinstance(groups, DictConfig):
+            groups = OmegaConf.to_container(groups, resolve=True)
+        groups = dict(groups)
+        planner_group = groups.get("planner") or {}
+        if isinstance(planner_group, DictConfig):
+            planner_group = OmegaConf.to_container(planner_group, resolve=True)
+        planner_group = dict(planner_group or {})
+        planner_group.pop("fsdp_size", None)
+        groups["planner"] = planner_group
+        topology = OmegaConf.select(cfg, "system.topology", default={}) or {}
+        if isinstance(topology, DictConfig):
+            topology = OmegaConf.to_container(topology, resolve=True)
+        topology = dict(topology)
+        topology["groups"] = groups
+        cfg.system["topology"] = topology
+
+    return cfg
+
+
+def _resolve_model_path(cfg: DictConfig) -> str:
+    for key in (
+        "actor_rollout_ref.model.path",
+        "paths.planner_model",
+        "graph_planner.planner.env.PLANNER_MODEL_PATH",
+    ):
+        value = OmegaConf.select(cfg, key, default=None)
+        if value:
+            return str(value)
+    return ""
+
+
 def _to_str_dict(payload: Mapping[str, Any] | None) -> dict[str, str]:
     if not payload:
         return {}
@@ -248,15 +300,18 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
     cfg = _load_config(args.config, args.overrides)
+    cfg = normalize_eval_config(cfg)
 
     val_files = _listify(OmegaConf.select(cfg, "data.val_files"))
     if not val_files:
         raise ValueError("data.val_files must not be empty for evaluation")
     if not args.ckpt.exists():
         raise FileNotFoundError(f"Checkpoint path does not exist: {args.ckpt}")
-    model_path = str(OmegaConf.select(cfg, "actor_rollout_ref.model.path") or "")
+    model_path = _resolve_model_path(cfg)
     if not model_path:
-        raise ValueError("actor_rollout_ref.model.path must be specified")
+        raise ValueError(
+            "A planner model path must be provided via actor_rollout_ref.model.path or paths.planner_model",
+        )
     LOGGER.info("Validation files (%d): %s", len(val_files), ", ".join(val_files))
     LOGGER.info("Checkpoint path: %s", args.ckpt)
     LOGGER.info("Planner model path: %s", model_path)

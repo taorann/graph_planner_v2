@@ -427,8 +427,45 @@ class AgentLoopManager:
         self.sleep()
 
     def _initialize_llm_servers(self):
-        self.rollout_tp_size = self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
-        self.rollout_dp_size = self.worker_group.world_size // self.rollout_tp_size
+        rollout_cfg = OmegaConf.select(self.config, "actor_rollout_ref.rollout", default={}) or {}
+        if isinstance(rollout_cfg, dict):
+            tensor_parallel_size = rollout_cfg.get("tensor_model_parallel_size", 1)
+            rollout_backend = rollout_cfg.get("name")
+        else:
+            tensor_parallel_size = rollout_cfg.get("tensor_model_parallel_size", 1)
+            rollout_backend = rollout_cfg.get("name")
+
+        tensor_parallel_size = int(tensor_parallel_size) if tensor_parallel_size else 1
+        tensor_parallel_size = max(tensor_parallel_size, 1)
+        self.rollout_tp_size = tensor_parallel_size
+
+        if self.rollout_tp_size == 0:
+            self.rollout_tp_size = 1
+
+        if rollout_backend is None:
+            rollout_backend = "vllm"
+
+        world_size = max(self.worker_group.world_size, 1)
+        self.rollout_dp_size = max(world_size // self.rollout_tp_size, 1)
+
+        agent_cfg = OmegaConf.select(self.config, "actor_rollout_ref.rollout.agent", default=None)
+        custom_server_cfg = None
+        use_custom_server = False
+        if agent_cfg is not None:
+            if isinstance(agent_cfg, dict):
+                custom_server_cfg = agent_cfg.get("custom_async_server", False)
+            else:
+                custom_server_cfg = agent_cfg.get("custom_async_server", False)
+
+            if isinstance(custom_server_cfg, (dict, DictConfig)):
+                use_custom_server = True
+            else:
+                use_custom_server = bool(custom_server_cfg)
+
+        if not use_custom_server:
+            self.async_llm_servers = []
+            self.server_addresses = []
+            return
 
         register_center = ray.get_actor(f"{self.worker_group.name_prefix}_register_center")
         workers_info = ray.get(register_center.get_worker_info.remote())
@@ -437,14 +474,14 @@ class AgentLoopManager:
         self.async_llm_servers = [None] * self.rollout_dp_size
         self.server_addresses = [None] * self.rollout_dp_size
 
-        if self.config.actor_rollout_ref.rollout.agent.custom_async_server:
+        if isinstance(custom_server_cfg, (dict, DictConfig)) and custom_server_cfg:
             server_class = async_server_class(
-                rollout_backend=self.config.actor_rollout_ref.rollout.name,
-                rollout_backend_module=self.config.actor_rollout_ref.rollout.agent.custom_async_server.path,
-                rollout_backend_class=self.config.actor_rollout_ref.rollout.agent.custom_async_server.name,
+                rollout_backend=rollout_backend,
+                rollout_backend_module=custom_server_cfg.get("path"),
+                rollout_backend_class=custom_server_cfg.get("name"),
             )
         else:
-            server_class = async_server_class(rollout_backend=self.config.actor_rollout_ref.rollout.name)
+            server_class = async_server_class(rollout_backend=rollout_backend)
 
         # Start all server instances, restart if address already in use.
         unready_dp_ranks = set(range(self.rollout_dp_size))

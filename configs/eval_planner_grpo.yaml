@@ -1,0 +1,120 @@
+# Evaluation-only configuration for planner GRPO checkpoints.
+# This file intentionally omits any FSDP actor settings so that the
+# trainer can detect "eval mode" automatically.
+
+paths:
+  planner_model: models/Qwen3-14B
+  planner_tokenizer: models/Qwen3-14B
+  cgm_model: /map-vepfs/taoran/CodeFuse-CGM/infra_model
+  cgm_tokenizer: /map-vepfs/taoran/CodeFuse-CGM/infra_model
+
+system:
+  topology:
+    groups:
+      planner:
+        gpus: [0, 1]
+        env_vars:
+          CUDA_VISIBLE_DEVICES: "0,1"
+        vllm:
+          tp: 1
+          dp: 1
+          max_model_len: 24576
+          gpu_memory_utilization: 0.9
+  pipeline:
+    async_mode: false
+    rollout_prefetch: 1
+    max_policy_version_lag: 0
+
+ray:
+  runtime_env:
+    env_vars:
+      HF_HOME: ~/.cache/huggingface
+
+env:
+  pool_size_per_worker: 1
+  reuse_container: true
+
+graph_planner:
+  shared_actors:
+    spawn: true
+  planner:
+    propagate_via_ray: false
+    env:
+      PLANNER_MODEL_PATH: ${paths.planner_model}
+      PLANNER_MODEL_TOKENIZER_PATH: ${paths.planner_tokenizer}
+      PLANNER_MODEL_TEMPERATURE: 0.0
+      PLANNER_MODEL_TOP_P: 1.0
+      PLANNER_MODEL_MAX_INPUT_TOKENS: 4096
+      PLANNER_MODEL_MAX_TOKENS: 512
+  cgm:
+    propagate_via_ray: true
+    env:
+      CGM_ENABLED: "1"
+      CGM_MODEL_PATH: ${paths.cgm_model}
+      CGM_TOKENIZER_PATH: ${paths.cgm_tokenizer}
+      CGM_TEMPERATURE: 0.0
+      CGM_TOP_P: 1.0
+      CGM_MAX_TOKENS: 768
+      CGM_MAX_INPUT_TOKENS: 8192
+
+algorithm:
+  adv_estimator: grpo
+  use_kl_in_reward: false
+  norm_adv_by_std_in_grpo: true
+  kl_ctrl:
+    kl_coef: 0.0
+    target_kl: 0.0
+  gamma: 1.0
+  lam: 1.0
+  kl_penalty: kl
+
+data:
+  train_files:
+    - datasets/r2e_gym/train.jsonl
+  val_files:
+    - datasets/r2e_gym/val.jsonl
+  dataloader_num_workers: 4
+  train_batch_size: 8
+  val_batch_size: 64
+  max_prompt_length: 8192
+  max_response_length: 16384
+  filter_overlong_prompts: true
+  filter_overlong_prompts_workers: 32
+  drop_last_train: false
+  return_raw_chat: false
+  return_full_prompt: false
+  need_tools_kwargs: false
+
+actor_rollout_ref:
+  rollout:
+    name: vllm
+    mode: async
+    dtype: float16
+    calculate_log_probs: true
+    free_cache_engine: true
+    tensor_model_parallel_size: 1
+    gpu_memory_utilization: ${system.topology.groups.planner.vllm.gpu_memory_utilization}
+    max_model_len: ${system.topology.groups.planner.vllm.max_model_len}
+    temperature: 0.0
+    n: 1
+    val_kwargs:
+      n: 1
+      do_sample: false
+      temperature: 0.0
+      top_p: 1.0
+    agent:
+      custom_async_server: false
+      server_host: 0.0.0.0
+      server_port: 18888
+      num_workers: 8
+      max_inflight_requests: 32
+      request_timeout_s: 60
+      queue_capacity: 128
+      retry_on_server_busy: true
+      retry_interval_s: 0.1
+      server_num_replicas: 1
+      server_concurrency: 8
+      server_device: "cuda"
+      server_runtime_env: {}
+    multi_turn:
+      enable: false
