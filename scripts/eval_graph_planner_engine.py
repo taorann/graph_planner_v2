@@ -77,6 +77,48 @@ def _load_config_defaults(path: Path) -> Dict[str, Any]:
     return defaults
 
 
+def _resolve_path(
+    value: Path,
+    *,
+    config_path: Path | None,
+    must_exist: bool,
+) -> Path:
+    """Resolve ``value`` against reasonable lookup roots.
+
+    Preference order:
+
+    1. Absolute paths are returned as-is.
+    2. Paths relative to the config file's parent directory.
+    3. Paths relative to the repository root.
+    4. Paths relative to the current working directory.
+
+    If ``must_exist`` is ``True`` we require at least one of the candidates to
+    exist; otherwise we fall back to the repository-root resolution.
+    """
+
+    if value.is_absolute():
+        return value
+
+    candidates: list[Path] = []
+    if config_path is not None:
+        candidates.append((config_path.parent / value).resolve())
+    candidates.append((_REPO_ROOT / value).resolve())
+    candidates.append((Path.cwd() / value).resolve())
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    if must_exist:
+        raise FileNotFoundError(
+            f"Unable to resolve path {value!s}; tried: "
+            + ", ".join(str(candidate) for candidate in candidates)
+        )
+
+    # Default to the repository-root resolution for non-existent paths.
+    return candidates[0]
+
+
 def _parse_args() -> argparse.Namespace:
     config_parser = argparse.ArgumentParser(add_help=False)
     config_parser.add_argument(
@@ -170,6 +212,11 @@ def _parse_args() -> argparse.Namespace:
     if args.config is None:
         args.config = config_args.config
 
+    config_path: Path | None = None
+    if args.config is not None:
+        config_path = Path(args.config).resolve()
+        args.config = config_path
+
     # Normalise path-like arguments when defaults originate from config files.
     path_fields = [
         "dataset",
@@ -185,6 +232,26 @@ def _parse_args() -> argparse.Namespace:
         value = getattr(args, field, None)
         if value is not None and not isinstance(value, Path):
             setattr(args, field, Path(value))
+
+    must_exist_fields = {
+        "dataset",
+        "planner_tokenizer",
+        "planner_model_path",
+        "planner_system_prompt",
+        "cgm_model_path",
+        "cgm_tokenizer_path",
+        "agent_system_prompt_path",
+    }
+    for field in path_fields:
+        value = getattr(args, field, None)
+        if value is None:
+            continue
+        resolved = _resolve_path(
+            value,
+            config_path=config_path,
+            must_exist=field in must_exist_fields,
+        )
+        setattr(args, field, resolved)
 
     missing = [field for field in ("dataset", "planner_model", "cgm_model_path") if getattr(args, field) is None]
     if missing:
