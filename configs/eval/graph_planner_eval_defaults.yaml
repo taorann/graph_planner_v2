@@ -12,6 +12,7 @@ auto_launch_planner_service: true
 planner_service_gpus: "0,1"
 planner_service_tensor_parallel_size: 2
 planner_service_startup_timeout: 360
+planner_service_gpu_memory_utilization: 0.9
 planner_temperature: 0.0
 planner_top_p: 0.95
 planner_timeout: 180
