@@ -21,6 +21,13 @@
 
 ## RepoEnv 接入与 SWE-Bench 交互深挖
 ### Graph Planner 链路
+**评估入口与命令**
+- 在仓库根目录运行 `python scripts/eval_graph_planner_engine.py --dataset <DATASET.jsonl> --planner-model <OPENAI_MODEL> --cgm-model-path <PATH>` 即可触发 Graph Planner 评测。CLI 现已覆盖 planner 侧的本地权重、system prompt、自定义 API key ENV、最大输入 token、推理设备，以及 CGM 端点/模型/API key/超时等参数，并新增 `--gamma`、`--retry-limit`、`--api-retries`、`--max-workers` 等执行引擎调优项，确保与 run_deepswe 和 actor_rollout_ref 配置保持一致的可调范围。【F:scripts/eval_graph_planner_engine.py†L54-L121】【F:rllm/rllm/engine/agent_execution_engine.py†L26-L118】
+- `scripts/run_eval_graph_planner.sh` 会在没有显式 `--config` 参数时自动加载 `configs/eval/graph_planner_eval_defaults.yaml`，该文件枚举了默认数据集、模型路径、并发度与 RepoEnv 限额，让使用者只需覆写少量参数即可启动评测；默认数据集已经切换为 `datasets/swebench/test.jsonl`，确保评测直接命中 SWE-bench Verified 测试集，如需轻量自检可改回仓库内的 `graphplanner_repoenv_sample.jsonl`。【F:scripts/run_eval_graph_planner.sh†L1-L24】【F:configs/eval/graph_planner_eval_defaults.yaml†L1-L26】【F:rllm/examples/swe/run_deepswe.py†L19-L43】
+- 解析到的 CLI 参数会被 `_configure_runtime_env` 写入 `PLANNER_MODEL_*`、`CGM_*` 系列环境变量，随后 `graph_planner.infra.config.load_config()` 在 agent/env 初始化阶段读取这些变量，落地为推理端点、温度、token 限额、设备映射及远端 CGM API 访问设置。【F:scripts/eval_graph_planner_engine.py†L124-L173】【F:graph_planner/infra/config.py†L248-L315】
+- CLI 还支持通过 `--agent-system-prompt(--path)` 与 `--disable-rule-fallback` 覆盖 agent 行为，并用 `--reward-scale`、`--failure-penalty`、`--step-penalty`、`--repo-op-limit`、`--synthesis-strategy` 等选项直接传入环境参数；这些值通过 `AgentExecutionEngine` 的 `agent_args` 与 `env_args` 注入，实现与 rLLM 训练配置相同的调优粒度。【F:scripts/eval_graph_planner_engine.py†L360-L417】【F:rllm/rllm/engine/agent_execution_engine.py†L520-L579】
+- GPU 拓扑由 `graph_planner.integrations.rllm.shared_actors` 中的 Ray actor 固定声明：`PlannerEngine` 与 `CGMTool` 默认各占用 2 张 GPU（分别绑定 `CUDA_VISIBLE_DEVICES=0,1` 与 `2,3`），共四张卡。如需调整，可修改对应环境变量或在 CLI 中传入 `--cgm-device` / `--cgm-device-map` 覆盖 CGM 侧的设备映射。【F:graph_planner/integrations/rllm/shared_actors.py†L23-L111】【F:scripts/eval_graph_planner_engine.py†L101-L114】
+
 1. **任务条目携带 RepoEnv 配置** – 数据准备脚本会把 R2E-Gym/SWE-Bench 的 `instance` 信息落盘到 JSONL，每条记录的 `sandbox` 字段都含有 `docker_image`、挂载、环境变量以及指向原始 R2E `ds` 的 `r2e_ds_json` 路径，方便后续按需切换后端。【F:datasets/README.md†L1-L59】
 2. **评估脚本兜底 manifest** – `eval_graph_planner_engine.py` 在装载任务时会尝试把历史机器写入的绝对路径重写到当前仓库的 `datasets/*/instances/*.json`；若文件缺失，则按任务条目与 `sandbox` 元数据即时合成最小化 manifest 并写回，确保 RepoEnv 初始化时总能找到有效的 `r2e_ds_json`。【F:scripts/eval_graph_planner_engine.py†L26-L143】
 3. **rLLM 环境工厂恢复沙箱** – `GraphPlannerRLLMEnv.from_dict` 将 JSON 还原为 `entry`，在 `_spawn_planner` 中读取 `sandbox` 字段并构造 `SandboxConfig`；如果任务没有携带沙箱配置，会直接抛错，保证每个评测都能找到容器元数据。【F:graph_planner/integrations/rllm/env.py†L35-L177】

@@ -11,6 +11,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
+import yaml
 from transformers import AutoTokenizer
 
 from graph_planner.datasets.prepare import ensure_directory, sanitize_identifier
@@ -51,36 +52,148 @@ def _ensure_rllm_components():
     )
 
 
+def _load_config_defaults(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        raise FileNotFoundError(f"Config file not found: {path}")
+
+    text = path.read_text(encoding="utf-8")
+    data: Any
+    if path.suffix.lower() in {".yaml", ".yml"}:
+        data = yaml.safe_load(text)
+    elif path.suffix.lower() == ".json":
+        data = json.loads(text)
+    else:
+        raise ValueError(f"Unsupported config format for {path}")
+
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise TypeError(f"Config root must be a mapping, got {type(data)!r}")
+
+    defaults: Dict[str, Any] = {}
+    for key, value in data.items():
+        normalised = key.replace("-", "_")
+        defaults[normalised] = value
+    return defaults
+
+
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", type=Path, required=True, help="Path to the task dataset (JSON/JSONL/Parquet)")
-    parser.add_argument("--planner-model", required=True, help="Planner model identifier passed to the rollout engine")
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Optional YAML/JSON config containing default CLI values",
+    )
+
+    config_args, remaining = config_parser.parse_known_args()
+
+    parser = argparse.ArgumentParser(description=__doc__, parents=[config_parser])
+    config_defaults: Dict[str, Any] | None = None
+    if config_args.config is not None:
+        config_defaults = _load_config_defaults(config_args.config)
+
+    parser.add_argument("--dataset", type=Path, default=None, help="Path to the task dataset (JSON/JSONL/Parquet)")
+    parser.add_argument("--planner-model", default=None, help="Planner model identifier passed to the rollout engine")
     parser.add_argument(
         "--planner-tokenizer",
         type=Path,
         default=None,
         help="Optional tokenizer path used to build the HF tokenizer",
     )
-    parser.add_argument("--planner-base-url", default="http://localhost:30000/v1", help="OpenAI-compatible planner endpoint")
+    parser.add_argument("--planner-model-path", type=Path, default=None, help="Optional local HF checkpoint for the planner")
+    parser.add_argument(
+        "--planner-system-prompt",
+        type=Path,
+        default=None,
+        help="Optional file containing a custom system prompt for the planner",
+    )
+    parser.add_argument(
+        "--planner-base-url",
+        default="http://localhost:30000/v1",
+        help="OpenAI-compatible planner endpoint",
+    )
     parser.add_argument("--planner-api-key", default=None, help="Optional API key for the planner endpoint")
+    parser.add_argument("--planner-api-key-env", default=None, help="Environment variable used by the planner runtime for API key lookup")
     parser.add_argument("--planner-temperature", type=float, default=0.0)
     parser.add_argument("--planner-top-p", type=float, default=0.95)
     parser.add_argument("--planner-timeout", type=float, default=120.0, help="Timeout for planner responses in seconds")
+    parser.add_argument("--planner-max-input-tokens", type=int, default=None)
+    parser.add_argument("--planner-device", default=None)
+    parser.add_argument("--planner-device-map", default=None)
     parser.add_argument("--max-prompt-tokens", type=int, default=4096)
     parser.add_argument("--max-response-tokens", type=int, default=4096)
     parser.add_argument("--max-steps", type=int, default=8, help="Upper bound on planner interactions per task")
     parser.add_argument("--parallel", type=int, default=4, help="Number of parallel agent/environment pairs")
     parser.add_argument("--limit", type=int, default=None, help="Optional limit on the number of tasks to evaluate")
     parser.add_argument("--results-path", type=Path, default=None, help="Optional JSON file to store trajectory outputs")
-    parser.add_argument("--cgm-model-path", type=Path, required=True, help="Path to the CGM model checkpoint")
+    parser.add_argument("--cgm-model-path", type=Path, default=None, help="Path to the CGM model checkpoint")
     parser.add_argument("--cgm-tokenizer-path", type=Path, default=None, help="Tokenizer path for the CGM model")
+    parser.add_argument("--cgm-endpoint", default=None, help="Optional OpenAI-compatible endpoint for CGM remote inference")
+    parser.add_argument("--cgm-model", default=None, help="Model identifier when using a remote CGM endpoint")
+    parser.add_argument("--cgm-api-key", default=None, help="Optional API key for the CGM endpoint")
+    parser.add_argument("--cgm-api-key-env", default=None, help="Environment variable to expose the CGM API key")
+    parser.add_argument("--cgm-timeout", type=float, default=None, help="Timeout for CGM responses in seconds")
     parser.add_argument("--cgm-max-input-tokens", type=int, default=8192)
     parser.add_argument("--cgm-max-output-tokens", type=int, default=1024)
     parser.add_argument("--cgm-temperature", type=float, default=0.0)
     parser.add_argument("--cgm-top-p", type=float, default=0.9)
     parser.add_argument("--cgm-device", default=None)
     parser.add_argument("--cgm-device-map", default=None)
-    return parser.parse_args()
+    parser.add_argument("--gamma", type=float, default=0.2, help="Discount factor for Monte Carlo return aggregation")
+    parser.add_argument("--retry-limit", type=int, default=3, help="Maximum number of retries for failed model calls")
+    parser.add_argument("--api-retries", type=int, default=3, help="Retry attempts within the OpenAI-compatible client")
+    parser.add_argument("--trajectory-timeout", type=float, default=None, help="Optional timeout per trajectory in seconds")
+    parser.add_argument("--max-workers", type=int, default=64, help="Thread pool size for environment RPCs")
+    parser.add_argument("--enforce-max-prompt-length", action="store_true")
+    parser.add_argument("--overlong-filter", action="store_true")
+    parser.add_argument("--engine-name", choices=["openai", "verl"], default="openai")
+    parser.add_argument("--reward-scale", type=float, default=None)
+    parser.add_argument("--failure-penalty", type=float, default=None)
+    parser.add_argument("--step-penalty", type=float, default=None)
+    parser.add_argument("--timeout-penalty", type=float, default=None)
+    parser.add_argument("--repo-op-limit", type=int, default=None, help="Optional limit on repo operations per episode")
+    parser.add_argument("--disable-cgm-synthesis", action="store_true")
+    parser.add_argument("--synthesis-strategy", default=None, help="Override the planner CGM synthesis strategy")
+    parser.add_argument("--agent-system-prompt", default=None, help="Override the planner agent system prompt text")
+    parser.add_argument("--agent-system-prompt-path", type=Path, default=None, help="Path to a file containing a custom system prompt")
+    parser.add_argument("--disable-rule-fallback", action="store_true", help="Disable rule-based fallback actions inside the agent")
+    if config_defaults:
+        valid_dests = {action.dest for action in parser._actions}
+        for key in list(config_defaults):
+            if key not in valid_dests:
+                LOGGER.warning("Ignoring unknown config key: %s", key)
+                config_defaults.pop(key)
+        parser.set_defaults(**config_defaults)
+
+    args = parser.parse_args(remaining)
+    if args.config is None:
+        args.config = config_args.config
+
+    # Normalise path-like arguments when defaults originate from config files.
+    path_fields = [
+        "dataset",
+        "planner_tokenizer",
+        "planner_model_path",
+        "planner_system_prompt",
+        "results_path",
+        "cgm_model_path",
+        "cgm_tokenizer_path",
+        "agent_system_prompt_path",
+    ]
+    for field in path_fields:
+        value = getattr(args, field, None)
+        if value is not None and not isinstance(value, Path):
+            setattr(args, field, Path(value))
+
+    missing = [field for field in ("dataset", "planner_model", "cgm_model_path") if getattr(args, field) is None]
+    if missing:
+        parser.error(
+            "The following arguments are required (supply via CLI or config): "
+            + ", ".join(f"--{field.replace('_', '-')}" for field in missing)
+        )
+
+    return args
 
 
 def _configure_runtime_env(args: argparse.Namespace) -> None:
@@ -93,14 +206,40 @@ def _configure_runtime_env(args: argparse.Namespace) -> None:
     os.environ["PLANNER_MODEL_TIMEOUT_S"] = str(int(args.planner_timeout))
     if args.planner_tokenizer:
         os.environ["PLANNER_MODEL_TOKENIZER_PATH"] = str(args.planner_tokenizer)
+    if args.planner_model_path:
+        os.environ["PLANNER_MODEL_PATH"] = str(args.planner_model_path)
+    if args.planner_system_prompt:
+        prompt_text = Path(args.planner_system_prompt).read_text(encoding="utf-8")
+        os.environ["PLANNER_MODEL_SYSTEM_PROMPT"] = prompt_text
     if args.planner_api_key:
-        os.environ["PLANNER_MODEL_API_KEY_ENV"] = "PLANNER_MODEL_API_KEY"
-        os.environ["PLANNER_MODEL_API_KEY"] = str(args.planner_api_key)
+        env_name = str(args.planner_api_key_env or "PLANNER_MODEL_API_KEY")
+        os.environ[env_name] = str(args.planner_api_key)
+        os.environ["PLANNER_MODEL_API_KEY_ENV"] = env_name
+    elif args.planner_api_key_env:
+        os.environ["PLANNER_MODEL_API_KEY_ENV"] = str(args.planner_api_key_env)
+    if args.planner_max_input_tokens is not None:
+        os.environ["PLANNER_MODEL_MAX_INPUT_TOKENS"] = str(args.planner_max_input_tokens)
+    if args.planner_device:
+        os.environ["PLANNER_MODEL_DEVICE"] = str(args.planner_device)
+    if args.planner_device_map:
+        os.environ["PLANNER_MODEL_DEVICE_MAP"] = str(args.planner_device_map)
 
     os.environ["CGM_ENABLED"] = "1"
     os.environ["CGM_MODEL_PATH"] = str(args.cgm_model_path)
     if args.cgm_tokenizer_path:
         os.environ["CGM_TOKENIZER_PATH"] = str(args.cgm_tokenizer_path)
+    if args.cgm_endpoint:
+        os.environ["CGM_ENDPOINT"] = str(args.cgm_endpoint)
+    if args.cgm_model:
+        os.environ["CGM_MODEL"] = str(args.cgm_model)
+    if args.cgm_api_key:
+        env_name = str(args.cgm_api_key_env or "CGM_API_KEY")
+        os.environ[env_name] = str(args.cgm_api_key)
+        os.environ["CGM_API_KEY_ENV"] = env_name
+    elif args.cgm_api_key_env:
+        os.environ["CGM_API_KEY_ENV"] = str(args.cgm_api_key_env)
+    if args.cgm_timeout is not None:
+        os.environ["CGM_TIMEOUT_S"] = str(int(args.cgm_timeout))
     os.environ["CGM_MAX_INPUT_TOKENS"] = str(args.cgm_max_input_tokens)
     os.environ["CGM_MAX_TOKENS"] = str(args.cgm_max_output_tokens)
     os.environ["CGM_TEMPERATURE"] = str(args.cgm_temperature)
@@ -296,26 +435,62 @@ def main() -> None:
         "model": args.planner_model,
         "temperature": args.planner_temperature,
         "top_p": args.planner_top_p,
+        "max_tokens": args.max_response_tokens,
     }
 
-    rollout_args = {
-        "base_url": args.planner_base_url,
-        "api_key": args.planner_api_key,
+    rollout_args = {"base_url": args.planner_base_url}
+    if args.planner_api_key:
+        rollout_args["api_key"] = args.planner_api_key
+    if args.planner_timeout:
+        rollout_args["timeout"] = args.planner_timeout
+
+    agent_args: Dict[str, Any] = {
+        "use_rule_fallback": not args.disable_rule_fallback,
     }
+    system_prompt_override: str | None = None
+    if args.agent_system_prompt_path:
+        system_prompt_override = Path(args.agent_system_prompt_path).read_text(encoding="utf-8")
+    elif args.agent_system_prompt is not None:
+        system_prompt_override = str(args.agent_system_prompt)
+    if system_prompt_override is not None:
+        agent_args["system_prompt"] = system_prompt_override
+
+    env_args: Dict[str, Any] = {"max_steps": args.max_steps}
+    if args.reward_scale is not None:
+        env_args["reward_scale"] = args.reward_scale
+    if args.failure_penalty is not None:
+        env_args["failure_penalty"] = args.failure_penalty
+    if args.step_penalty is not None:
+        env_args["step_penalty"] = args.step_penalty
+    if args.timeout_penalty is not None:
+        env_args["timeout_penalty"] = args.timeout_penalty
+    if args.repo_op_limit is not None:
+        env_args["repo_operation_limit"] = args.repo_op_limit
+    env_args["enable_cgm_synthesis"] = not args.disable_cgm_synthesis
+    if args.synthesis_strategy:
+        env_args["synthesis_strategy"] = args.synthesis_strategy
+
+    trajectory_timeout = args.trajectory_timeout if args.trajectory_timeout is not None else args.planner_timeout
 
     engine = AgentExecutionEngine(
         agent_class=agent_cls,
         env_class=env_cls,
-        agent_args={},
-        env_args={"max_steps": args.max_steps},
-        engine_name="openai",
+        agent_args=agent_args,
+        env_args=env_args,
+        engine_name=args.engine_name,
         tokenizer=tokenizer,
         sampling_params=sampling_params,
         rollout_engine_args=rollout_args,
         n_parallel_agents=args.parallel,
         max_response_length=args.max_response_tokens,
         max_prompt_length=args.max_prompt_tokens,
-        trajectory_timeout=args.planner_timeout,
+        trajectory_timeout=trajectory_timeout,
+        gamma=args.gamma,
+        retry_limit=args.retry_limit,
+        api_retries=args.api_retries,
+        max_workers=args.max_workers,
+        enforce_max_prompt_length=args.enforce_max_prompt_length,
+        overlong_filter=args.overlong_filter,
     )
 
     LOGGER.info(
