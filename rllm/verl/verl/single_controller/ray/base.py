@@ -492,6 +492,9 @@ class RayWorkerGroup(WorkerGroup):
                 if has_cuda_visible_override and self.device_name == "cuda":
                     per_worker_num_gpus = 0
                     effective_use_gpu = False
+                    override_value = env_vars.get("CUDA_VISIBLE_DEVICES")
+                    if override_value:
+                        env_vars.setdefault("VERL_CUDA_VISIBLE_DEVICES_OVERRIDE", override_value)
 
                 # create a worker
                 worker = ray_cls_with_init(
