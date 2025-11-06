@@ -2379,11 +2379,8 @@ class RayPPOTrainer:
             if runtime_env:
                 rollout_cls.update_options({"runtime_env": runtime_env})
 
-            # 在决定不用 GPU 的情况下，告诉 Ray 明确是 0
-            if not rollout_need_gpu:
-                rollout_cls.update_options({"num_gpus": 0})
-            else:
-                rollout_cls.update_options({"num_gpus": 1})
+            # 拓扑里已经通过 CUDA_VISIBLE_DEVICES 精确指定 GPU，这里统一告诉 Ray 需求为 0
+            rollout_cls.update_options({"num_gpus": 0})
                 
             
             rollout_wg = self.ray_worker_group_cls(

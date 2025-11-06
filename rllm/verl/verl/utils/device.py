@@ -9,10 +9,54 @@
 # This source code is licensed under the BSD-style license in https://github.com/pytorch/torchtune/blob/main/LICENSE
 
 import logging
+import os
+from typing import Callable
 
 import torch
 
 logger = logging.getLogger(__name__)
+
+_CUDA_VISIBLE_OVERRIDE_ENV = "VERL_CUDA_VISIBLE_DEVICES_OVERRIDE"
+
+
+def _apply_cuda_visible_override() -> None:
+    """Re-apply CUDA visibility when Ray resets it for zero-GPU actors.
+
+    Ray clears ``CUDA_VISIBLE_DEVICES`` for actors that do not request GPU
+    resources.  When we rely on topology-provided ``worker_env_overrides``
+    to pin GPUs, this clearing happens *after* the runtime environment is
+    applied, leading to a process that believes no CUDA device is available.
+
+    To defend against this, we stash the desired visibility in
+    ``VERL_CUDA_VISIBLE_DEVICES_OVERRIDE`` and restore it here before any
+    CUDA availability checks run.
+    """
+
+    override = os.environ.get(_CUDA_VISIBLE_OVERRIDE_ENV)
+    if override:
+        os.environ["CUDA_VISIBLE_DEVICES"] = override
+
+
+_apply_cuda_visible_override()
+
+
+class _LazyAvailability:
+    """Boolean-like helper that evaluates hardware availability lazily."""
+
+    def __init__(self, getter: Callable[[], bool]) -> None:
+        self._getter = getter
+
+    def __bool__(self) -> bool:  # pragma: no cover - trivial wrapper
+        try:
+            return bool(self._getter())
+        except Exception:  # pragma: no cover - defensive guard
+            return False
+
+    def __call__(self) -> bool:
+        return bool(self)
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging helper
+        return f"{self.__class__.__name__}({bool(self)})"
 
 
 def is_torch_npu_available() -> bool:
@@ -25,8 +69,12 @@ def is_torch_npu_available() -> bool:
         return False
 
 
-is_cuda_available = torch.cuda.is_available()
-is_npu_available = is_torch_npu_available()
+def _is_cuda_available() -> bool:
+    return torch.cuda.is_available()
+
+
+is_cuda_available = _LazyAvailability(_is_cuda_available)
+is_npu_available = _LazyAvailability(is_torch_npu_available)
 
 
 def get_visible_devices_keyword() -> str:
@@ -34,7 +82,7 @@ def get_visible_devices_keyword() -> str:
     Returns:
         'CUDA_VISIBLE_DEVICES' or `ASCEND_RT_VISIBLE_DEVICES`
     """
-    return "CUDA_VISIBLE_DEVICES" if is_cuda_available else "ASCEND_RT_VISIBLE_DEVICES"
+    return "CUDA_VISIBLE_DEVICES" if is_cuda_available() else "ASCEND_RT_VISIBLE_DEVICES"
 
 
 def get_device_name() -> str:
@@ -43,9 +91,9 @@ def get_device_name() -> str:
     Returns:
         device
     """
-    if is_cuda_available:
+    if is_cuda_available():
         device = "cuda"
-    elif is_npu_available:
+    elif is_npu_available():
         device = "npu"
     else:
         device = "cpu"
@@ -78,9 +126,9 @@ def get_nccl_backend() -> str:
     Returns:
         nccl backend type string.
     """
-    if is_cuda_available:
+    if is_cuda_available():
         return "nccl"
-    elif is_npu_available:
+    elif is_npu_available():
         return "hccl"
     else:
         raise RuntimeError(f"No available nccl backend found on device type {get_device_name()}.")
