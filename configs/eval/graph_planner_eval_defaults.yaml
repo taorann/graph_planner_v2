@@ -1,0 +1,40 @@
+# Default launch settings for scripts/eval_graph_planner_engine.py
+# Update the paths or credentials to match your local deployment.
+# 默认使用 SWE-bench Verified 测试集 JSONL；如需快速自检，可改用
+# datasets/graphplanner_repoenv_sample.jsonl。
+dataset: datasets/swebench/test.jsonl
+planner_model: models/Qwen3-14B
+planner_model_path: models/Qwen3-14B
+planner_tokenizer: models/Qwen3-14B
+planner_base_url: http://localhost:30000/v1
+planner_api_key_env: PLANNER_MODEL_API_KEY
+auto_launch_planner_service: true
+planner_service_gpus: "0,1"
+planner_service_tensor_parallel_size: 2
+planner_service_startup_timeout: 360
+planner_temperature: 0.0
+planner_top_p: 0.95
+planner_timeout: 180
+max_prompt_tokens: 4096
+max_response_tokens: 4096
+max_steps: 8
+parallel: 4
+cgm_model_path: models/CodeFuse-CGM
+cgm_tokenizer_path: models/CodeFuse-CGM
+cgm_endpoint: http://localhost:30001/generate
+cgm_api_key_env: CGM_API_KEY
+cgm_service_gpus: "2,3"
+auto_launch_cgm_service: true
+cgm_service_startup_timeout: 360
+cgm_service_log_level: info
+cgm_max_input_tokens: 8192
+cgm_max_output_tokens: 1024
+cgm_temperature: 0.0
+cgm_top_p: 0.9
+engine_name: openai
+gamma: 0.2
+retry_limit: 3
+api_retries: 3
+trajectory_timeout: 180
+max_workers: 64
+repo_op_limit: 40

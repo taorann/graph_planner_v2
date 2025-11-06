@@ -41,6 +41,8 @@ class SandboxConfig:
     # 统一后端切换：
     backend: str = "auto"            # "auto" | "r2e" | "repoenv" | "docker"
     r2e_ds_json: Optional[str] = None  # 指向一个 JSON 文件，内容是 r2e 期望的 ds dict
+    requires_build: bool = False       # SWE-bench 元数据：提示容器是否需要 build
+    swebench_spec: Optional[Dict[str, Any]] = None  # 透传 swe-bench 的构建脚本信息
 
 class SandboxRuntime:
     """

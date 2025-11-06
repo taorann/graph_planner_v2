@@ -72,7 +72,7 @@ CLI / Scripts / Tests
   3. 如果有人将 rLLM 独立检出到仓库同级目录，也会检测 `../rllm`；
   4. 最后回退到仓库根本身，以兼容 `pip install -e .` 等开发方式；
   5. 每次插入候选路径后刷新 `importlib` 缓存，并验证 `rllm` 与 `rllm.rllm.agents.agent`/`rllm.agents.agent`、`rllm.rllm.environments.base.base_env`/`rllm.environments.base.base_env` 是否可解析，只有在确认结构完整后才返回成功。【F:graph_planner/infra/vendor.py†L1-L112】
-- 因为路径是明确定义的，所以 `integrations/rllm` 内部在导入时会优先尝试 `from rllm.rllm.agents.agent import BaseAgent`、`from rllm.rllm.data.dataset import DatasetRegistry`，若该层级不存在则退回到 `from rllm.agents.agent import ...`。IDE 若提示波浪线，通常是尚未执行 `ensure_rllm_importable()`（即缺少 sys.path 注入）导致，此函数在包的 `__init__` 与各子模块文件顶层都会最先运行一次，确保解释器和静态分析都能定位到 vendored rLLM。【F:graph_planner/integrations/rllm/__init__.py†L1-L61】【F:graph_planner/integrations/rllm/dataset.py†L12-L43】
+- 因为路径是明确定义的，所以 `integrations/rllm` 内部在导入代理类时会优先尝试 `from rllm.agents.agent import BaseAgent`（与执行引擎保持同一来源），若该层级不存在再退回到 `from rllm.rllm.agents.agent import ...`；数据集注册仍以 `rllm.rllm.data.dataset` 为主。IDE 若提示波浪线，通常是尚未执行 `ensure_rllm_importable()`（即缺少 sys.path 注入）导致，此函数在包的 `__init__` 与各子模块文件顶层都会最先运行一次，确保解释器和静态分析都能定位到 vendored rLLM。【F:graph_planner/integrations/rllm/__init__.py†L1-L61】【F:graph_planner/integrations/rllm/dataset.py†L12-L43】
 
 ### 2.2 Planner / CGM Prompt & Response Contracts
 
@@ -363,6 +363,8 @@ R2E-Gym 本身提供了 RepoEnv 环境、动作解析与容器运行时等通用
 | CGM 本地推理 | `python - <<'PY'`<br>`from graph_planner.integrations.codefuse_cgm import CodeFuseCGMGenerator, CGMExample;`<br>`gen = CodeFuseCGMGenerator.from_pretrained("<model>");`<br>`example = CGMExample.from_json_file("sample.json");`<br>`print(gen.generate(example).model_dump())`<br>`PY` |
 | CGM 监督微调 | `PYTHONPATH=. python - <<'PY'`<br>`from graph_planner.integrations.codefuse_cgm import CodeFuseCGMTrainer, CGMTrainingConfig;`<br>`cfg = CGMTrainingConfig(model_name="<model>", train_path="train.jsonl", output_dir="runs/cgm");`<br>`CodeFuseCGMTrainer(cfg).train()`<br>`PY` |
 | rLLM PPO 训练 | `PYTHONPATH=. python scripts/train_planner_grpo.py --config configs/experiments/planner_grpo_4gpu.yaml --print-config` |
+
+- `scripts/run_eval_graph_planner.sh` 会把默认配置 `configs/eval/graph_planner_eval_defaults.yaml` 注入评估 CLI；若 `planner_base_url` 指向本机且给出了 `planner_model_path`，脚本会根据配置自动拉起 vLLM OpenAI 服务（默认映射到 GPU `0,1`，tensor parallel 为 2），待端点就绪后再启动异步评测。需要禁用或自定义设备时，可在 YAML/CLI 覆写 `auto_launch_planner_service`、`planner_service_gpus` 或 `planner_service_tensor_parallel_size`。【F:scripts/eval_graph_planner_engine.py†L84-L213】【F:scripts/eval_graph_planner_engine.py†L517-L576】【F:configs/eval/graph_planner_eval_defaults.yaml†L1-L21】
 
 ## 6. 日志与调试建议 / Logging & troubleshooting
 
