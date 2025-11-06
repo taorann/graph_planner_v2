@@ -263,7 +263,42 @@ def _parse_args() -> argparse.Namespace:
     return args
 
 
-def _configure_runtime_env(args: argparse.Namespace) -> None:
+def _resolve_api_key(
+    explicit: str | None,
+    env_name: str | None,
+    *,
+    default_env: str,
+    fallback_envs: Iterable[str] = (),
+) -> tuple[str | None, str | None]:
+    """Return an API key and the environment variable that should expose it."""
+
+    candidates: list[str] = []
+    if env_name:
+        candidates.append(env_name)
+    if default_env not in candidates:
+        candidates.append(default_env)
+    for fallback in fallback_envs:
+        if fallback and fallback not in candidates:
+            candidates.append(fallback)
+
+    if explicit:
+        return str(explicit), candidates[0] if candidates else None
+
+    for candidate in candidates:
+        if candidate and os.environ.get(candidate):
+            return os.environ[candidate], candidate
+
+    return None, candidates[0] if candidates else None
+
+
+def _configure_runtime_env(
+    args: argparse.Namespace,
+    *,
+    planner_api_key: str | None,
+    planner_api_key_env: str | None,
+    cgm_api_key: str | None,
+    cgm_api_key_env: str | None,
+) -> None:
     os.environ["PLANNER_MODEL_ENABLED"] = "1"
     os.environ["PLANNER_MODEL_ENDPOINT"] = str(args.planner_base_url)
     os.environ["PLANNER_MODEL_MODEL"] = str(args.planner_model)
@@ -278,12 +313,13 @@ def _configure_runtime_env(args: argparse.Namespace) -> None:
     if args.planner_system_prompt:
         prompt_text = Path(args.planner_system_prompt).read_text(encoding="utf-8")
         os.environ["PLANNER_MODEL_SYSTEM_PROMPT"] = prompt_text
-    if args.planner_api_key:
-        env_name = str(args.planner_api_key_env or "PLANNER_MODEL_API_KEY")
-        os.environ[env_name] = str(args.planner_api_key)
-        os.environ["PLANNER_MODEL_API_KEY_ENV"] = env_name
-    elif args.planner_api_key_env:
-        os.environ["PLANNER_MODEL_API_KEY_ENV"] = str(args.planner_api_key_env)
+    if planner_api_key_env:
+        if planner_api_key:
+            os.environ[planner_api_key_env] = planner_api_key
+        os.environ["PLANNER_MODEL_API_KEY_ENV"] = planner_api_key_env
+    elif planner_api_key:
+        os.environ["PLANNER_MODEL_API_KEY_ENV"] = "PLANNER_MODEL_API_KEY"
+        os.environ["PLANNER_MODEL_API_KEY"] = planner_api_key
     if args.planner_max_input_tokens is not None:
         os.environ["PLANNER_MODEL_MAX_INPUT_TOKENS"] = str(args.planner_max_input_tokens)
     if args.planner_device:
@@ -299,12 +335,13 @@ def _configure_runtime_env(args: argparse.Namespace) -> None:
         os.environ["CGM_ENDPOINT"] = str(args.cgm_endpoint)
     if args.cgm_model:
         os.environ["CGM_MODEL"] = str(args.cgm_model)
-    if args.cgm_api_key:
-        env_name = str(args.cgm_api_key_env or "CGM_API_KEY")
-        os.environ[env_name] = str(args.cgm_api_key)
-        os.environ["CGM_API_KEY_ENV"] = env_name
-    elif args.cgm_api_key_env:
-        os.environ["CGM_API_KEY_ENV"] = str(args.cgm_api_key_env)
+    if cgm_api_key_env:
+        if cgm_api_key:
+            os.environ[cgm_api_key_env] = cgm_api_key
+        os.environ["CGM_API_KEY_ENV"] = cgm_api_key_env
+    elif cgm_api_key:
+        os.environ["CGM_API_KEY_ENV"] = "CGM_API_KEY"
+        os.environ["CGM_API_KEY"] = cgm_api_key
     if args.cgm_timeout is not None:
         os.environ["CGM_TIMEOUT_S"] = str(int(args.cgm_timeout))
     os.environ["CGM_MAX_INPUT_TOKENS"] = str(args.cgm_max_input_tokens)
@@ -487,7 +524,31 @@ def main() -> None:
         compute_pass_at_k,
     ) = _ensure_rllm_components()
 
-    _configure_runtime_env(args)
+    planner_api_key, planner_api_key_env = _resolve_api_key(
+        args.planner_api_key,
+        args.planner_api_key_env,
+        default_env="PLANNER_MODEL_API_KEY",
+        fallback_envs=("OPENAI_API_KEY",),
+    )
+    if args.engine_name == "openai" and not planner_api_key:
+        raise RuntimeError(
+            "Planner API key missing. Provide --planner-api-key or set one of "
+            "PLANNER_MODEL_API_KEY, the value of --planner-api-key-env, or OPENAI_API_KEY."
+        )
+
+    cgm_api_key, cgm_api_key_env = _resolve_api_key(
+        args.cgm_api_key,
+        args.cgm_api_key_env,
+        default_env="CGM_API_KEY",
+    )
+
+    _configure_runtime_env(
+        args,
+        planner_api_key=planner_api_key,
+        planner_api_key_env=planner_api_key_env,
+        cgm_api_key=cgm_api_key,
+        cgm_api_key_env=cgm_api_key_env,
+    )
 
     tasks = _load_tasks(
         args.dataset,
@@ -506,8 +567,8 @@ def main() -> None:
     }
 
     rollout_args = {"base_url": args.planner_base_url}
-    if args.planner_api_key:
-        rollout_args["api_key"] = args.planner_api_key
+    if planner_api_key:
+        rollout_args["api_key"] = planner_api_key
     if args.planner_timeout:
         rollout_args["timeout"] = args.planner_timeout
 
