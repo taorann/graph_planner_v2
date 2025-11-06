@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+
+if [ -z "${BASH_VERSION:-}" ]; then
+  echo "This script must be run with bash (try 'bash $0')." >&2
+  exit 1
+fi
+
 set -euo pipefail
 
 # Build the local RepoEnv-compatible sample image used by the rule-based agent
