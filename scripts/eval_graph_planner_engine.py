@@ -221,6 +221,12 @@ def _auto_launch_planner_service(args: argparse.Namespace):
     if args.planner_max_input_tokens:
         cmd.extend(["--max-model-len", str(args.planner_max_input_tokens)])
 
+    gpu_memory_utilization = getattr(
+        args, "planner_service_gpu_memory_utilization", None
+    )
+    if gpu_memory_utilization is not None:
+        cmd.extend(["--gpu-memory-utilization", str(gpu_memory_utilization)])
+
     LOGGER.info("Auto-launching planner service with command: %s", shlex.join(cmd))
 
     env = os.environ.copy()
@@ -492,6 +498,12 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=300.0,
         help="Seconds to wait for the planner service to report ready",
+    )
+    parser.add_argument(
+        "--planner-service-gpu-memory-utilization",
+        type=float,
+        default=None,
+        help="Optional gpu_memory_utilization override for an auto-launched planner service",
     )
     parser.add_argument("--max-prompt-tokens", type=int, default=4096)
     parser.add_argument("--max-response-tokens", type=int, default=4096)
