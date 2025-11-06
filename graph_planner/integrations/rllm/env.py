@@ -43,17 +43,60 @@ else:
     class GraphPlannerRLLMEnv(BaseEnv):
         """Adapter that exposes :class:`PlannerEnv` through the rLLM ``BaseEnv`` API."""
 
-        def __init__(self, entry: Dict[str, Any], *, max_steps: int = 8) -> None:
+        def __init__(
+            self,
+            entry: Dict[str, Any],
+            *,
+            max_steps: int = 8,
+            reward_scale: float | None = None,
+            failure_penalty: float | None = None,
+            step_penalty: float | None = None,
+            timeout_penalty: float | None = None,
+            repo_operation_limit: int | None = None,
+            enable_cgm_synthesis: bool | None = None,
+            synthesis_strategy: str | None = None,
+        ) -> None:
             self.entry = deepcopy(entry)
             self.max_steps = int(entry.get("max_steps", max_steps))
-            self.reward_scale = float(entry.get("reward_scale", 1.0))
-            self.failure_penalty = float(entry.get("failure_penalty", 0.0))
-            self.step_penalty = float(entry.get("step_penalty", 0.0))
-            self.timeout_penalty = float(entry.get("timeout_penalty", 0.0))
-            limit = entry.get("repo_operation_limit") or entry.get("repo_op_limit")
-            self.repo_operation_limit = int(limit) if limit else None
-            self.enable_cgm_synthesis = bool(entry.get("enable_cgm_synthesis", True))
-            self.synthesis_strategy = entry.get("synthesis_strategy")
+            base_reward_scale = float(entry.get("reward_scale", 1.0))
+            self.reward_scale = float(
+                reward_scale if reward_scale is not None else base_reward_scale
+            )
+            base_failure_penalty = float(entry.get("failure_penalty", 0.0))
+            self.failure_penalty = float(
+                failure_penalty
+                if failure_penalty is not None
+                else base_failure_penalty
+            )
+            base_step_penalty = float(entry.get("step_penalty", 0.0))
+            self.step_penalty = float(
+                step_penalty if step_penalty is not None else base_step_penalty
+            )
+            base_timeout_penalty = float(entry.get("timeout_penalty", 0.0))
+            self.timeout_penalty = float(
+                timeout_penalty
+                if timeout_penalty is not None
+                else base_timeout_penalty
+            )
+            entry_repo_limit = entry.get("repo_operation_limit") or entry.get(
+                "repo_op_limit"
+            )
+            limit_value = (
+                repo_operation_limit
+                if repo_operation_limit is not None
+                else entry_repo_limit
+            )
+            self.repo_operation_limit = int(limit_value) if limit_value else None
+            entry_enable_cgm = bool(entry.get("enable_cgm_synthesis", True))
+            if enable_cgm_synthesis is None:
+                self.enable_cgm_synthesis = entry_enable_cgm
+            else:
+                self.enable_cgm_synthesis = bool(enable_cgm_synthesis)
+            self.synthesis_strategy = (
+                synthesis_strategy
+                if synthesis_strategy is not None
+                else entry.get("synthesis_strategy")
+            )
             self._planner: PlannerEnv | None = None
             self._last_observation: Dict[str, Any] | None = None
             self._issue_uid = uuid4().hex
@@ -160,6 +203,10 @@ else:
                 ):
                     if key in extra_info:
                         env_kwargs[key] = extra_info[key]
+                if "repo_op_limit" in env_kwargs and "repo_operation_limit" not in env_kwargs:
+                    env_kwargs["repo_operation_limit"] = env_kwargs.pop("repo_op_limit")
+                else:
+                    env_kwargs.pop("repo_op_limit", None)
             raw_entry = extra_info.get("raw_entry_json") if isinstance(extra_info, dict) else None
             if raw_entry:
                 extra_payload = json.loads(raw_entry)
