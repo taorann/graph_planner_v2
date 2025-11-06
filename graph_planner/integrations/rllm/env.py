@@ -227,7 +227,9 @@ else:
             ds_path = sandbox_dict.get("r2e_ds_json")
             if ds_path:
                 sandbox_dict["r2e_ds_json"] = str(Path(ds_path).expanduser().resolve())
-            sandbox_cfg = SandboxConfig(**sandbox_dict)
+            allowed_fields = set(SandboxConfig.__dataclass_fields__.keys())
+            sandbox_kwargs = {k: v for k, v in sandbox_dict.items() if k in allowed_fields}
+            sandbox_cfg = SandboxConfig(**sandbox_kwargs)
             issue = self._build_issue_payload()
             return PlannerEnv(issue=issue, sandbox_cfg=sandbox_cfg)
 

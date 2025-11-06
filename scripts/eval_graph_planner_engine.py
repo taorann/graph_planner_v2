@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
+import shlex
+import subprocess
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
+from urllib.error import URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 import yaml
 from transformers import AutoTokenizer
@@ -119,6 +126,299 @@ def _resolve_path(
     return candidates[0]
 
 
+def _build_models_url(base_url: str) -> str:
+    base = base_url.rstrip("/")
+    return f"{base}/models"
+
+
+def _planner_endpoint_alive(base_url: str, *, timeout: float = 2.0) -> bool:
+    try:
+        request = Request(_build_models_url(base_url))
+        with urlopen(request, timeout=timeout) as response:
+            return 200 <= getattr(response, "status", 200) < 300
+    except URLError:
+        return False
+    except Exception:  # noqa: BLE001 - best effort probe
+        return False
+
+
+def _is_local_host(hostname: str | None) -> bool:
+    if hostname is None:
+        return True
+    hostname = hostname.lower()
+    if hostname in {"localhost", "0.0.0.0", "127.0.0.1", "::1"}:
+        return True
+    return hostname.startswith("127.")
+
+
+@contextlib.contextmanager
+def _auto_launch_planner_service(args: argparse.Namespace):
+    if not getattr(args, "auto_launch_planner_service", False):
+        yield None
+        return
+
+    if args.engine_name != "openai":
+        LOGGER.info("Skipping auto-launch: engine_name=%s", args.engine_name)
+        yield None
+        return
+
+    if args.planner_model_path is None:
+        raise RuntimeError(
+            "--auto-launch-planner-service requires --planner-model-path to point to a local checkpoint"
+        )
+
+    parsed = urlparse(args.planner_base_url)
+    if not _is_local_host(parsed.hostname):
+        LOGGER.info(
+            "Skipping auto-launch: planner_base_url=%s is not a localhost endpoint",
+            args.planner_base_url,
+        )
+        yield None
+        return
+
+    if not args.planner_model_path.exists():
+        raise FileNotFoundError(
+            f"Planner checkpoint not found: {args.planner_model_path}"
+        )
+
+    if _planner_endpoint_alive(args.planner_base_url):
+        LOGGER.info(
+            "Planner endpoint already responding at %s; auto-launch skipped",
+            args.planner_base_url,
+        )
+        yield None
+        return
+
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
+    cmd: list[str] = [
+        "python",
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--model",
+        str(args.planner_model_path),
+        "--host",
+        host,
+        "--port",
+        str(port),
+        "--served-model-name",
+        str(args.planner_model),
+        "--trust-remote-code",
+    ]
+
+    if args.planner_tokenizer:
+        cmd.extend(["--tokenizer", str(args.planner_tokenizer)])
+
+    if getattr(args, "planner_service_tensor_parallel_size", None):
+        cmd.extend(
+            [
+                "--tensor-parallel-size",
+                str(args.planner_service_tensor_parallel_size),
+            ]
+        )
+
+    if args.planner_max_input_tokens:
+        cmd.extend(["--max-model-len", str(args.planner_max_input_tokens)])
+
+    LOGGER.info("Auto-launching planner service with command: %s", shlex.join(cmd))
+
+    env = os.environ.copy()
+    if getattr(args, "planner_service_gpus", None):
+        env["CUDA_VISIBLE_DEVICES"] = str(args.planner_service_gpus)
+
+    process = subprocess.Popen(cmd, env=env)
+    ready = False
+    deadline = time.time() + float(getattr(args, "planner_service_startup_timeout", 300.0))
+    poll_interval = 2.0
+
+    try:
+        while time.time() < deadline:
+            retcode = process.poll()
+            if retcode is not None:
+                raise RuntimeError(
+                    f"Planner service exited early with code {retcode}"
+                )
+            if _planner_endpoint_alive(args.planner_base_url):
+                ready = True
+                LOGGER.info(
+                    "Planner service is ready at %s",
+                    args.planner_base_url,
+                )
+                break
+            time.sleep(poll_interval)
+
+        if not ready:
+            raise TimeoutError(
+                "Planner service did not become ready before timeout"
+            )
+
+        yield process
+    finally:
+        if process.poll() is None:
+            LOGGER.info("Shutting down auto-launched planner service")
+            process.terminate()
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        else:
+            LOGGER.info("Planner service process ended with code %s", process.returncode)
+
+
+def _format_netloc(host: str, port: int | None, scheme: str) -> str:
+    if port is None:
+        return host
+    default_port = 80 if scheme == "http" else 443 if scheme == "https" else None
+    if default_port is not None and port == default_port:
+        return host
+    return f"{host}:{port}"
+
+
+def _cgm_health_url(
+    parsed: "urllib.parse.ParseResult", *, port_override: int | None = None
+) -> str:
+    scheme = parsed.scheme or "http"
+    host = parsed.hostname or "127.0.0.1"
+    port = port_override if port_override is not None else parsed.port
+    netloc = _format_netloc(host, port, scheme)
+    return f"{scheme}://{netloc}/healthz"
+
+
+def _cgm_service_alive(url: str, *, timeout: float = 2.0) -> bool:
+    try:
+        request = Request(url)
+        with urlopen(request, timeout=timeout) as response:
+            return 200 <= getattr(response, "status", 200) < 300
+    except URLError:
+        return False
+    except Exception:  # noqa: BLE001 - best effort probe
+        return False
+
+
+@contextlib.contextmanager
+def _auto_launch_cgm_service(args: argparse.Namespace):
+    if not getattr(args, "auto_launch_cgm_service", False):
+        yield None
+        return
+
+    if args.disable_cgm_synthesis:
+        LOGGER.info("Skipping CGM auto-launch because synthesis is disabled")
+        yield None
+        return
+
+    if args.cgm_endpoint is None:
+        raise RuntimeError(
+            "--auto-launch-cgm-service requires --cgm-endpoint to point to the local service"
+        )
+
+    if args.cgm_model_path is None:
+        raise RuntimeError(
+            "--auto-launch-cgm-service requires --cgm-model-path to provide a local checkpoint"
+        )
+
+    parsed = urlparse(args.cgm_endpoint)
+    scheme = parsed.scheme or "http"
+    if scheme not in {"http", "https", ""}:
+        raise RuntimeError(
+            f"Unsupported scheme for CGM endpoint: {scheme}; expected http or https"
+        )
+
+    if not _is_local_host(parsed.hostname):
+        LOGGER.info(
+            "Skipping CGM auto-launch: endpoint %s is not localhost",
+            args.cgm_endpoint,
+        )
+        yield None
+        return
+
+    if not args.cgm_model_path.exists():
+        raise FileNotFoundError(
+            f"CGM checkpoint not found: {args.cgm_model_path}"
+        )
+
+    route = parsed.path or "/generate"
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or (443 if scheme == "https" else 30001)
+    health_url = _cgm_health_url(parsed, port_override=port)
+
+    if _cgm_service_alive(health_url):
+        LOGGER.info("CGM endpoint already responding at %s; auto-launch skipped", args.cgm_endpoint)
+        yield None
+        return
+
+    cmd: list[str] = [
+        "python",
+        "-m",
+        "graph_planner.integrations.codefuse_cgm.service",
+        "--model",
+        str(args.cgm_model_path),
+        "--host",
+        host,
+        "--port",
+        str(port),
+        "--route",
+        route or "/generate",
+        "--max-input-tokens",
+        str(args.cgm_max_input_tokens),
+        "--max-new-tokens",
+        str(args.cgm_max_output_tokens),
+        "--temperature",
+        str(args.cgm_temperature),
+        "--top-p",
+        str(args.cgm_top_p),
+        "--log-level",
+        str(getattr(args, "cgm_service_log_level", "info")),
+    ]
+
+    if args.cgm_tokenizer_path:
+        cmd.extend(["--tokenizer", str(args.cgm_tokenizer_path)])
+    if args.cgm_device:
+        cmd.extend(["--device", str(args.cgm_device)])
+    if args.cgm_device_map:
+        cmd.extend(["--device-map", str(args.cgm_device_map)])
+
+    LOGGER.info("Auto-launching CGM service with command: %s", shlex.join(cmd))
+
+    env = os.environ.copy()
+    service_gpus = getattr(args, "cgm_service_gpus", None)
+    if service_gpus:
+        env["CUDA_VISIBLE_DEVICES"] = str(service_gpus)
+
+    process = subprocess.Popen(cmd, env=env)
+    ready = False
+    deadline = time.time() + float(getattr(args, "cgm_service_startup_timeout", 300.0))
+    poll_interval = 2.0
+
+    try:
+        while time.time() < deadline:
+            retcode = process.poll()
+            if retcode is not None:
+                raise RuntimeError(
+                    f"CGM service exited early with code {retcode}"
+                )
+            if _cgm_service_alive(health_url):
+                ready = True
+                LOGGER.info("CGM service is ready at %s", args.cgm_endpoint)
+                break
+            time.sleep(poll_interval)
+
+        if not ready:
+            raise TimeoutError("CGM service did not become ready before timeout")
+
+        yield process
+    finally:
+        if process.poll() is None:
+            LOGGER.info("Shutting down auto-launched CGM service")
+            process.terminate()
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        else:
+            LOGGER.info("CGM service process ended with code %s", process.returncode)
+
+
 def _parse_args() -> argparse.Namespace:
     config_parser = argparse.ArgumentParser(add_help=False)
     config_parser.add_argument(
@@ -163,6 +463,36 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--planner-max-input-tokens", type=int, default=None)
     parser.add_argument("--planner-device", default=None)
     parser.add_argument("--planner-device-map", default=None)
+    parser.set_defaults(auto_launch_planner_service=False)
+    parser.add_argument(
+        "--auto-launch-planner-service",
+        dest="auto_launch_planner_service",
+        action="store_true",
+        help="Automatically launch a local vLLM service when planner_base_url targets localhost",
+    )
+    parser.add_argument(
+        "--no-auto-launch-planner-service",
+        dest="auto_launch_planner_service",
+        action="store_false",
+        help="Disable automatic planner service startup",
+    )
+    parser.add_argument(
+        "--planner-service-gpus",
+        default=None,
+        help="CUDA_VISIBLE_DEVICES value for an auto-launched planner service",
+    )
+    parser.add_argument(
+        "--planner-service-tensor-parallel-size",
+        type=int,
+        default=None,
+        help="Tensor parallel degree passed to the auto-launched planner service",
+    )
+    parser.add_argument(
+        "--planner-service-startup-timeout",
+        type=float,
+        default=300.0,
+        help="Seconds to wait for the planner service to report ready",
+    )
     parser.add_argument("--max-prompt-tokens", type=int, default=4096)
     parser.add_argument("--max-response-tokens", type=int, default=4096)
     parser.add_argument("--max-steps", type=int, default=8, help="Upper bound on planner interactions per task")
@@ -182,6 +512,35 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--cgm-top-p", type=float, default=0.9)
     parser.add_argument("--cgm-device", default=None)
     parser.add_argument("--cgm-device-map", default=None)
+    parser.set_defaults(auto_launch_cgm_service=False)
+    parser.add_argument(
+        "--auto-launch-cgm-service",
+        dest="auto_launch_cgm_service",
+        action="store_true",
+        help="Automatically launch a local CGM service when cgm_endpoint targets localhost",
+    )
+    parser.add_argument(
+        "--no-auto-launch-cgm-service",
+        dest="auto_launch_cgm_service",
+        action="store_false",
+        help="Disable automatic CGM service startup",
+    )
+    parser.add_argument(
+        "--cgm-service-gpus",
+        default=None,
+        help="CUDA_VISIBLE_DEVICES value for an auto-launched CGM service",
+    )
+    parser.add_argument(
+        "--cgm-service-startup-timeout",
+        type=float,
+        default=300.0,
+        help="Seconds to wait for the CGM service health endpoint",
+    )
+    parser.add_argument(
+        "--cgm-service-log-level",
+        default="info",
+        help="Log level forwarded to the CGM service",
+    )
     parser.add_argument("--gamma", type=float, default=0.2, help="Discount factor for Monte Carlo return aggregation")
     parser.add_argument("--retry-limit", type=int, default=3, help="Maximum number of retries for failed model calls")
     parser.add_argument("--api-retries", type=int, default=3, help="Retry attempts within the OpenAI-compatible client")
@@ -550,6 +909,20 @@ def main() -> None:
         cgm_api_key_env=cgm_api_key_env,
     )
 
+    if args.engine_name == "openai":
+        LOGGER.info(
+            "Planner rollouts will call an OpenAI-compatible endpoint at %s using model=%s; "
+            "start the service (e.g. vLLM api_server) or supply a hosted provider before running.",
+            args.planner_base_url,
+            args.planner_model,
+        )
+        if args.planner_model_path:
+            LOGGER.info(
+                "planner_model_path=%s is exported for Graph Planner's local fallback clients, "
+                "but the rLLM engine still relies on the HTTP endpoint above.",
+                args.planner_model_path,
+            )
+
     tasks = _load_tasks(
         args.dataset,
         ensure_dataset_registered=ensure_dataset_registered,
@@ -600,32 +973,39 @@ def main() -> None:
 
     trajectory_timeout = args.trajectory_timeout if args.trajectory_timeout is not None else args.planner_timeout
 
-    engine = AgentExecutionEngine(
-        agent_class=agent_cls,
-        env_class=env_cls,
-        agent_args=agent_args,
-        env_args=env_args,
-        engine_name=args.engine_name,
-        tokenizer=tokenizer,
-        sampling_params=sampling_params,
-        rollout_engine_args=rollout_args,
-        n_parallel_agents=args.parallel,
-        max_response_length=args.max_response_tokens,
-        max_prompt_length=args.max_prompt_tokens,
-        trajectory_timeout=trajectory_timeout,
-        gamma=args.gamma,
-        retry_limit=args.retry_limit,
-        api_retries=args.api_retries,
-        max_workers=args.max_workers,
-        enforce_max_prompt_length=args.enforce_max_prompt_length,
-        overlong_filter=args.overlong_filter,
-    )
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(_auto_launch_planner_service(args))
+        stack.enter_context(_auto_launch_cgm_service(args))
 
-    LOGGER.info(
-        "Starting evaluation: tasks=%d parallel=%d planner_model=%s", len(tasks), args.parallel, args.planner_model
-    )
+        engine = AgentExecutionEngine(
+            agent_class=agent_cls,
+            env_class=env_cls,
+            agent_args=agent_args,
+            env_args=env_args,
+            engine_name=args.engine_name,
+            tokenizer=tokenizer,
+            sampling_params=sampling_params,
+            rollout_engine_args=rollout_args,
+            n_parallel_agents=args.parallel,
+            max_response_length=args.max_response_tokens,
+            max_prompt_length=args.max_prompt_tokens,
+            trajectory_timeout=trajectory_timeout,
+            gamma=args.gamma,
+            retry_limit=args.retry_limit,
+            api_retries=args.api_retries,
+            max_workers=args.max_workers,
+            enforce_max_prompt_length=args.enforce_max_prompt_length,
+            overlong_filter=args.overlong_filter,
+        )
 
-    results = asyncio.run(engine.execute_tasks(tasks))
+        LOGGER.info(
+            "Starting evaluation: tasks=%d parallel=%d planner_model=%s",
+            len(tasks),
+            args.parallel,
+            args.planner_model,
+        )
+
+        results = asyncio.run(engine.execute_tasks(tasks))
     success = sum(1 for traj in results if getattr(traj, "reward", 0.0) > 0)
     LOGGER.info("Completed %d tasks with %d successes", len(results), success)
     compute_pass_at_k(results)

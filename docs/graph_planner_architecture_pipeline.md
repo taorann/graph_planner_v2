@@ -364,6 +364,8 @@ R2E-Gym 本身提供了 RepoEnv 环境、动作解析与容器运行时等通用
 | CGM 监督微调 | `PYTHONPATH=. python - <<'PY'`<br>`from graph_planner.integrations.codefuse_cgm import CodeFuseCGMTrainer, CGMTrainingConfig;`<br>`cfg = CGMTrainingConfig(model_name="<model>", train_path="train.jsonl", output_dir="runs/cgm");`<br>`CodeFuseCGMTrainer(cfg).train()`<br>`PY` |
 | rLLM PPO 训练 | `PYTHONPATH=. python scripts/train_planner_grpo.py --config configs/experiments/planner_grpo_4gpu.yaml --print-config` |
 
+- `scripts/run_eval_graph_planner.sh` 会把默认配置 `configs/eval/graph_planner_eval_defaults.yaml` 注入评估 CLI；若 `planner_base_url` 指向本机且给出了 `planner_model_path`，脚本会根据配置自动拉起 vLLM OpenAI 服务（默认映射到 GPU `0,1`，tensor parallel 为 2），待端点就绪后再启动异步评测。需要禁用或自定义设备时，可在 YAML/CLI 覆写 `auto_launch_planner_service`、`planner_service_gpus` 或 `planner_service_tensor_parallel_size`。【F:scripts/eval_graph_planner_engine.py†L84-L213】【F:scripts/eval_graph_planner_engine.py†L517-L576】【F:configs/eval/graph_planner_eval_defaults.yaml†L1-L21】
+
 ## 6. 日志与调试建议 / Logging & troubleshooting
 
 - 训练或推理期间的容器命令、测试结果会写入 `logs/test_runs.jsonl` 与 `logs/telemetry/*.jsonl`，可配合 `infra.telemetry` 工具分析。【F:graph_planner/infra/telemetry.py†L20-L39】
