@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+
+if [[ -z "${BASH_VERSION:-}" ]]; then
+  echo "run_eval_graph_planner.sh must be executed with bash. Try 'bash $0' instead." >&2
+  exit 1
+fi
+
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
