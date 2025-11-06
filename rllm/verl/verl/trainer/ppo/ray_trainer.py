@@ -2166,9 +2166,14 @@ class RayPPOTrainer:
 
 
 
-        _oc_set(self.config, "actor_rollout_ref.actor.fsdp_config.fsdp_size", fsdp_world)
-        print(f"[planner] fsdp_size set to {fsdp_world} prior to worker init")
-        print(f"FSDP planner world_size={fsdp_world} on GPUs {planner_group.gpus}")
+        actor_cfg = OmegaConf.select(self.config, "actor_rollout_ref.actor", default=None)
+        pipeline_async = bool(OmegaConf.select(self.config, "system.pipeline.async_mode", default=False))
+        eval_only = actor_cfg is None and not pipeline_async
+
+        if not eval_only:
+            _oc_set(self.config, "actor_rollout_ref.actor.fsdp_config.fsdp_size", fsdp_world)
+            print(f"[planner] fsdp_size set to {fsdp_world} prior to worker init")
+            print(f"FSDP planner world_size={fsdp_world} on GPUs {planner_group.gpus}")
 
         # extra guard: planner 的 vllm tp 不要比当前分配的 GPU 数大
         if getattr(planner_group, "vllm", None) is not None:
@@ -2305,19 +2310,23 @@ class RayPPOTrainer:
                 f"Discovered tree:\n{tree_dump}"
             )
 
-        planner_wg.init_model()
+        if not eval_only:
+            planner_wg.init_model()
 
-        # Optional: keep n_gpus metrics correct when bypassing resource_pool_manager defaults
-        try:
-            self.resource_pool_manager.override_n_gpus(len(planner_group.gpus))
-        except Exception:
-            pass
+            # Optional: keep n_gpus metrics correct when bypassing resource_pool_manager defaults
+            try:
+                self.resource_pool_manager.override_n_gpus(len(planner_group.gpus))
+            except Exception:
+                pass
 
-        # Ensure FSDP world size shows up in config for init_model() and logs
-        _oc_set(self.config, "actor_rollout_ref.actor.fsdp_config.fsdp_size", fsdp_world)
+            # Ensure FSDP world size shows up in config for init_model() and logs
+            _oc_set(self.config, "actor_rollout_ref.actor.fsdp_config.fsdp_size", fsdp_world)
+            self.planner_trainer = planner_wg
+        else:
+            # NOTE: eval YAML must NOT define actor_rollout_ref.actor or we will build the FSDP actor again.
+            self.planner_trainer = None
 
         self.worker_groups["planner"] = planner_wg
-        self.planner_trainer = planner_wg
         
         # 只有没有拓扑版 rollout 时，才把 planner 当成 rollout 用
         if not (isinstance(rollout_cfg, MappingABC) and rollout_cfg):
@@ -2417,7 +2426,10 @@ class RayPPOTrainer:
         else:
             self.planner_engine = None
 
-        self.planner_sync = PlannerToVLLMSyncer(self.planner_trainer, self.planner_engine)
+        if not eval_only and self.planner_engine is not None:
+            self.planner_sync = PlannerToVLLMSyncer(self.planner_trainer, self.planner_engine)
+        else:
+            self.planner_sync = None
 
         cgm_group = self.topology_groups.get("cgm")
         if cgm_group is not None and cgm_group.gpus:
