@@ -6,12 +6,10 @@ import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
+import numpy as np
+import openai
 import torch
-
-try:  # graph_planner optional integration
-    from graph_planner.integrations.rllm import planner_rpc  # type: ignore[attr-defined]
-except Exception:  # pragma: no cover - optional dependency
-    planner_rpc = None  # type: ignore[assignment]
+from openai.types import Completion
 
 from rllm.agents.agent import Action, BaseAgent, Trajectory
 from rllm.agents.utils import (
@@ -24,38 +22,10 @@ from rllm.environments.env_utils import (
     compute_trajectory_reward,
 )
 from rllm.misc import colorful_print
-from rllm.parser import ChatTemplateParser
+from rllm.parser.chat_template.parser import ChatTemplateParser
+from rllm.router.router import Router
 
 logger = logging.getLogger(__name__)
-
-
-class _PlannerRolloutFallback:
-    """Synchronous adapter that mirrors planner_rpc's fallback expectations."""
-
-    def __init__(self, rollout_engine, messages, base_kwargs):
-        self._rollout_engine = rollout_engine
-        self._messages = list(messages)
-        self._base_kwargs = dict(base_kwargs)
-
-    def generate(self, prompts, **kwargs):  # pragma: no cover - exercised via planner RPC
-        if not prompts:
-            return []
-
-        params = dict(self._base_kwargs)
-        meta_info = kwargs.pop("meta_info", None)
-        if meta_info is not None and "validate" not in params:
-            params["validate"] = bool(meta_info.get("validate", False))
-
-        params.update(kwargs)
-        application_id = params.pop("application_id", None)
-
-        coro = self._rollout_engine.get_model_response(
-            self._messages,
-            application_id=application_id,
-            **params,
-        )
-        output = asyncio.run(coro)
-        return [output.text]
 
 
 class AgentExecutionEngine:
@@ -92,6 +62,7 @@ class AgentExecutionEngine:
             env_args = {}
 
         self.config = config
+        self.rollout_engine = rollout_engine
         self.tokenizer = tokenizer
         self.engine_name = engine_name
         self.n_parallel_agents = n_parallel_agents
@@ -100,6 +71,7 @@ class AgentExecutionEngine:
         # For interaction
         self.gamma = gamma
         self.retry_limit = retry_limit
+        self.api_retries = api_retries
         self.max_steps = max_steps
         self.max_response_length = max_response_length
         self.max_prompt_length = max_prompt_length
@@ -119,41 +91,31 @@ class AgentExecutionEngine:
 
         if env_class is not None:
             assert env_class.is_multithread_safe(), "Environment must be multithread safe for async engine"
+        # rollout engine args
+        self.rollout_engine_args = rollout_engine_args
+        self.sampling_params = kwargs.get("sampling_params", {})
+
+        assert self.engine_name in ["openai", "verl"], "Currently only openai and verl are supported as rollout engine"
+        if self.engine_name == "openai":
+            from openai import AsyncOpenAI
+
+            self.client = AsyncOpenAI(**self.rollout_engine_args)
+            # Disable httpx INFO logs that show HTTP requests
+            logging.getLogger("httpx").setLevel(logging.WARNING)
+        elif self.engine_name == "verl":
+            # All generation is done via scheduler. Currently only works for verl
+            self.server_addresses = getattr(self.rollout_engine, "server_addresses", [])
+            self.router = Router(config=self.config, tokenizer=self.tokenizer, addresses=self.server_addresses)
+
+        # Create a thread pool executor for environment interactions (i.e. step, reset, close)
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
 
         if chat_parser is None:
             self.chat_parser = ChatTemplateParser.get_parser(self.tokenizer, disable_thinking=kwargs.get("disable_thinking", False))
         else:
             self.chat_parser = chat_parser
 
-        self.rollout_engine_args = rollout_engine_args
-        self.sampling_params = kwargs.get("sampling_params", {})  # for openai api requests
-
-        assert self.engine_name in ["openai", "verl"], "Currently only openai and verl are supported as rollout engine"
-        if self.engine_name == "openai":
-            from rllm.engine.rollout.openai_engine import OpenAIEngine
-
-            self.rollout_engine = OpenAIEngine(
-                **rollout_engine_args,
-                api_retries=api_retries,
-                tokenizer=self.tokenizer,
-                max_prompt_length=self.max_prompt_length,
-                max_response_length=self.max_response_length,
-                disable_thinking=kwargs.get("disable_thinking", False),
-            )
-        elif self.engine_name == "verl":
-            from rllm.engine.rollout.verl_engine import VerlEngine
-
-            self.rollout_engine = VerlEngine(
-                config=self.config,
-                rollout_manager=rollout_engine,
-                tokenizer=self.tokenizer,
-                disable_thinking=self.config.rllm.disable_thinking,
-            )
-
-        # Create a thread pool executor for environment interactions (i.e. step, reset, close)
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
-
-    async def get_model_response(self, prompt, application_id, **kwargs) -> str:
+    async def get_model_response(self, prompt, application_id, **kwargs):
         """
         Compute model response asynchronously based on the engine type.
 
@@ -171,52 +133,10 @@ class AgentExecutionEngine:
         Raises:
             NotImplementedError: If the engine type is not supported
         """
-
-        sampling_params = self.sampling_params.copy()
-        sampling_params.update(kwargs)
-
-        if planner_rpc is not None:
-            try:
-                prompt_text = self.chat_parser.parse(
-                    prompt,
-                    add_generation_prompt=True,
-                    is_first_msg=True,
-                )
-                fallback_kwargs = {"application_id": application_id, "enforce_max_prompt_length": False}
-                if self.engine_name == "verl":
-                    meta_info = sampling_params.get("meta_info", {})
-                    fallback_kwargs["validate"] = bool(meta_info.get("validate", False))
-                fallback_engine = _PlannerRolloutFallback(self.rollout_engine, prompt, fallback_kwargs)
-                responses = await asyncio.to_thread(
-                    planner_rpc.generate,
-                    [prompt_text],
-                    fallback_engine=fallback_engine,
-                    **sampling_params,
-                )
-                if responses:
-                    return responses[0]
-            except Exception:  # pragma: no cover - defensive fallback
-                logger.exception("Planner RPC generate failed; falling back to rollout engine")
-
         if self.engine_name == "openai":
-            output = await self.rollout_engine.get_model_response(
-                prompt,
-                application_id=application_id,
-                enforce_max_prompt_length=False,
-                **sampling_params,
-            )
-            return output.text
+            return await self._get_openai_async(prompt, application_id, **kwargs)
         elif self.engine_name == "verl":
-            meta_data = sampling_params.pop("meta_info", {})
-            validate = meta_data.get("validate", False)
-            output = await self.rollout_engine.get_model_response(
-                prompt,
-                application_id=application_id,
-                validate=validate,
-                enforce_max_prompt_length=False,
-                **sampling_params,
-            )
-            return output.text
+            return await self._get_verl_async(prompt, application_id, **kwargs)
         else:
             raise NotImplementedError(f"Engine type '{self.engine_name}' not supported")
 
@@ -235,6 +155,76 @@ class AgentExecutionEngine:
             env.idx = idx
         self.agents = agents
         self.n_parallel_agents = len(envs)
+
+    async def _get_verl_async(self, prompt, application_id, **kwargs):
+        batch = self._convert_prompt_verl([prompt], **kwargs)
+
+        if "max_tokens" in kwargs:
+            batch.meta_info["max_tokens"] = kwargs["max_tokens"]
+
+        output = await self.router.generate_sequences(batch, application_id=application_id, **kwargs)
+
+        attn = output.batch["attention_mask"][0, self.max_prompt_length :]
+        tokens = output.batch["responses"][0]
+
+        # Find last index where attention == 1
+        non_pad_indices = (attn == 1).nonzero(as_tuple=True)[0]
+        if len(non_pad_indices) == 0:
+            trimmed = tokens[:0]  # empty
+        else:
+            last_valid_idx = non_pad_indices[-1].item()
+            trimmed = tokens[: last_valid_idx + 1]  # include the last valid token
+
+        response = self.tokenizer.decode(trimmed, skip_special_tokens=False)
+
+        pad_token = self.tokenizer.pad_token
+        eos_token = self.tokenizer.eos_token
+        response = response.replace(pad_token, "").replace(eos_token, "")
+        return response
+
+    async def _get_openai_async(self, prompt, _, **kwargs):
+        """
+        Get action from OpenAI API asynchronously with retry logic.
+
+        Args:
+            prompt: The input prompt in text format for completions API
+            application_id: Unique identifier for the application (unused for OpenAI)
+            **kwargs: Additional arguments to pass to the OpenAI API
+
+        Returns:
+            The response from OpenAI API
+        """
+
+        async def get_response(prompt_text: str):
+            retries = self.api_retries
+            while retries > 0:
+                try:
+                    response = await self.client.completions.create(
+                        prompt=prompt_text,
+                        timeout=3600,
+                        **self.sampling_params,
+                        **kwargs,
+                    )
+                    return response
+                except openai.RateLimitError:
+                    retries -= 1
+                    if retries == 0:
+                        return "Error: Rate limit reached and retries exhausted."
+                    logger.info("Sleep for 5 seconds for API limit.")
+                    await asyncio.sleep(5)
+                except Exception as e:
+                    logger.error("Error: %s", e)
+                    return f"Error processing content: {e}"
+
+        # If prompt is in chat format, convert it to text format
+        prompt_text = prompt
+        if isinstance(prompt, list) and all(isinstance(msg, dict) for msg in prompt):
+            prompt_text = self.chat_parser.parse(prompt, add_generation_prompt=True, is_first_msg=True)
+
+        response = await get_response(prompt_text)
+        if isinstance(response, Completion):
+            response = response.choices[0].text
+        return response
 
     async def run_agent_trajectory_async(self, idx, application_id, seed=0, mode="Text", **kwargs):
         """Run a single agent's trajectory asynchronously"""
@@ -590,10 +580,57 @@ class AgentExecutionEngine:
         ordered_trajectories = [all_trajectories[i] for i in range(len(all_trajectories))]
         return ordered_trajectories
 
-    def shutdown(self):
-        if hasattr(self, "executor") and self.executor is not None:
-            self.executor.shutdown()
-            self.executor = None
+    def _convert_prompt_verl(self, prompts, **kwargs):
+        """
+        Given a list of prompts in Chat template, convert to DataProto format in veRL
+
+        Args:
+            prompts: List of prompts to convert
+            **kwargs: Additional arguments
+
+        Returns:
+            DataProto object containing the converted prompts
+        """
+        from verl.protocol import DataProto, union_two_dict
+        from verl.utils.model import compute_position_id_with_mask
+        from verl.utils.torch_functional import pad_sequence_to_length
+
+        old_padding_side = self.tokenizer.padding_side
+        self.tokenizer.padding_side = "left"
+
+        formatted_prompts = [self.chat_parser.parse(prompt, add_generation_prompt=True, is_first_msg=True) for prompt in prompts]
+
+        # Tokenize the final processed strings
+        inputs = self.tokenizer(
+            formatted_prompts,
+            padding=True,
+            return_tensors="pt",
+            add_special_tokens=False,
+        )
+        self.tokenizer.padding_side = old_padding_side
+
+        input_ids = inputs["input_ids"]
+        attention_mask = inputs["attention_mask"]
+
+        # pad to max sizes
+        input_ids = pad_sequence_to_length(input_ids, max_seq_len=self.max_prompt_length, pad_token_id=self.tokenizer.pad_token_id, left_pad=True)
+        attention_mask = pad_sequence_to_length(attention_mask, max_seq_len=self.max_prompt_length, pad_token_id=0, left_pad=True)
+        position_ids = compute_position_id_with_mask(attention_mask)
+        batch_dict = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
+        }
+        data = DataProto.from_dict(batch_dict)
+        data.non_tensor_batch["formatted_prompts"] = np.array(formatted_prompts)
+
+        # original_batch contains the extra info needed for generation
+        if "meta_info" in kwargs and kwargs["meta_info"]:
+            meta_info = kwargs["meta_info"]
+            # only use the original_batch's meta_info since tensor_batch is from batch_dict and non_tensor_batch is not neeeded
+            data.meta_info = union_two_dict(data.meta_info, meta_info)
+
+        return data
 
 
 class AsyncAgentExecutionEngine(AgentExecutionEngine):

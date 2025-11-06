@@ -75,4 +75,4 @@ DeepSWE training configuration:
 --8<-- "examples/swe/train_deepswe_agent.py"
 ```
 
-For detailed setup instructions, see the [README](https://github.com/rllm-org/rllm/blob/main/examples/swe/README.md) in the deepswe example directory.
+For detailed setup instructions, see the [README](https://github.com/agentica-project/rllm/blob/main/examples/swe/README.md) in the deepswe example directory.

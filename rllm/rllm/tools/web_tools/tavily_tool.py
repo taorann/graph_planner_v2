@@ -13,7 +13,7 @@ class TavilyExtractTool(Tool):
 
     def __init__(self):
         self._init_client()
-        super().__init__(name="tavily-extract", description="Extract web page content from one or more specified URLs")
+        super().__init__(name="tavily_extract", description="Extract web page content from one or more specified URLs")
 
     @property
     def json(self):
@@ -51,12 +51,13 @@ class TavilyExtractTool(Tool):
             response = self.client.post(url=TAVILY_EXTRACT_ENDPOINT, json=params, headers=headers)
 
             if not response.is_success:
-                return ToolOutput(name=self.name or "tavily-extract", error=f"Error: {response.status_code} - {response.text}")
+                return ToolOutput(name=self.name or "tavily_extract", error=f"Error: {response.status_code} - {response.text}")
 
-            output = response.json()
-            return ToolOutput(name=self.name or "tavily-extract", output=output)
+            results = response.json()["results"]
+            output = {res["url"]: res["raw_content"] for res in results}
+            return ToolOutput(name=self.name or "tavily_extract", output=output)
         except Exception as e:
-            return ToolOutput(name=self.name or "tavily-extract", error=f"{type(e).__name__} - {str(e)}")
+            return ToolOutput(name=self.name or "tavily_extract", error=f"{type(e).__name__} - {str(e)}")
 
     def __del__(self):
         """Clean up resources when the tool is garbage collected."""
@@ -68,7 +69,7 @@ class TavilySearchTool(Tool):
 
     def __init__(self):
         self._init_client()
-        super().__init__(name="tavily-search", description="Search the web for information on a specific query")
+        super().__init__(name="tavily_search", description="Search the web for information on a specific query")
 
     @property
     def json(self):
@@ -133,12 +134,12 @@ class TavilySearchTool(Tool):
             response = self.client.post(url=TAVILY_SEARCH_ENDPOINT, json=params, headers=headers)
 
             if not response.is_success:
-                return ToolOutput(name=self.name or "tavily-search", error=f"Error: {response.status_code} - {response.text}")
+                return ToolOutput(name=self.name or "tavily_search", error=f"Error: {response.status_code} - {response.text}")
 
             result = response.json()
-            return ToolOutput(name=self.name or "tavily-search", output=result)
+            return ToolOutput(name=self.name or "tavily_search", output=result)
         except Exception as e:
-            return ToolOutput(name=self.name or "tavily-search", error=f"{type(e).__name__} - {str(e)}")
+            return ToolOutput(name=self.name or "tavily_search", error=f"{type(e).__name__} - {str(e)}")
 
     def __del__(self):
         """Clean up resources when the tool is garbage collected."""

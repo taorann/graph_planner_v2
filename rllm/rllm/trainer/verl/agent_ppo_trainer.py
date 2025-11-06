@@ -1,12 +1,13 @@
 import asyncio
 import json
-import logging
 import math
 import os
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import reduce
 from pprint import pprint
+from queue import Queue
+from threading import Thread
 
 import numpy as np
 import torch
@@ -15,23 +16,19 @@ from omegaconf import OmegaConf
 from rllm.engine.agent_execution_engine import AsyncAgentExecutionEngine
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor
-from verl.trainer.ppo.core_algos import agg_loss
 from verl.trainer.ppo.ray_trainer import (
     RayPPOTrainer,
     RayWorkerGroup,
     ResourcePoolManager,
     Role,
     WorkerType,
+    _timer,
     compute_advantage,
     compute_data_metrics,
     compute_response_mask,
     compute_timing_metrics,
-    marked_timer,
     reduce_metrics,
 )
-
-
-LOGGER = logging.getLogger(__name__)
 
 
 class AgentPPOTrainer(RayPPOTrainer):
@@ -48,89 +45,32 @@ class AgentPPOTrainer(RayPPOTrainer):
         agent_class=None,
         env_args=None,
         agent_args=None,
-        *,
-        role_worker_allocation: dict[str, list[int]] | None = None,
     ):
         super().__init__(config=config, tokenizer=tokenizer, role_worker_mapping=role_worker_mapping, resource_pool_manager=resource_pool_manager, ray_worker_group_cls=ray_worker_group_cls, reward_fn=reward_fn, val_reward_fn=val_reward_fn)
-        self.config = config
-        
-        self.rollout_mode = getattr(
-            self.config.actor_rollout_ref.rollout, "mode", "sync"
-        )
-        LOGGER.info(f"[AgentPPOTrainer] rollout_mode={self.rollout_mode}")
         self.env_class = env_class
         self.agent_class = agent_class
         self.env_args = env_args or {}
         self.agent_args = agent_args or {}
-        self.role_worker_allocation = role_worker_allocation or {}
 
-        assert self.config.actor_rollout_ref.hybrid_engine, "Only hybrid engine is supported"
-
-        if self.config.rllm.stepwise_advantage.enable:
+        if self.config.agent.use_stepwise_advantage:
             print("Using step-level advantage, max_prompt_length and max_response_length will be applied step-wise")
         else:
             print("Using trajectory-level advantage, max_prompt_length and max_response_length will be applied episode-wise")
 
-    def _filter_optimizer_to_planner_only(self):
-        """Restrict optimizer param groups to planner/actor parameters."""
-        opt = getattr(self, "optimizer", None)
-        model = getattr(self, "agent", None) or getattr(self, "policy", None) or None
-        if opt is None or model is None:
-            return
-
-        try:
-            named_params = list(model.named_parameters())
-        except Exception:
-            return
-
-        keep_names = set()
-        for name, param in named_params:
-            lowered = name.lower()
-            if ("actor" in lowered) or ("planner" in lowered) or ("policy" in lowered):
-                if getattr(param, "requires_grad", False):
-                    keep_names.add(name)
-
-        if not keep_names:
-            return
-
-        new_groups = []
-        kept = dropped = 0
-        for group in opt.param_groups:
-            params = []
-            for param in group.get("params", []):
-                param_name = None
-                for name, candidate in named_params:
-                    if candidate is param:
-                        param_name = name
-                        break
-                if param_name is not None and param_name in keep_names:
-                    params.append(param)
-                    kept += 1
-                else:
-                    dropped += 1
-            if params:
-                new_group = dict(group)
-                new_group["params"] = params
-                new_groups.append(new_group)
-
-        if new_groups:
-            opt.param_groups[:] = new_groups
-            try:
-                print(f"[OPT-FILTER] kept={kept} dropped={dropped} groups={len(new_groups)}")
-            except Exception:
-                pass
-
     def init_workers(self):
         super().init_workers()
 
-        rollout_engine = getattr(self, "async_rollout_manager", None)
-        if rollout_engine is None:
-            rollout_engine = getattr(self, "actor_rollout_wg", None)
+        # Initialize additional agent class
+        # Number of agents is set to be 0 initially
+        if self.hybrid_engine:
+            agent_rollout_wg = self.actor_rollout_wg
+        else:
+            agent_rollout_wg = self.rollout_wg
 
-        if rollout_engine is None:
-            raise RuntimeError(
-                "No rollout engine available: expected async_rollout_manager or actor_rollout_wg"
-            )
+        if self.config.actor_rollout_ref.rollout.mode == "async":
+            rollout_engine = self.async_rollout_manager
+        else:
+            rollout_engine = agent_rollout_wg
 
         self.agent_execution_engine = AsyncAgentExecutionEngine(
             rollout_engine=rollout_engine,
@@ -138,26 +78,18 @@ class AgentPPOTrainer(RayPPOTrainer):
             engine_name="verl",
             tokenizer=self.tokenizer,
             model_path=self.config.actor_rollout_ref.model.path,
-            max_steps=self.config.rllm.agent.max_steps,
+            max_steps=self.config.agent.max_steps,
             max_response_length=self.config.data.max_response_length,
             max_prompt_length=self.config.data.max_prompt_length,
             agent_class=self.agent_class,
             agent_args=self.agent_args,
             env_class=self.env_class,
             env_args=self.env_args,
-            enforce_max_prompt_length=self.config.rllm.stepwise_advantage.enable,
-            trajectory_timeout=self.config.rllm.agent.trajectory_timeout,
-            overlong_filter=self.config.rllm.agent.get("overlong_filter", False),
-            disable_thinking=self.config.rllm.disable_thinking,
-            **self.config.rllm.agent.get("engine_args", {}),
+            enforce_max_prompt_length=self.config.agent.use_stepwise_advantage,
+            trajectory_timeout=self.config.agent.trajectory_timeout,
+            overlong_filter=self.config.agent.overlong_filter,
+            **self.config.agent.get("engine_args", {}),
         )
-        try:
-            self._filter_optimizer_to_planner_only()
-        except Exception as exc:  # pragma: no cover - best effort logging
-            try:
-                print(f"[OPT-FILTER] skip due to: {exc}")
-            except Exception:
-                pass
 
     def init_envs_and_agents(self, batch):
         """
@@ -165,8 +97,8 @@ class AgentPPOTrainer(RayPPOTrainer):
         """
         env_args = batch.non_tensor_batch["extra_info"].tolist()
 
-        full_agent_args = dict(self.config.rllm.agent.get("agent_args", {})) | self.agent_args
-        base_env_args = dict(self.config.rllm.env.get("env_args", {})) | self.env_args
+        full_agent_args = dict(self.config.agent.get("agent_args", {})) | self.agent_args
+        base_env_args = dict(self.config.env.get("env_args", {})) | self.env_args
 
         def _create_env(i):
             if isinstance(env_args[i], str):
@@ -179,13 +111,17 @@ class AgentPPOTrainer(RayPPOTrainer):
         # Create environments in parallel while preserving order
         envs = [None] * len(env_args)
         with ThreadPoolExecutor(max_workers=64) as executor:
-            for idx, env in executor.map(_create_env, range(len(env_args))):
+            env_futures = [executor.submit(_create_env, i) for i in range(len(env_args))]
+            for future in as_completed(env_futures):
+                idx, env = future.result()
                 envs[idx] = env
 
         # Create agents in parallel while preserving order
         agents = [None] * len(envs)
         with ThreadPoolExecutor(max_workers=64) as executor:
-            for idx, agent in executor.map(_create_agent, range(len(envs))):
+            agent_futures = [executor.submit(_create_agent, i) for i in range(len(envs))]
+            for future in as_completed(agent_futures):
+                idx, agent = future.result()
                 agents[idx] = agent
         self.agent_execution_engine.update_envs_and_agents(envs, agents)
         return envs
@@ -236,15 +172,18 @@ class AgentPPOTrainer(RayPPOTrainer):
                 timing_raw = {}
 
                 batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"])
+                batch.meta_info = {
+                    "agent_rollout": True,  # no need to generate multiple ones since environment is repeated already
+                }
 
-                with marked_timer("step", timing_raw):
+                with _timer("step", timing_raw):
                     self.init_envs_and_agents(batch)
 
-                    if self.config.rllm.stepwise_advantage.enable:
+                    if self.config.agent.use_stepwise_advantage:
                         final_gen_batch_output = self.generate_agent_steps(timing_raw=timing_raw, meta_info=batch.meta_info, uids=batch.non_tensor_batch["uid"])
                         repeat_counts = final_gen_batch_output.meta_info["repeat_counts"]
                         # need to repeat to make shape match
-                        batch = batch.sample_level_repeat(repeat_counts)
+                        batch = batch.repeat_by_counts(repeat_counts, interleave=True)
                         final_gen_batch_output.meta_info.pop("repeat_counts", None)  # no longer needed after this
                         # batch needs to be padded to divisor of world size, we will pad with everything masked out
                         batch = batch.union(final_gen_batch_output)
@@ -256,11 +195,11 @@ class AgentPPOTrainer(RayPPOTrainer):
 
                     # compute values
                     if self.use_critic:
-                        with marked_timer("values", timing_raw):
+                        with _timer("values", timing_raw):
                             values = self.critic_wg.compute_values(batch)
                             batch = batch.union(values)
 
-                    with marked_timer("adv", timing_raw):
+                    with _timer("adv", timing_raw):
                         # compute scores using reward model and/or reward function
                         if self.use_rm:
                             reward_tensor = self.rm_wg.compute_rm_score(batch)
@@ -297,10 +236,10 @@ class AgentPPOTrainer(RayPPOTrainer):
                         metrics["batch/solve_all"] = solve_all
                         metrics["batch/solve_partial"] = len(unique_uids) - solve_none - solve_all
 
-                        if self.config.rllm.rejection_sample.enable:
+                        if self.config.trainer.rejection_sample:
                             # log the actual complete training rewards before rejection sampling
                             token_level_rewards = None  # for metrics calculation
-                            if self.config.rllm.stepwise_advantage.enable:
+                            if self.config.agent.use_stepwise_advantage:
                                 is_pad_step = batch.non_tensor_batch["is_pad_step"]
                                 non_pad_step_indices = np.where(is_pad_step == False)[0]
                                 non_pad_steps = batch.select_idxs(non_pad_step_indices)
@@ -322,7 +261,7 @@ class AgentPPOTrainer(RayPPOTrainer):
                             # Filter batch to keep only valid samples
                             batch = batch[valid_mask]
 
-                            if self.config.rllm.stepwise_advantage.enable and self.config.rllm.stepwise_advantage.mode == "broadcast":
+                            if self.config.agent.use_stepwise_advantage and self.config.agent.stepwise_advantage_mode == "broadcast":
                                 # batch now only contains steps with valid uids
                                 # filter out padding steps
                                 is_pad_step = batch.non_tensor_batch["is_pad_step"]
@@ -373,49 +312,13 @@ class AgentPPOTrainer(RayPPOTrainer):
                                 batch = batch[size_mask]
 
                         # recompute old_log_probs
-                        with marked_timer("old_log_prob", timing_raw):
+                        with _timer("old_log_prob", timing_raw):
                             old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
                             batch = batch.union(old_log_prob)
-
-                        # recompute old_log_probs
-                        with marked_timer("old_log_prob", timing_raw, color="blue"):
-                            old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-                            entropys = old_log_prob.batch["entropys"]
-                            response_masks = batch.batch["response_mask"]
-                            loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
-                            entropy_agg = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
-                            old_log_prob_metrics = {"actor/entropy": entropy_agg.detach().item()}
-                            metrics.update(old_log_prob_metrics)
-                            old_log_prob.batch.pop("entropys")
-                            batch = batch.union(old_log_prob)
-
-                            if "rollout_log_probs" in batch.batch.keys():
-                                # TODO: we may want to add diff of probs too.
-                                rollout_old_log_probs = batch.batch["rollout_log_probs"]
-                                actor_old_log_probs = batch.batch["old_log_probs"]
-                                attention_mask = batch.batch["attention_mask"]
-                                responses = batch.batch["responses"]
-                                response_length = responses.size(1)
-                                response_mask = attention_mask[:, -response_length:]
-
-                                rollout_probs = torch.exp(rollout_old_log_probs)
-                                actor_probs = torch.exp(actor_old_log_probs)
-                                rollout_probs_diff = torch.abs(rollout_probs - actor_probs)
-                                rollout_probs_diff = torch.masked_select(rollout_probs_diff, response_mask.bool())
-                                rollout_probs_diff_max = torch.max(rollout_probs_diff)
-                                rollout_probs_diff_mean = torch.mean(rollout_probs_diff)
-                                rollout_probs_diff_std = torch.std(rollout_probs_diff)
-                                metrics.update(
-                                    {
-                                        "training/rollout_probs_diff_max": rollout_probs_diff_max.detach().item(),
-                                        "training/rollout_probs_diff_mean": rollout_probs_diff_mean.detach().item(),
-                                        "training/rollout_probs_diff_std": rollout_probs_diff_std.detach().item(),
-                                    }
-                                )
 
                         if self.use_reference_policy:
                             # compute reference log_prob
-                            with marked_timer("ref", timing_raw):
+                            with _timer("ref", timing_raw):
                                 ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
                                 batch = batch.union(ref_log_prob)
 
@@ -434,15 +337,15 @@ class AgentPPOTrainer(RayPPOTrainer):
 
                         batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
 
-                        if self.config.rllm.stepwise_advantage.enable:
-                            if self.config.rllm.stepwise_advantage.mode == "per_step":
+                        if self.config.agent.use_stepwise_advantage:
+                            if self.config.agent.stepwise_advantage_mode == "mc_return":
                                 batch.batch["token_level_rewards"] = batch.batch["mc_returns"]
                                 batch.non_tensor_batch["uid"] = batch.non_tensor_batch["step_ids"]
 
                                 is_pad_step = batch.non_tensor_batch["is_pad_step"]
                                 non_pad_step_indices = np.where(is_pad_step == False)[0]
                                 batch = batch.select_idxs(non_pad_step_indices)  # This batch only has non_pad steps
-                            elif self.config.rllm.stepwise_advantage.mode == "broadcast":
+                            elif self.config.agent.stepwise_advantage_mode == "broadcast":
                                 # In case of step-wise advantage broadcast, we would split out the final steps, then merge again
                                 is_last_step = batch.non_tensor_batch["is_last_step"]
                                 last_step_indices = np.where(is_last_step == True)[0]
@@ -450,7 +353,7 @@ class AgentPPOTrainer(RayPPOTrainer):
                                 other_step_batch = batch.select_idxs(other_step_indices)
                                 batch = batch.select_idxs(last_step_indices)  # This batch only has last steps
                             else:
-                                raise ValueError(f"Stepwise advantage mode {self.config.rllm.stepwise_advantage.mode} not supported")
+                                raise ValueError(f"Stepwise advantage mode {self.config.agent.stepwise_advantage_mode} not supported")
 
                         # compute advantages, executed on the driver process
                         batch = compute_advantage(
@@ -458,21 +361,16 @@ class AgentPPOTrainer(RayPPOTrainer):
                             adv_estimator=self.config.algorithm.adv_estimator,
                             gamma=self.config.algorithm.gamma,
                             lam=self.config.algorithm.lam,
-                            num_repeat=self.config.actor_rollout_ref.rollout.n,
-                            norm_adv_by_std_in_grpo=self.config.algorithm.norm_adv_by_std_in_grpo,
-                            config=self.config.algorithm,
+                            mask_truncated_samples=self.config.algorithm.mask_truncated_samples,
+                            clip_advantages=self.config.algorithm.clip_advantages,
                         )
 
-                        if self.config.rllm.stepwise_advantage.enable and self.config.rllm.stepwise_advantage.mode == "broadcast":
+                        if self.config.agent.use_stepwise_advantage and self.config.agent.stepwise_advantage_mode == "broadcast":
                             # remove the padded last steps
                             # Merging the separated out steps using the advantage from last steps
                             self._stepwise_advantage_broadcast(batch, other_step_batch=other_step_batch)
                             # batch = batch.merge(other_step_batch)
                             batch = DataProto.concat([batch, other_step_batch])
-
-                    if self.config.rllm.mask_truncated_samples:
-                        mask = batch.batch["attention_mask"][:, -1] == 1
-                        batch = batch[~mask]
 
                     batch = self._pad_dataproto_to_world_size(batch=batch)
                     # balance the number of valid tokens on each dp rank.
@@ -485,7 +383,7 @@ class AgentPPOTrainer(RayPPOTrainer):
 
                     # update critic
                     if self.use_critic:
-                        with marked_timer("update_critic", timing_raw):
+                        with _timer("update_critic", timing_raw):
                             critic_output = self.critic_wg.update_critic(batch)
                         critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
                         metrics.update(critic_output_metrics)
@@ -493,19 +391,19 @@ class AgentPPOTrainer(RayPPOTrainer):
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
                         # update actor
-                        with marked_timer("update_actor", timing_raw):
+                        with _timer("update_actor", timing_raw):
                             actor_output = self.actor_rollout_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 
                     # validate
                     if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and self.global_steps % self.config.trainer.test_freq == 0:
-                        with marked_timer("testing", timing_raw):
+                        with _timer("testing", timing_raw):
                             val_metrics: dict = self._validate_agent()
                         metrics.update(val_metrics)
 
                     if self.config.trainer.save_freq > 0 and self.global_steps % self.config.trainer.save_freq == 0:
-                        with marked_timer("save_checkpoint", timing_raw):
+                        with _timer("save_checkpoint", timing_raw):
                             self._save_checkpoint()
 
                 # collect metrics
@@ -541,10 +439,11 @@ class AgentPPOTrainer(RayPPOTrainer):
                 "recompute_log_prob": False,
                 "do_sample": False,
                 "validate": True,
+                "agent_rollout": True,
             }
             self.init_envs_and_agents(test_batch)
 
-            if self.config.rllm.stepwise_advantage.enable:
+            if self.config.agent.use_stepwise_advantage:
                 test_output_gen_batch = self.generate_agent_steps(meta_info=test_batch.meta_info, uids=test_batch.non_tensor_batch["uid"])
                 # for validation, we only need the last step
                 is_last_step = test_output_gen_batch.non_tensor_batch["is_last_step"]
@@ -618,12 +517,19 @@ class AgentPPOTrainer(RayPPOTrainer):
         """
         if timing_raw is None:
             timing_raw = {}
-        with marked_timer("collect_trajectory", timing_raw):
-            trajectories = self._generate_agent_sequences(timing_raw=timing_raw, meta_info=meta_info, mode="Token")
+        with _timer("collect_trajectory", timing_raw):
+            trajectories = []
+            if self.config.agent.async_engine:
+                gen_seq_generator = self.generate_agent_trajectories_async(timing_raw=timing_raw, meta_info=meta_info, mode="Token")
+                for _, trajectory in enumerate(gen_seq_generator):
+                    trajectories.append(trajectory)
+            else:
+                # generate_trajectories returns list of trajectories.
+                trajectories = self.agent_execution_engine.generate_trajectories(timing_raw=timing_raw, mode="Token", meta_info=meta_info)
         # Sort trajectories by their idx, to ensure they are in order.
         trajectories.sort(key=lambda x: x["idx"])
 
-        with marked_timer("transform_trajectory", timing_raw):
+        with _timer("transform_trajectory", timing_raw):
             # Transform the raw trajectories into DataProto format.
             final_gen_batch_output, metrics = self._transform_agent_trajectories(trajectories)
         return final_gen_batch_output, metrics
@@ -640,12 +546,19 @@ class AgentPPOTrainer(RayPPOTrainer):
             timing_raw = {}
         if uids is None:
             uids = []
-        with marked_timer("collect_trajectory", timing_raw):
-            steps = self._generate_agent_sequences(timing_raw=timing_raw, meta_info=meta_info, mode="Step")
+        with _timer("collect_trajectory", timing_raw):
+            steps = []
+            if self.config.agent.async_engine:
+                gen_seq_generator = self.generate_agent_trajectories_async(timing_raw=timing_raw, meta_info=meta_info, mode="Step")
+                for _, trajectory in enumerate(gen_seq_generator):
+                    steps.append(trajectory)
+            else:
+                # generate_trajectories returns list of trajectories.
+                steps = self.agent_execution_engine.generate_trajectories(timing_raw=timing_raw, mode="Step", meta_info=meta_info)
         # Sort trajectories by their idx, to ensure they are in order.
         steps.sort(key=lambda x: x["idx"])
 
-        with marked_timer("transform_trajectory", timing_raw):
+        with _timer("transform_trajectory", timing_raw):
             # Transform the raw trajectories into DataProto format.
             final_gen_batch_output = self._transform_agent_steps(steps, uids=uids)
         return final_gen_batch_output
@@ -706,55 +619,44 @@ class AgentPPOTrainer(RayPPOTrainer):
             for chat_completion in chat_completions:
                 f.write(json.dumps(chat_completion) + "\n")
 
-        # left pad prompts
-        max_prompt_length = self.config.data.max_prompt_length
+        # reverse the list and create tensors, pad, then flip to achieve left padding
         prompts_batch = torch.nn.utils.rnn.pad_sequence(
             [torch.flip(i, dims=[0]) for i in all_initial_tokens_list],
             batch_first=True,
             padding_value=self.tokenizer.pad_token_id,
         ).flip(dims=[1])
-        prompts_batch = pad_sequence_to_length(prompts_batch, max_prompt_length, self.tokenizer.pad_token_id, left_pad=True)
-        prompts_batch = prompts_batch[:, -max_prompt_length:]
 
-        # right pad responses
-        max_response_length = self.config.data.max_response_length
+        prompts_batch = pad_sequence_to_length(prompts_batch, self.config.data.max_prompt_length, self.tokenizer.pad_token_id, left_pad=True)
+
         response_batch = torch.nn.utils.rnn.pad_sequence(
             all_response_tokens_list,
             batch_first=True,
             padding_value=self.tokenizer.pad_token_id,
         )
+
+        max_response_length = self.config.data.max_response_length
         response_batch = pad_sequence_to_length(response_batch, max_response_length, self.tokenizer.pad_token_id, left_pad=False)
-        response_batch = response_batch[:, :max_response_length]
 
-        # input_ids
-        trajectory_batch = torch.concat([prompts_batch, response_batch], dim=1)
-
-        # attention mask
-        prompt_lengths = torch.as_tensor([len(t) for t in all_initial_tokens_list]).clamp_(min=0, max=max_prompt_length)
-        prompt_pos = torch.arange(max_prompt_length).unsqueeze(0)
-        prompt_mask = prompt_pos >= (max_prompt_length - prompt_lengths.unsqueeze(1))
-
-        response_lengths = torch.as_tensor([len(t) for t in all_response_tokens_list]).clamp_(min=0, max=max_response_length)
-        resp_pos = torch.arange(max_response_length).unsqueeze(0)
-        response_mask = resp_pos < response_lengths.unsqueeze(1)
-
-        attention_mask = torch.cat([prompt_mask, response_mask], dim=1).long()
-
-        # loss mask
         traj_mask = torch.nn.utils.rnn.pad_sequence(all_masks_list, batch_first=True, padding_value=0)
         traj_mask = pad_sequence_to_length(traj_mask, max_response_length, 0, left_pad=False)
-        traj_mask = traj_mask[:, :max_response_length]
 
-        # position_ids
+        trajectory_batch = torch.concat([prompts_batch, response_batch], dim=1)
+
+        attention_mask = torch.where(trajectory_batch != self.tokenizer.pad_token_id, 1, 0)
+
+        # Compute position_ids
         position_ids = (torch.cumsum(attention_mask, dim=1) - 1) * attention_mask
 
-        # Place all rewards to last response token (e.g., eos token)
+        # Place all rewards to last response token
         score_batch = torch.zeros_like(response_batch, dtype=torch.float32)
 
-        for i, score in enumerate(traj_scores):
-            resp_len = response_lengths[i]
-            if resp_len > 0 and resp_len <= score_batch.shape[1]:
-                score_batch[i, resp_len - 1] = score
+        prompt_length = prompts_batch.shape[1]
+        valid_response_length_sequences = attention_mask[:, prompt_length:].sum(dim=-1)
+
+        for i, traj_score in enumerate(traj_scores):
+            last_valid_idx = valid_response_length_sequences[i] - 1
+            if last_valid_idx >= 0 and last_valid_idx < score_batch.shape[1]:
+                score_batch[i, last_valid_idx] = traj_score
 
         tensor_batch = {
             "input_ids": trajectory_batch,
@@ -763,14 +665,14 @@ class AgentPPOTrainer(RayPPOTrainer):
             "responses": response_batch,
             "prompts": prompts_batch,
             "token_level_scores": score_batch,
-            "response_mask": traj_mask,
+            "traj_mask": traj_mask,
         }
 
         self.visualize_trajectory(DataProto.from_dict(tensors=tensor_batch))
 
         return DataProto.from_dict(tensors=tensor_batch), metrics
 
-    def visualize_trajectory(self, tensor_batch, sample_idx=0, max_samples=1, mask_key="response_mask"):
+    def visualize_trajectory(self, tensor_batch, sample_idx=0, max_samples=1, mask_key="traj_mask"):
         """
         Visualize the trajectory from tensor_batch by detokenizing prompts and responses,
         and highlighting the masked parts with color.
@@ -788,109 +690,98 @@ class AgentPPOTrainer(RayPPOTrainer):
         traj_mask = tensor_batch.batch[mask_key]
         token_level_scores = tensor_batch.batch["token_level_scores"]
 
-        # Full attention mask (covers prompt + response); split it into prompt and response parts
-        full_attn_mask = tensor_batch.batch["attention_mask"]
-        prompt_len = prompts.shape[1]
-        resp_len = responses.shape[1]
-        prompt_attn_mask = full_attn_mask[:, :prompt_len]
-        response_attn_mask = full_attn_mask[:, -resp_len:]
-
         batch_size = prompts.shape[0]
         end_idx = min(sample_idx + max_samples, batch_size)
 
         for i in range(sample_idx, end_idx):
-            colorful_print("\n" + "=" * 60, fg="cyan", bold=True)
-            colorful_print(f"Sample {i}", fg="cyan", bold=True)
-
-            # Legend before the example
-            legend = " ".join(
-                [
-                    "\x1b[37mwhite=masked\x1b[0m",
-                    "\x1b[34mblue=unmasked\x1b[0m",
-                    "\x1b[42m green bg=reward>0 \x1b[0m",
-                    "\x1b[41m red bg=reward<=0 \x1b[0m",
-                ]
-            )
-            print(f"[{legend}]")
+            colorful_print(f"\n===== Sample {i} =====", fg="cyan", bold=True)
 
             # Detokenize prompt
             prompt_tokens = prompts[i]
-            prompt_valid_mask = prompt_attn_mask[i].bool()
-            # Build one-line colored prompt (prompt is always masked-from-loss => white)
-            prompt_parts = []
-            for tok_id, is_valid in zip(prompt_tokens.tolist(), prompt_valid_mask.tolist(), strict=False):
-                if not is_valid:
-                    continue
-                tok = self.tokenizer.decode([tok_id]).replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-                prompt_parts.append(f"\x1b[37m{tok}\x1b[0m")  # white
-            print("".join(prompt_parts))
+            prompt_mask = prompt_tokens != self.tokenizer.pad_token_id
+            valid_prompt_tokens = prompt_tokens[prompt_mask]
+            prompt_text = self.tokenizer.decode(valid_prompt_tokens)
 
-            # Separator line between prompt and response for readability
-            print("----------------")
+            colorful_print("Prompt:", fg="green", bold=True)
+            colorful_print(f"{prompt_text}\n", fg="green")
 
-            # Detokenize response with token-level highlighting
-            resp_tokens = responses[i]
-            resp_valid_mask = response_attn_mask[i].bool()
-            loss_mask = traj_mask[i]
-            rewards = token_level_scores[i]
+            # Detokenize response with color highlighting for masked tokens
+            response_tokens = responses[i]
+            response_mask = traj_mask[i]
 
-            # Pre-compute reward positions (typically only the last valid resp token has nonzero reward)
-            reward_idx = None
-            reward_value = 0.0
-            if rewards is not None:
-                # consider only valid response positions
-                for j, is_valid in enumerate(resp_valid_mask.tolist()):
-                    if not is_valid:
-                        continue
-                    val = float(rewards[j].item()) if hasattr(rewards[j], "item") else float(rewards[j])
-                    if abs(val) > 1e-9:
-                        reward_idx = j
-                        reward_value = val
+            # Get non-padding tokens
+            valid_indices = response_tokens != self.tokenizer.pad_token_id
+            valid_response_tokens = response_tokens[valid_indices]
+            valid_response_mask = response_mask[valid_indices]
 
-            # Fallback: if no nonzero reward found, use the last valid response token
-            if reward_idx is None:
-                valid_indices = [idx for idx, v in enumerate(resp_valid_mask.tolist()) if v]
-                if valid_indices:
-                    reward_idx = valid_indices[-1]
-                    if rewards is not None:
-                        val = float(rewards[reward_idx].item()) if hasattr(rewards[reward_idx], "item") else float(rewards[reward_idx])
-                        reward_value = val
+            # Then show token-by-token with masking
+            colorful_print("Response with masking:", fg="yellow", bold=True)
 
-            # Colors: white for masked-from-loss; blue for contributes-to-loss; overlay background red/green if reward token
-            response_parts = []
-            for j, tok_id in enumerate(resp_tokens.tolist()):
-                if not bool(resp_valid_mask[j].item() if hasattr(resp_valid_mask[j], "item") else resp_valid_mask[j]):
-                    continue
-                tok = self.tokenizer.decode([tok_id]).replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+            for j, (token, mask) in enumerate(zip(valid_response_tokens, valid_response_mask, strict=False)):
+                token_text = self.tokenizer.decode(token)
 
-                contributes = bool(loss_mask[j].item()) if hasattr(loss_mask[j], "item") else bool(loss_mask[j])
-                fg = "\x1b[34m" if contributes else "\x1b[37m"  # blue if in loss, else white
+                # Check if this token has a reward
+                has_reward = token_level_scores[i, j] != 0
 
-                bg = ""
-                if reward_idx is not None and j == reward_idx:
-                    bg = "\x1b[42m" if reward_value > 0 else "\x1b[41m"  # green background for positive, red for negative/zero
+                # Apply different colors based on mask and rewards
+                if mask == 0:
+                    # Masked token (not used in training)
+                    colorful_print(token_text, fg="red", end="")
+                elif has_reward:
+                    # Token with reward
+                    colorful_print(token_text, bg="green", end="")
 
-                response_parts.append(f"{bg}{fg}{tok}\x1b[0m")
+                    reward_info = ""
+                    if has_reward:
+                        reward_info += f" R:{token_level_scores[i, j].item():.2f}"
 
-            print("".join(response_parts))
+                    colorful_print(reward_info, fg="magenta", end="")
+                else:
+                    # Normal token used in training
+                    colorful_print(token_text, fg="blue", end="")
 
-    def _generate_agent_sequences(self, timing_raw=None, meta_info=None, mode="Token"):
-        """Collect agent rollout items synchronously from the async execution engine."""
+            print()  # New line after all tokens
 
+            # Print reward summary
+            total_reward = token_level_scores[i].sum().item()
+            colorful_print("Rewards:", fg="green", bold=True)
+            print(f" Trajectory Reward={total_reward:.2f}")
+
+    def generate_agent_trajectories_async(self, timing_raw=None, meta_info=None, mode="Token"):
+        """
+        Generates agent trajectories asynchronously using the agent execution engine.
+
+        This method runs the asynchronous `trajectory_generator` in a
+        separate thread and yields the results synchronously through a queue.
+        This allows the main training loop (which might be synchronous) to consume
+        asynchronously generated trajectories.
+
+        Args:
+            timing_raw (dict, optional): Dictionary to store timing information. Defaults to {}.
+            meta_info (dict, optional): Additional metadata for the generation process. Defaults to None.
+
+        Yields:
+            Any: Items generated by the `trajectory_generator`, typically
+                 representing parts or results of agent trajectories in token format.
+        """
         if timing_raw is None:
             timing_raw = {}
+        queue = Queue()
 
-        async def _consume():
-            results: list[dict] = []
-            async for item in self.agent_execution_engine.trajectory_generator(
-                timing_raw=timing_raw,
-                mode=mode,
-                meta_info=meta_info,
-            ):
-                results.append(item)
-            return results
+        def runner():
+            async def consume():
+                async for item in self.agent_execution_engine.trajectory_generator(timing_raw=timing_raw, mode=mode, meta_info=meta_info):
+                    queue.put(item)
+                queue.put(None)  # sentinel to signal done
 
-        return asyncio.run(_consume())
+            asyncio.run(consume())
+
+        Thread(target=runner, daemon=True).start()
+        while True:
+            item = queue.get()
+            if item is None:
+                break
+            yield item
 
     def _transform_agent_steps(self, steps: list[dict], uids: np.ndarray):
         from verl.utils.torch_functional import pad_sequence_to_length
@@ -927,58 +818,48 @@ class AgentPPOTrainer(RayPPOTrainer):
             all_steps_step_num.extend([len(episode_steps) for _ in range(len(episode_steps))])
             all_steps_step_ids.extend([f"{uids[idx]}_step{i}" for i in range(len(episode_steps))])
 
-        # left pad prompts
-        max_prompt_length = self.config.data.max_prompt_length
+        # Convert all steps into token tensors
+        # reverse the list and create tensors, pad, then flip to achieve left padding
         prompts_batch = torch.nn.utils.rnn.pad_sequence(
             [torch.flip(i, dims=[0]) for i in all_prompts_list],
             batch_first=True,
             padding_value=self.tokenizer.pad_token_id,
         ).flip(dims=[1])
-        prompts_batch = pad_sequence_to_length(prompts_batch, max_prompt_length, self.tokenizer.pad_token_id, left_pad=True)
-        prompts_batch = prompts_batch[:, -max_prompt_length:]
 
-        # right pad responses
-        max_response_length = self.config.data.max_response_length
+        prompts_batch = pad_sequence_to_length(prompts_batch, self.config.data.max_prompt_length, self.tokenizer.pad_token_id, left_pad=True)
+
         response_batch = torch.nn.utils.rnn.pad_sequence(
             all_responses_list,
             batch_first=True,
             padding_value=self.tokenizer.pad_token_id,
         )
+
+        max_response_length = self.config.data.max_response_length
         response_batch = pad_sequence_to_length(response_batch, max_response_length, self.tokenizer.pad_token_id, left_pad=False)
-        response_batch = response_batch[:, :max_response_length]
 
-        # input_ids
         complete_step_batch = torch.concat([prompts_batch, response_batch], dim=1)
-
-        # attention mask
-        prompt_lengths = torch.as_tensor([len(t) for t in all_prompts_list]).clamp_(min=0, max=max_prompt_length)
-        prompt_pos = torch.arange(max_prompt_length).unsqueeze(0)
-        prompt_mask = prompt_pos >= (max_prompt_length - prompt_lengths.unsqueeze(1))
-
-        response_lengths = torch.as_tensor([len(t) for t in all_responses_list]).clamp_(min=0, max=max_response_length)
-        resp_pos = torch.arange(max_response_length).unsqueeze(0)
-        response_mask = resp_pos < response_lengths.unsqueeze(1)
-
-        attention_mask = torch.cat([prompt_mask, response_mask], dim=1).long()
-
-        # loss mask
-        traj_mask = attention_mask[:, max_prompt_length:]
-
-        # position_ids
+        attention_mask = torch.where(complete_step_batch != self.tokenizer.pad_token_id, 1, 0)
         position_ids = (torch.cumsum(attention_mask, dim=1) - 1) * attention_mask
 
-        # Place all rewards to last response token of each step
+        # same as regular repsonse_mask, padded tensors will have this zeroed out
+        traj_mask = torch.where(response_batch != self.tokenizer.pad_token_id, 1, 0)
+
+        # Place all rewards to last response token of the last_step response
         score_batch = torch.zeros_like(response_batch, dtype=torch.float32)
         mc_return_batch = torch.zeros_like(response_batch, dtype=torch.float32)
 
+        prompt_length = prompts_batch.shape[1]
+        valid_response_length_sequences = attention_mask[:, prompt_length:].sum(dim=-1)
+
+        # reward is given for last token of every step for logging purposes, but only last steps will be used to calculate advantage
         step_index = 0
         for i, traj_score in enumerate(training_rewards):
             step_num = step_numbers[i] + 1  # since step_numbers is 0 indexed
             for _ in range(step_num):
-                resp_len = response_lengths[step_index]
-                if resp_len > 0 and resp_len <= score_batch.shape[1]:
-                    score_batch[step_index, resp_len - 1] = traj_score
-                    mc_return_batch[step_index, resp_len - 1] = all_mc_returns[step_index]
+                last_valid_idx = valid_response_length_sequences[step_index] - 1
+                if last_valid_idx >= 0 and last_valid_idx < score_batch.shape[1]:
+                    score_batch[step_index, last_valid_idx] = traj_score
+                    mc_return_batch[step_index, last_valid_idx] = all_mc_returns[step_index]
                 step_index += 1
         assert step_index == score_batch.shape[0], f"Number of total steps used should equal to batch size, but got {step_index} and {score_batch.shape[0]}"
 
@@ -990,7 +871,7 @@ class AgentPPOTrainer(RayPPOTrainer):
             "prompts": prompts_batch,
             "token_level_scores": score_batch,
             "mc_returns": mc_return_batch,
-            "response_mask": traj_mask,
+            "traj_mask": traj_mask,
         }
 
         batch_id = str(uuid.uuid4())
@@ -1039,7 +920,7 @@ class AgentPPOTrainer(RayPPOTrainer):
             mask = src_mask[i].bool()
             scalar = src_advantages[i][mask].mean()
 
-            if self.config.rllm.stepwise_advantage.normalize_by_steps:
+            if self.config.agent.normalize_step_advantage:
                 # normalize the advantage against number of steps
                 scalar = scalar / src_total_steps[i]
                 # reassign the normalized advantage to last_step_batch as well
@@ -1088,8 +969,3 @@ class AgentPPOTrainer(RayPPOTrainer):
             batch.non_tensor_batch["is_pad_step"][idx] = True
 
         return batch
-
-    def shutdown(self):
-        if hasattr(self, "agent_execution_engine") and self.agent_execution_engine is not None:
-            self.agent_execution_engine.shutdown()
-            self.agent_execution_engine = None

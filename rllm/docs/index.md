@@ -26,7 +26,7 @@ rLLM currently supports a variety of built-in agents:
 - **Frozenlake Agent**: Train agents to navigate text-based grid world. (useful for testing/debugging RL algorithms)
 
 ## 🛠️ Train Your Own Agents & Environments
-rLLM is designed to be extensible. You can easily build and train your own custom agents and environments using our modular API and training engine. Walk through our [core concepts](./core-concepts/overview.md) and [examples](https://github.com/rllm-org/rllm/tree/main/examples) to understand the fundamentals of rLLM and build your own custom agents and environments tailored to your specific use cases.
+rLLM is designed to be extensible. You can easily build and train your own custom agents and environments using our modular API and training engine. Walk through our [core concepts](./core-concepts/overview.md) and [examples](https://github.com/agentica-project/rllm/tree/main/examples) to understand the fundamentals of rLLM and build your own custom agents and environments tailored to your specific use cases.
 
 ## 🚀Future Roadmap
 

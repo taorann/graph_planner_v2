@@ -4,13 +4,6 @@ import time
 from typing import Any
 
 try:
-    from dotenv import load_dotenv
-
-    load_dotenv()
-except ImportError:
-    pass
-
-try:
     from firecrawl import FirecrawlApp
 except ImportError as e:
     print(e)
@@ -61,8 +54,7 @@ class FirecrawlTool(Tool):
             dict: Response from the FireCrawl API containing job information.
         """
         # crawl has many scrape options, potentially can let the agent choose
-        # Firecrawl SDK expects options as positional dict, not a 'params' kwarg
-        return self.app.async_batch_scrape_urls([url], {"formats": ["markdown", "links"], "onlyMainContent": True})
+        return self.app.async_batch_scrape_urls([url], params={"formats": ["markdown", "links"], "onlyMainContent": True})
 
     @property
     def json(self):

@@ -450,9 +450,6 @@ class RewardCodeFn:
         elif dataset_name == "leetcode":
             is_correct, test_details = leetcode_check_correctness(tests, model_code)
         elif dataset_name in ["livecodebench", "codeforces", "primeintellect"]:
-            # Handle case where tests is a JSON string
-            if isinstance(tests, str):
-                tests = json.loads(tests)
             is_correct, test_details = lcb_check_correctness_v2(tests, model_code, debug=False)
         elif dataset_name == "kodcode":
             is_correct, test_details = kodcode_check_correctness(tests, model_code)

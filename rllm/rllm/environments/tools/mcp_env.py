@@ -140,12 +140,10 @@ class MCPConnectionManager:
 
             self.tool_map = {}
             for tool in tools:
-                mcp_tool = MCPTool(session=self.session, tool_name=tool.name, tool_description=tool.description, tool_schema=tool.inputSchema)
+                mcp_tool = MCPTool(session=self.session, tool_name=tool.name, tool_description=tool.description, tool_schema=tool.inputSchema)  # type: ignore
                 self.tool_map[tool.name] = mcp_tool
-                mapped_name = tool.name.replace("-", "_")
-                if mapped_name != tool.name:
-                    mapped_tool = MCPTool(session=self.session, tool_name=tool.name, tool_description=tool.description, tool_schema=tool.inputSchema)
-                    self.tool_map[mapped_name] = mapped_tool
+
+            print(f"Initialized {len(self.tool_map)} MCP tools")
 
     async def _execute_tools(self, tool_calls: list[dict[str, Any]]) -> dict[str, str]:
         """Execute tool calls."""

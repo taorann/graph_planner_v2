@@ -81,4 +81,4 @@ DeepCoder training configuration:
 --8<-- "examples/deepcoder/train_deepcoder.py"
 ```
 
-For detailed setup instructions, see the [README](https://github.com/rllm-org/rllm/blob/main/examples/deepcoder/README.md) in the deepcoder example directory.
+For detailed setup instructions, see the [README](https://github.com/agentica-project/rllm/blob/main/examples/deepcoder/README.md) in the deepcoder example directory.

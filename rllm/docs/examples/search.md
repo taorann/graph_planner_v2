@@ -53,4 +53,4 @@ Search agent training configuration:
 --8<-- "examples/search/train_search_agent.py"
 ```
 
-For detailed setup instructions, see the [README](https://github.com/rllm-org/rllm/blob/main/examples/search/README.md) in the search example directory. 
+For detailed setup instructions, see the [README](https://github.com/agentica-project/rllm/blob/main/examples/search/README.md) in the search example directory. 

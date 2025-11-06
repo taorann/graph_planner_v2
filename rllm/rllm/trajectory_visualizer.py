@@ -274,17 +274,11 @@ def main(trajectory_file: str = "./trajectories/sample_trajectories/search_traje
         # Handle outputs - be more flexible with field access
         if task_type == "search":
             # Try multiple ways to get tool outputs for search tasks
-            current_obs = getattr(step, "observation", None)
-            if current_obs and isinstance(current_obs, dict):
-                tool_outputs = current_obs.get("tool_outputs", {})
+            next_obs = getattr(step, "next_observation", None)
+            if next_obs and isinstance(next_obs, dict):
+                tool_outputs = next_obs.get("tool_outputs", {})
                 if tool_outputs:
                     outputs_text = format_tool_outputs(tool_outputs)
-            elif hasattr(step, "next_observation"):
-                next_obs = getattr(step, "next_observation", None)
-                if next_obs and isinstance(next_obs, dict):
-                    tool_outputs = next_obs.get("tool_outputs", {})
-                    if tool_outputs:
-                        outputs_text = format_tool_outputs(tool_outputs)
             # Also check if outputs are in the current step's info
             elif hasattr(step, "info") and isinstance(step.info, dict):
                 tool_outputs = step.info.get("tool_outputs", {})

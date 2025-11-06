@@ -1,45 +1,29 @@
 import json
 
-from datasets import concatenate_datasets, load_dataset
+from datasets import load_dataset
 
 from rllm.data.dataset import DatasetRegistry
 from rllm.data.utils import fetch_live_code_bench_system_prompt
 
 
 def prepare_deepcoder_data(train_size: int = None, test_size: int = None):
-    train_dataset = concatenate_datasets([load_dataset("agentica-org/DeepCoder-Preview-Dataset", name="primeintellect", split="train"), load_dataset("agentica-org/DeepCoder-Preview-Dataset", name="taco", split="train"), load_dataset("agentica-org/DeepCoder-Preview-Dataset", name="lcbv5", split="train")])
-    test_dataset = concatenate_datasets([load_dataset("agentica-org/DeepCoder-Preview-Dataset", name="codeforces", split="test"), load_dataset("agentica-org/DeepCoder-Preview-Dataset", name="lcbv5", split="test")])
+    train_dataset = load_dataset("agentica-org/DeepCoder-Preview-Dataset", name="lcbv5", split="train")
+    test_dataset = load_dataset("agentica-org/DeepCoder-Preview-Dataset", name="lcbv5", split="test")
 
     def preprocess_fn(example, idx):
         starter_code = example.get("starter_code", "")
         question = fetch_live_code_bench_system_prompt(example["problem"], starter_code if starter_code else None)
 
-        tests_raw = example["tests"]
-        # Handle different test formats
-        if isinstance(tests_raw, str):
-            tests = json.loads(tests_raw)
-        else:
-            tests = tests_raw
+        tests = json.loads(example["tests"])
         metadata = example.get("metadata", {})
-
-        # Convert TACO format to standard format
-        if isinstance(tests, dict) and "inputs" in tests and "outputs" in tests:
-            normalized_tests = []
-            for input_val, output_val in zip(tests["inputs"], tests["outputs"], strict=False):
-                normalized_tests.append({"input": input_val, "output": output_val, "testtype": "stdin_stdout"})
-            tests = normalized_tests
-
-        # Ensure tests is always a list
-        if not isinstance(tests, list):
-            tests = [tests] if tests else []
 
         for test in tests:
             if test.get("testtype") == "functional" and metadata.get("func_name") is not None:
-                test["metadata"] = {"func_name": str(metadata["func_name"])}
+                test["metadata"] = {"func_name": metadata["func_name"]}
             else:
                 test["metadata"] = {"func_name": None}
 
-        return {"question": question, "ground_truth": json.dumps(tests), "data_source": "livecodebench", "uid": f"deepcoder_{idx}", "index": idx, "starter_code": starter_code, "metadata": json.dumps(metadata)}
+        return {"question": question, "ground_truth": tests, "data_source": "livecodebench", "uid": f"deepcoder_{idx}", "index": idx, "starter_code": starter_code, "metadata": metadata}
 
     if train_size:
         train_dataset = train_dataset.select(range(min(train_size, len(train_dataset))))

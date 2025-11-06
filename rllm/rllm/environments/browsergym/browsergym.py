@@ -13,12 +13,6 @@ class BrowserGymEnv(BaseEnv):
         self.process.start()
 
     def _worker(self, conn, env_id, task, env_kwargs):
-        # Import browsergym modules in the worker process to register environments
-        try:
-            import browsergym.miniwob  # noqa: F401
-        except ImportError:
-            pass
-
         env = (
             gym.make(
                 env_id,

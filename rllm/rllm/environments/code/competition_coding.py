@@ -40,7 +40,7 @@ class CompetitionCodingEnv(MultiTurnEnvironment):
         self.prev_reward = None
 
         # Return the first question
-        return self.task, {}
+        return {"question": self.task["question"]}, {}
 
     def step(self, action):
         """
