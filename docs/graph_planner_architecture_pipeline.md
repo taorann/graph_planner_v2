@@ -364,7 +364,7 @@ R2E-Gym 本身提供了 RepoEnv 环境、动作解析与容器运行时等通用
 | CGM 监督微调 | `PYTHONPATH=. python - <<'PY'`<br>`from graph_planner.integrations.codefuse_cgm import CodeFuseCGMTrainer, CGMTrainingConfig;`<br>`cfg = CGMTrainingConfig(model_name="<model>", train_path="train.jsonl", output_dir="runs/cgm");`<br>`CodeFuseCGMTrainer(cfg).train()`<br>`PY` |
 | rLLM PPO 训练 | `PYTHONPATH=. python scripts/train_planner_grpo.py --config configs/experiments/planner_grpo_4gpu.yaml --print-config` |
 
-- `scripts/run_eval_graph_planner.sh` 会把默认配置 `configs/eval/graph_planner_eval_defaults.yaml` 注入评估 CLI；若 `planner_base_url` 指向本机且给出了 `planner_model_path`，脚本会根据配置自动拉起 vLLM OpenAI 服务（默认映射到 GPU `0,1`，tensor parallel 为 2），待端点就绪后再启动异步评测。需要禁用或自定义设备时，可在 YAML/CLI 覆写 `auto_launch_planner_service`、`planner_service_gpus` 或 `planner_service_tensor_parallel_size`。【F:scripts/eval_graph_planner_engine.py†L84-L213】【F:scripts/eval_graph_planner_engine.py†L517-L576】【F:configs/eval/graph_planner_eval_defaults.yaml†L1-L21】
+- `scripts/run_eval_graph_planner.sh` 会把默认配置 `configs/eval/graph_planner_eval_defaults.yaml` 注入评估 CLI；若 `planner_base_url` 指向本机且给出了 `planner_model_path`，脚本会根据配置自动拉起 vLLM OpenAI 服务（默认映射到 GPU `0,1`，tensor parallel 为 2，gpu memory utilization 为 0.9）。启动前脚本会先通过 `nvidia-smi` 检查所选 GPU 的剩余显存，并在必要时按 `planner_service_gpu_memory_headroom` 预留 5% 安全边界后降低 `gpu_memory_utilization`，避免 GPU 已被占用时启动失败。需要禁用或自定义设备时，可在 YAML/CLI 覆写 `auto_launch_planner_service`、`planner_service_gpus`、`planner_service_tensor_parallel_size`、`planner_service_gpu_memory_utilization` 或 `planner_service_gpu_memory_headroom`。【F:scripts/eval_graph_planner_engine.py†L84-L239】【F:scripts/eval_graph_planner_engine.py†L517-L586】【F:configs/eval/graph_planner_eval_defaults.yaml†L12-L17】
 
 ## 6. 日志与调试建议 / Logging & troubleshooting
 
