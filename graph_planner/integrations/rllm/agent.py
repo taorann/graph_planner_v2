@@ -16,10 +16,10 @@ from ...infra.vendor import ensure_rllm_importable
 ensure_rllm_importable()
 
 try:
-    from rllm.rllm.agents.agent import Action, BaseAgent, Step, Trajectory  # type: ignore[attr-defined]
+    from rllm.agents.agent import Action, BaseAgent, Step, Trajectory  # type: ignore[attr-defined]
 except ModuleNotFoundError:
     try:
-        from rllm.agents.agent import Action, BaseAgent, Step, Trajectory  # type: ignore[attr-defined]
+        from rllm.rllm.agents.agent import Action, BaseAgent, Step, Trajectory  # type: ignore[attr-defined]
     except ModuleNotFoundError as _exc:  # pragma: no cover - optional dependency
         Action = None  # type: ignore[assignment]
         BaseAgent = None  # type: ignore[assignment]
