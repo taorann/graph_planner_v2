@@ -228,6 +228,136 @@ def _query_gpu_memory(indices: Sequence[int] | None) -> list[tuple[float, float]
     return selected
 
 
+def _query_gpu_uuid_map() -> dict[str, int] | None:
+    try:
+        output = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,uuid",
+                "--format=csv,noheader",
+            ],
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
+
+    mapping: dict[str, int] = {}
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        parts = [segment.strip() for segment in line.split(",")]
+        if len(parts) < 2:
+            continue
+        try:
+            index = int(parts[0])
+        except ValueError:
+            continue
+        mapping[parts[1]] = index
+
+    return mapping or None
+
+
+def _collect_gpu_process_snapshot(
+    indices: Sequence[int] | None,
+) -> list[tuple[int, int, str, float]] | None:
+    try:
+        output = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=pid,process_name,gpu_uuid,memory.used",
+                "--format=csv,noheader,nounits",
+            ],
+            text=True,
+        )
+    except FileNotFoundError:
+        return None
+    except subprocess.CalledProcessError:
+        return None
+
+    cleaned_lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not cleaned_lines or cleaned_lines == ["No running processes found"]:
+        return []
+
+    uuid_map = _query_gpu_uuid_map()
+    if uuid_map is None:
+        return None
+
+    allowed = set(indices) if indices is not None else None
+    entries: list[tuple[int, int, str, float]] = []
+    for line in cleaned_lines:
+        parts = [segment.strip() for segment in line.split(",")]
+        if len(parts) < 4:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        process_name = parts[1]
+        uuid = parts[2]
+        try:
+            memory_mib = float(parts[3])
+        except ValueError:
+            continue
+
+        index = uuid_map.get(uuid)
+        if index is None:
+            continue
+        if allowed is not None and index not in allowed:
+            continue
+        entries.append((index, pid, process_name, memory_mib))
+
+    return entries
+
+
+def _log_gpu_memory_snapshot(
+    stats: Sequence[tuple[float, float]],
+    *,
+    indices: Sequence[int] | None,
+    headroom: float,
+    requested: float | None,
+    adjusted: float | None,
+) -> None:
+    if not stats:
+        return
+
+    logical_indices = list(indices) if indices is not None else list(range(len(stats)))
+    details: list[str] = []
+    for logical_index, (free, total) in zip(logical_indices, stats):
+        ratio = (free / total) if total else 0.0
+        used = max(total - free, 0.0)
+        details.append(
+            f"GPU{logical_index}: free={free:.2f} GiB used={used:.2f} GiB total={total:.2f} GiB (free_ratio={ratio:.3f})"
+        )
+
+    ratio_info = "; ".join(details)
+    requested_repr = f"{requested:.3f}" if requested is not None else "None"
+    adjusted_repr = f"{adjusted:.3f}" if adjusted is not None else "None"
+    LOGGER.info(
+        "Planner GPU memory probe -> %s; requested=%s headroom=%.3f adjusted=%s",
+        ratio_info,
+        requested_repr,
+        headroom,
+        adjusted_repr,
+    )
+
+    process_entries = _collect_gpu_process_snapshot(logical_indices)
+    if process_entries is None:
+        return
+    if not process_entries:
+        LOGGER.info("Planner GPU memory active processes: none reported by nvidia-smi")
+        return
+
+    formatted = []
+    for gpu_index, pid, name, memory_mib in process_entries:
+        formatted.append(
+            f"GPU{gpu_index}: pid={pid} name={name} memory={memory_mib:.0f} MiB"
+        )
+    LOGGER.info(
+        "Planner GPU memory active processes: %s",
+        "; ".join(formatted),
+    )
+
+
 def _compute_gpu_memory_utilization(
     requested: float | None,
     *,
@@ -249,7 +379,15 @@ def _compute_gpu_memory_utilization(
         max_available_ratio = max(0.0, max_available_ratio - headroom)
 
     if requested is None:
-        return max_available_ratio if max_available_ratio > 0 else None
+        adjusted = max_available_ratio if max_available_ratio > 0 else None
+        _log_gpu_memory_snapshot(
+            stats,
+            indices=devices,
+            headroom=headroom,
+            requested=requested,
+            adjusted=adjusted,
+        )
+        return adjusted
 
     adjusted = min(requested, max_available_ratio)
     if adjusted < 0:
@@ -261,6 +399,14 @@ def _compute_gpu_memory_utilization(
             requested,
             adjusted,
         )
+
+    _log_gpu_memory_snapshot(
+        stats,
+        indices=devices,
+        headroom=headroom,
+        requested=requested,
+        adjusted=adjusted,
+    )
 
     return adjusted
 
