@@ -183,6 +183,10 @@ class PlannerEnv:
         self.last_reads = []
         self._cgm_linearizer = GraphLinearizer()
         self._cgm_snippet_formatter = SnippetFormatter()
+        try:
+            self.last_info["sandbox_ports"] = self.box.exposed_ports
+        except Exception:
+            self.last_info.pop("sandbox_ports", None)
         return self._obs()
 
     def close(self) -> None:

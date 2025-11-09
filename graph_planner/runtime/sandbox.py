@@ -43,6 +43,8 @@ class SandboxConfig:
     r2e_ds_json: Optional[str] = None  # 指向一个 JSON 文件，内容是 r2e 期望的 ds dict
     requires_build: bool = False       # SWE-bench 元数据：提示容器是否需要 build
     swebench_spec: Optional[Dict[str, Any]] = None  # 透传 swe-bench 的构建脚本信息
+    force_docker_backend: bool = False
+    port_forwards: Optional[List[Dict[str, Any]]] = None
 
 class SandboxRuntime:
     """
@@ -57,6 +59,8 @@ class SandboxRuntime:
     def __init__(self, cfg: SandboxConfig, force_backend: Optional[str] = None):
         self.cfg = cfg
         preferred_mode = force_backend or cfg.backend or "docker"
+        if cfg.force_docker_backend:
+            preferred_mode = "docker"
         if preferred_mode == "auto":
             preferred_mode = (
                 "repoenv" if (_HAS_R2E and cfg.r2e_ds_json and os.path.exists(cfg.r2e_ds_json)) else "docker"
@@ -76,6 +80,7 @@ class SandboxRuntime:
             self._init_r2e_backend()
         else:
             self._init_docker_backend()
+        self._exposed_ports: List[Dict[str, Any]] = getattr(self, "_exposed_ports", [])
 
     # ---------- backend: RepoEnv ----------
     def _init_repoenv_backend(self):
@@ -168,17 +173,82 @@ class SandboxRuntime:
         else:
             workdir = next(iter(self.cfg.mounts.values()), "/") if self.cfg.mounts else "/"
         self.workdir = workdir
+
+        ports_arg = None
+        if self.cfg.port_forwards:
+            ports_arg = {}
+            for spec in self.cfg.port_forwards:
+                if not isinstance(spec, Mapping):
+                    continue
+                container_port = spec.get("container_port")
+                if container_port is None:
+                    continue
+                try:
+                    container_port = int(container_port)
+                except Exception:
+                    continue
+                protocol = str(spec.get("protocol", "tcp")).lower()
+                host_ip = spec.get("host_ip")
+                host_port = spec.get("host_port")
+                binding: Any
+                if host_port is None or host_port == "":
+                    binding = None
+                else:
+                    try:
+                        host_port = int(host_port)
+                    except Exception:
+                        continue
+                    if host_ip:
+                        binding = (str(host_ip), host_port)
+                    else:
+                        binding = host_port
+                key = f"{container_port}/{protocol}" if protocol else int(container_port)
+                ports_arg[key] = binding
         self.container = self.client.containers.run(
             image=self.cfg.docker_image,
             command="/bin/bash",
             name=_rand_name("gp"),
             environment=self.cfg.env or {},
             working_dir=self.workdir,
-            tty=True, stdin_open=True, detach=True, volumes=volumes,
+            tty=True,
+            stdin_open=True,
+            detach=True,
+            volumes=volumes,
+            ports=ports_arg,
         )
         # git 安全目录兜底
         self._exec(f"git config --global --add safe.directory {self.workdir} || true")
         self.repo = None
+        self._exposed_ports = []
+        if ports_arg:
+            try:
+                self.container.reload()
+                ports_info = (
+                    self.container.attrs.get("NetworkSettings", {}).get("Ports", {})
+                )
+            except Exception:
+                ports_info = {}
+            for key, bindings in (ports_info or {}).items():
+                if not bindings:
+                    # None 表示 Docker 仍然会随机分配主机端口
+                    self._exposed_ports.append(
+                        {
+                            "container_port": key,
+                            "host_ip": None,
+                            "host_port": None,
+                        }
+                    )
+                    continue
+                for binding in bindings:
+                    self._exposed_ports.append(
+                        {
+                            "container_port": key,
+                            "host_ip": binding.get("HostIp"),
+                            "host_port": int(binding.get("HostPort"))
+                            if binding.get("HostPort")
+                            else None,
+                        }
+                    )
 
     # ---------- 通用执行 ----------
     def _exec(self, cmd: str, timeout: int = 900) -> Tuple[str, int]:
@@ -345,6 +415,11 @@ class SandboxRuntime:
             except Exception: pass
             try: self.container.remove(force=True)
             except Exception: pass
+
+    # ---------- 调试辅助 ----------
+    @property
+    def exposed_ports(self) -> List[Dict[str, Any]]:
+        return list(self._exposed_ports)
 
 
 class PatchApplier:

@@ -1,3 +1,5 @@
+> ⚠️ **2025-11-07 提醒**：`scripts/run_rule_agent.py` 与 `scripts/train_planner_grpo.py` 已移除，本文件保留旧版流程以供参考；请结合 `docs/legacy_materials.md` 与 `scripts/eval_graph_planner_engine.py` 获取最新评测入口。
+
 # rLLM 代码调研报告
 
 ## 1. 总览

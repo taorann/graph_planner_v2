@@ -84,6 +84,72 @@ def _load_config_defaults(path: Path) -> Dict[str, Any]:
     return defaults
 
 
+def _parse_port_forward_spec(spec: str) -> Dict[str, Any]:
+    raw = str(spec).strip()
+    if not raw:
+        raise ValueError("empty port forwarding spec")
+
+    protocol = "tcp"
+    base = raw
+    if "/" in raw:
+        base, protocol = raw.rsplit("/", 1)
+        protocol = protocol.lower()
+        if not protocol:
+            protocol = "tcp"
+
+    parts = base.split(":")
+    host_ip: str | None = None
+    host_port_raw: str
+    container_port_raw: str
+
+    if len(parts) == 3:
+        host_ip, host_port_raw, container_port_raw = parts
+    elif len(parts) == 2:
+        host_port_raw, container_port_raw = parts
+        host_ip = None
+    elif len(parts) == 1:
+        host_port_raw = ""
+        container_port_raw = parts[0]
+        host_ip = None
+    else:
+        raise ValueError(f"invalid port forwarding spec: {spec!r}")
+
+    try:
+        container_port = int(str(container_port_raw).strip())
+    except Exception as exc:
+        raise ValueError(f"invalid container port in spec: {spec!r}") from exc
+
+    host_port: int | None = None
+    if str(host_port_raw).strip():
+        try:
+            host_port = int(str(host_port_raw).strip())
+        except Exception as exc:
+            raise ValueError(f"invalid host port in spec: {spec!r}") from exc
+
+    payload: Dict[str, Any] = {
+        "container_port": container_port,
+        "protocol": protocol,
+    }
+    if host_ip:
+        payload["host_ip"] = host_ip
+    if host_port is not None:
+        payload["host_port"] = host_port
+    return payload
+
+
+def _build_sandbox_overrides(args: argparse.Namespace) -> Dict[str, Any]:
+    overrides: Dict[str, Any] = {}
+    port_specs: List[Dict[str, Any]] = getattr(args, "sandbox_port_forwardings", []) or []
+    if port_specs:
+        overrides["port_forwards"] = port_specs
+        overrides["force_docker_backend"] = True
+        overrides.setdefault("backend", "docker")
+    if getattr(args, "sandbox_force_docker_backend", False):
+        overrides["force_docker_backend"] = True
+        overrides.setdefault("backend", "docker")
+    return overrides
+
+
 def _resolve_path(
     value: Path,
     *,
@@ -154,6 +220,19 @@ def _is_local_host(hostname: str | None) -> bool:
 def _parse_device_indices(value: str | None) -> list[int] | None:
     if value is None:
         return None
+
+    if isinstance(value, (list, tuple)):
+        cleaned: list[int] = []
+        for item in value:
+            try:
+                cleaned.append(int(item))
+            except (TypeError, ValueError):
+                LOGGER.warning(
+                    "Ignoring non-integer GPU identifier in planner_service_gpus: %s",
+                    item,
+                )
+                return None
+        return cleaned or None
 
     devices: list[int] = []
     for part in str(value).split(","):
@@ -228,6 +307,136 @@ def _query_gpu_memory(indices: Sequence[int] | None) -> list[tuple[float, float]
     return selected
 
 
+def _query_gpu_uuid_map() -> dict[str, int] | None:
+    try:
+        output = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,uuid",
+                "--format=csv,noheader",
+            ],
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
+
+    mapping: dict[str, int] = {}
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        parts = [segment.strip() for segment in line.split(",")]
+        if len(parts) < 2:
+            continue
+        try:
+            index = int(parts[0])
+        except ValueError:
+            continue
+        mapping[parts[1]] = index
+
+    return mapping or None
+
+
+def _collect_gpu_process_snapshot(
+    indices: Sequence[int] | None,
+) -> list[tuple[int, int, str, float]] | None:
+    try:
+        output = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=pid,process_name,gpu_uuid,memory.used",
+                "--format=csv,noheader,nounits",
+            ],
+            text=True,
+        )
+    except FileNotFoundError:
+        return None
+    except subprocess.CalledProcessError:
+        return None
+
+    cleaned_lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not cleaned_lines or cleaned_lines == ["No running processes found"]:
+        return []
+
+    uuid_map = _query_gpu_uuid_map()
+    if uuid_map is None:
+        return None
+
+    allowed = set(indices) if indices is not None else None
+    entries: list[tuple[int, int, str, float]] = []
+    for line in cleaned_lines:
+        parts = [segment.strip() for segment in line.split(",")]
+        if len(parts) < 4:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        process_name = parts[1]
+        uuid = parts[2]
+        try:
+            memory_mib = float(parts[3])
+        except ValueError:
+            continue
+
+        index = uuid_map.get(uuid)
+        if index is None:
+            continue
+        if allowed is not None and index not in allowed:
+            continue
+        entries.append((index, pid, process_name, memory_mib))
+
+    return entries
+
+
+def _log_gpu_memory_snapshot(
+    stats: Sequence[tuple[float, float]],
+    *,
+    indices: Sequence[int] | None,
+    headroom: float,
+    requested: float | None,
+    adjusted: float | None,
+) -> None:
+    if not stats:
+        return
+
+    logical_indices = list(indices) if indices is not None else list(range(len(stats)))
+    details: list[str] = []
+    for logical_index, (free, total) in zip(logical_indices, stats):
+        ratio = (free / total) if total else 0.0
+        used = max(total - free, 0.0)
+        details.append(
+            f"GPU{logical_index}: free={free:.2f} GiB used={used:.2f} GiB total={total:.2f} GiB (free_ratio={ratio:.3f})"
+        )
+
+    ratio_info = "; ".join(details)
+    requested_repr = f"{requested:.3f}" if requested is not None else "None"
+    adjusted_repr = f"{adjusted:.3f}" if adjusted is not None else "None"
+    LOGGER.info(
+        "Planner GPU memory probe -> %s; requested=%s headroom=%.3f adjusted=%s",
+        ratio_info,
+        requested_repr,
+        headroom,
+        adjusted_repr,
+    )
+
+    process_entries = _collect_gpu_process_snapshot(logical_indices)
+    if process_entries is None:
+        return
+    if not process_entries:
+        LOGGER.info("Planner GPU memory active processes: none reported by nvidia-smi")
+        return
+
+    formatted = []
+    for gpu_index, pid, name, memory_mib in process_entries:
+        formatted.append(
+            f"GPU{gpu_index}: pid={pid} name={name} memory={memory_mib:.0f} MiB"
+        )
+    LOGGER.info(
+        "Planner GPU memory active processes: %s",
+        "; ".join(formatted),
+    )
+
+
 def _compute_gpu_memory_utilization(
     requested: float | None,
     *,
@@ -249,7 +458,15 @@ def _compute_gpu_memory_utilization(
         max_available_ratio = max(0.0, max_available_ratio - headroom)
 
     if requested is None:
-        return max_available_ratio if max_available_ratio > 0 else None
+        adjusted = max_available_ratio if max_available_ratio > 0 else None
+        _log_gpu_memory_snapshot(
+            stats,
+            indices=devices,
+            headroom=headroom,
+            requested=requested,
+            adjusted=adjusted,
+        )
+        return adjusted
 
     adjusted = min(requested, max_available_ratio)
     if adjusted < 0:
@@ -261,6 +478,14 @@ def _compute_gpu_memory_utilization(
             requested,
             adjusted,
         )
+
+    _log_gpu_memory_snapshot(
+        stats,
+        indices=devices,
+        headroom=headroom,
+        requested=requested,
+        adjusted=adjusted,
+    )
 
     return adjusted
 
@@ -324,22 +549,24 @@ def _auto_launch_planner_service(args: argparse.Namespace):
     if args.planner_tokenizer:
         cmd.extend(["--tokenizer", str(args.planner_tokenizer)])
 
-    if getattr(args, "planner_service_tensor_parallel_size", None):
-        cmd.extend(
-            [
-                "--tensor-parallel-size",
-                str(args.planner_service_tensor_parallel_size),
-            ]
-        )
+    gpu_devices = _parse_device_indices(
+        getattr(args, "planner_service_gpus", None)
+    )
+
+    tensor_parallel_size = getattr(args, "planner_service_tensor_parallel_size", None)
+    if tensor_parallel_size is None and gpu_devices:
+        tensor_parallel_size = len(gpu_devices)
+    if tensor_parallel_size:
+        cmd.extend([
+            "--tensor-parallel-size",
+            str(tensor_parallel_size),
+        ])
 
     if args.planner_max_input_tokens:
         cmd.extend(["--max-model-len", str(args.planner_max_input_tokens)])
 
     gpu_memory_utilization = getattr(
         args, "planner_service_gpu_memory_utilization", None
-    )
-    gpu_devices = _parse_device_indices(
-        getattr(args, "planner_service_gpus", None)
     )
     headroom_ratio = float(
         getattr(args, "planner_service_gpu_memory_headroom", 0.05)
@@ -360,8 +587,8 @@ def _auto_launch_planner_service(args: argparse.Namespace):
     LOGGER.info("Auto-launching planner service with command: %s", shlex.join(cmd))
 
     env = os.environ.copy()
-    if getattr(args, "planner_service_gpus", None):
-        env["CUDA_VISIBLE_DEVICES"] = str(args.planner_service_gpus)
+    if gpu_devices:
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(str(index) for index in gpu_devices)
 
     process = subprocess.Popen(cmd, env=env)
     ready = False
@@ -518,8 +745,11 @@ def _auto_launch_cgm_service(args: argparse.Namespace):
 
     env = os.environ.copy()
     service_gpus = getattr(args, "cgm_service_gpus", None)
-    if service_gpus:
-        env["CUDA_VISIBLE_DEVICES"] = str(service_gpus)
+    parsed_service_gpus = _parse_device_indices(service_gpus)
+    if parsed_service_gpus:
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(
+            str(index) for index in parsed_service_gpus
+        )
 
     process = subprocess.Popen(cmd, env=env)
     ready = False
@@ -710,6 +940,24 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--agent-system-prompt", default=None, help="Override the planner agent system prompt text")
     parser.add_argument("--agent-system-prompt-path", type=Path, default=None, help="Path to a file containing a custom system prompt")
     parser.add_argument("--disable-rule-fallback", action="store_true", help="Disable rule-based fallback actions inside the agent")
+    parser.add_argument(
+        "--sandbox-port-forward",
+        action="append",
+        dest="sandbox_port_forward",
+        default=None,
+        help=(
+            "Expose container ports when using the docker backend. Accepts "
+            "[HOST_IP:]HOST_PORT:CONTAINER_PORT or HOST_PORT:CONTAINER_PORT. Repeatable."
+        ),
+    )
+    parser.add_argument(
+        "--sandbox-force-docker-backend",
+        action="store_true",
+        help=(
+            "Force SandboxRuntime to use the docker backend, ignoring RepoEnv manifests. "
+            "Useful when manually exposing containers for external agents."
+        ),
+    )
     if config_defaults:
         valid_dests = {action.dest for action in parser._actions}
         for key in list(config_defaults):
@@ -762,6 +1010,21 @@ def _parse_args() -> argparse.Namespace:
             must_exist=field in must_exist_fields,
         )
         setattr(args, field, resolved)
+
+    raw_port_specs: List[str] = []
+    if getattr(args, "sandbox_port_forward", None):
+        for item in args.sandbox_port_forward or []:
+            if isinstance(item, (list, tuple)):
+                raw_port_specs.extend(str(elem) for elem in item)
+            else:
+                raw_port_specs.append(str(item))
+    port_forwardings: List[Dict[str, Any]] = []
+    for spec in raw_port_specs:
+        try:
+            port_forwardings.append(_parse_port_forward_spec(spec))
+        except ValueError as exc:
+            raise SystemExit(f"Invalid --sandbox-port-forward value {spec!r}: {exc}") from exc
+    args.sandbox_port_forwardings = port_forwardings
 
     missing = [field for field in ("dataset", "planner_model", "cgm_model_path") if getattr(args, field) is None]
     if missing:
@@ -965,6 +1228,7 @@ def _load_tasks(
     load_task_entries,
     dataset_name: str,
     limit: int | None,
+    sandbox_overrides: Dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     registered = ensure_dataset_registered(name=dataset_name, path=str(dataset_path))
     LOGGER.info(
@@ -982,6 +1246,16 @@ def _load_tasks(
             break
 
         entry = _ensure_repoenv_manifest(entry, dataset_path=dataset_path)
+        if sandbox_overrides:
+            sandbox_payload = entry.get("sandbox")
+            if isinstance(sandbox_payload, dict):
+                merged = dict(sandbox_payload)
+                for key, value in sandbox_overrides.items():
+                    if key == "port_forwards" and not value:
+                        continue
+                    merged[key] = value
+                entry = dict(entry)
+                entry["sandbox"] = merged
 
         task_id = entry.get("task_id") or entry.get("issue_id") or f"{registered.split}-{index}"
         task_payload = {
@@ -1074,12 +1348,15 @@ def main() -> None:
                 args.planner_model_path,
             )
 
+    sandbox_overrides = _build_sandbox_overrides(args)
+
     tasks = _load_tasks(
         args.dataset,
         ensure_dataset_registered=ensure_dataset_registered,
         load_task_entries=load_task_entries,
         dataset_name=dataset_name,
         limit=args.limit,
+        sandbox_overrides=sandbox_overrides,
     )
 
     tokenizer = _build_tokenizer(args)
