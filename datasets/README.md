@@ -38,12 +38,12 @@
 
 生成完 JSONL 后，训练脚本会按以下步骤消费：
 
-1. `scripts/train_planner_grpo.py` 调用 `ensure_dataset_registered` 读取 JSONL，将上述字段再度压平成 Verl 期望的
-   parquet schema，并把 `task_id`、`docker_image`、`instance` 等信息保存到 Ray 可访问的缓存目录。
+1. `scripts/register_graphplanner_dataset.py` 会在本地生成 rLLM 可复用的 Parquet 索引，后续评测或训练脚本可直接通过
+   `DatasetRegistry.get(name)` 载入任务清单，避免重复解析 JSONL。
 2. rLLM 在回放数据时会把 JSON 反序列化，交给 `GraphPlannerRLLMEnv.reset` 恢复 RepoEnv 容器。此时 `docker_image` 确定
-   运行基础镜像，`instance` 字段提供初始化挂载、工作目录、测试命令等。若 manifest 存在，训练/评估脚本会在启动前读取
+   运行基础镜像，`instance` 字段提供初始化挂载、工作目录、测试命令等。若 manifest 存在，评测脚本会在启动前读取
    `docker_images.txt`（或通过 `--prepull-containers` 预拉容器），减少首次 rollout 时的镜像拉取等待。
-3. 进入强化学习循环后，Planner 依据 issue/子图/历史 observation 产出 `<function=...>`；当触发 `repair` 动作时，环境
+3. 进入评测或后续训练循环后，Planner 依据 issue/子图/历史 observation 产出 `<function=...>`；当触发 `repair` 动作时，环境
    会拼装 CGM payload（含最新代码上下文、子图、记忆）并调用模型生成补丁。
 
 因此，将下载好的 R2E-Gym 任务（或自定义任务）放入上述路径即可直接运行训练/评估命令，数据会沿着上述链路自动

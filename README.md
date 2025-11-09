@@ -22,7 +22,7 @@ graph_planner/
   integrations/    # 本地 LLM 客户端与 rLLM 训练对接层
   memory/          # 代码图子图维护与线性化工具
   runtime/         # SandboxRuntime，封装 RepoEnv / R2E / docker 三种后端
-scripts/           # 运行代理、注册数据集、启动训练的 CLI
+scripts/           # 数据准备、数据注册与评测 CLI（训练入口重构中）
 tests/             # rLLM 辅助测试（例如奖励管理器加载路径）
 ```
 
@@ -49,29 +49,34 @@ tests/             # rLLM 辅助测试（例如奖励管理器加载路径）
    ```
   `prepare_datasets.py` 会把 Hugging Face 上的 R2E-Gym / SWE-bench 数据集转换成 Graph Planner 所需的 JSON/JSONL 结构，并在 `datasets/` 下生成对应的任务文件、`instances/*.json` 以及 docker manifest。脚本同时支持 `--skip-r2e`、`--skip-swebench`、`--prepull-*` 等参数，便于按需刷新或预拉容器。
 
-3. **运行规则代理冒烟**
-   ```bash
-   PYTHONPATH=. python scripts/run_rule_agent.py \
-     --backend repoenv \
-     --ds-json /path/to/your_r2e_dataset.jsonl \
-     --max-steps 6 \
-     --report smoke_report.json
-   ```
-   请将 `--ds-json` 指向已经准备好的 R2E-Gym（或自定义）任务 JSONL。脚本会生成 `smoke_report.json` 和 `logs/test_runs.jsonl`，便于分析修复轨迹。
+3. **注册数据集以复用 Parquet 索引（可选）**
+    ```bash
+    PYTHONPATH=. python scripts/register_graphplanner_dataset.py \
+      --name graph_planner_repoenv \
+      --split val \
+      --jsonl datasets/r2e_gym/val.jsonl
+    ```
+    该脚本会把 JSONL 与 `instances/*.json` 注册到 rLLM 的本地数据集仓库，写出 `rllm/rllm/data/datasets/<name>/<split>_verl.parquet`。训练或评测前可以直接通过 `DatasetRegistry.get(name)` 复用索引，避免重复解析任务描述。
 
-4. **启动强化学习训练（需要 rLLM + Docker 环境）**
-   ```bash
-   PYTHONPATH=. python scripts/train_planner_grpo.py \
-     --config configs/experiments/planner_grpo_4gpu.yaml \
-     --print-config
-   ```
-  当前仓库仅保留 `configs/experiments/planner_grpo_4gpu.yaml` 作为默认 GRPO 配置，脚本会自动解析其中的模型、数据集与环境变量设置。如需调整路径或超参，可使用 `--overrides trainer.total_epochs=10 data.train_batch_size=4` 形式的 OmegaConf dotlist 覆写。添加 `--dry-run` 可以在应用完覆写后立即退出，便于审计配置。更多说明见 [`docs/runbook.md`](docs/runbook.md)。
+4. **运行 Graph Planner 评测**
+    ```bash
+    bash scripts/run_eval_graph_planner.sh \
+      --config configs/eval/graph_planner_eval_defaults.yaml \
+      --planner-api-key sk-xxxx
+    ```
+    Shell 包装脚本会自动导出 `PYTHONPATH`、合并 CLI 与 YAML 配置，随后调用 `scripts/eval_graph_planner_engine.py`：
+    - 在需要时拉起本地 planner / CGM vLLM 服务，并根据显存余量调整 `--gpu-memory-utilization`；
+    - 构造 rLLM 执行引擎，批量运行 RepoEnv 任务并写出日志与结果汇总。
+    若已经手动启动推理服务，可使用 `--skip-auto-launch-planner` 或 `--skip-auto-launch-cgm` 避免重复拉起。
 
-5. **合同冒烟检查**
-   ```bash
-   PYTHONPATH=. python scripts/validate_contracts.py
-   ```
-   该脚本会调用解析器与补丁校验器，以确保 Planner/CGM 的协议未发生漂移。
+5. **强化学习训练入口重构中**
+    旧版 `scripts/run_rule_agent.py` 与 `scripts/train_planner_grpo.py` 已在整理过程中移除。新的训练 CLI 将直接复用 `eval_graph_planner_engine.py` 中的容器编排逻辑，并通过 rLLM/VERL 启动 GRPO 训练；重构完成前，可参考 [`docs/legacy_materials.md`](docs/legacy_materials.md) 了解历史流程和仍需补齐的模块。
+
+6. **合同冒烟检查**
+    ```bash
+    PYTHONPATH=. python scripts/validate_contracts.py
+    ```
+    该脚本会调用解析器与补丁校验器，以确保 Planner/CGM 的协议未发生漂移。
 
 ## 文档索引
 

@@ -12,7 +12,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from aci.schema import Plan, PlanTarget
 
@@ -31,10 +31,9 @@ class GenerateRequest(BaseModel):
     subgraph: Optional[Sequence[Mapping[str, Any]]] = None
     snippets: Optional[Sequence[Mapping[str, Any]]] = None
     metadata: Optional[Dict[str, Any]] = None
-    model_config: Optional[Dict[str, Any]] = None
+    model_overrides: Optional[Dict[str, Any]] = Field(default=None, alias="model_config")
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 @dataclass
@@ -148,7 +147,7 @@ def create_app(bundle: _RuntimeBundle, *, route: str = "/generate") -> FastAPI:
         constraints = _extract_constraints(metadata)
 
         async with bundle.lock:
-            overrides = _apply_model_config(bundle, request.model_config)
+            overrides = _apply_model_config(bundle, request.model_overrides)
             try:
                 patch = bundle.runtime.generate_patch(
                     issue=request.issue,

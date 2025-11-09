@@ -1,3 +1,5 @@
+> ⚠️ **2025-11-07 提醒**：`scripts/run_rule_agent.py` 与 `scripts/train_planner_grpo.py` 已移除，本文件保留旧版流程以供参考；请结合 `docs/legacy_materials.md` 与 `scripts/eval_graph_planner_engine.py` 获取最新评测入口。
+
 # Graph Planner GRPO Runbook
 
 本指南说明如何使用 `scripts/train_planner_grpo.py` 复现实验配置、准备数据以及检查运行环境。

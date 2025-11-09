@@ -27,10 +27,10 @@ Graph Planner 致力于复现 CGM + Planner 的双智能体代码修复流程：
    - `graph_planner.integrations.rllm.agent.GraphPlannerRLLMAgent` 将环境观测整理成系统提示，解析模型输出的 `<function=...>` 区块，并在解析失败时回退到规则策略。
    - `graph_planner.integrations.rllm.env.GraphPlannerRLLMEnv` 将 `PlannerEnv` 暴露给 rLLM，封装奖励、终止条件与 RepoEnv/Sandbox 初始化逻辑。
    - `graph_planner.integrations.rllm.registry` + `graph_planner.infra.vendor.ensure_rllm_importable` 负责定位子模块 rLLM 并在 Hydra/Verl 注册 Graph Planner 自定义 agent/env。
-   - `scripts/train_planner_grpo.py` 读取 rLLM PPO 配置，覆盖数据路径与训练超参，可选择性关闭规则回退。
+   - （重构中）新的训练 CLI 计划复用 `eval_graph_planner_engine.py` 的容器与模型编排逻辑，再接入 rLLM/VERL 执行 GRPO；旧版 `scripts/train_planner_grpo.py` 已移除。
 
 3. **本地运行与冒烟测试脚手架**
-   - `scripts/run_rule_agent.py` 支持在 RepoEnv 或纯 Docker 工作流下运行规则/本地 LLM 策略，便于在真实容器环境中做训练前冒烟检查。【F:scripts/run_rule_agent.py†L101-L136】
+   - `scripts/run_eval_graph_planner.sh` + `scripts/eval_graph_planner_engine.py` 负责端到端评测，包含模型服务自动拉起、RepoEnv manifest 修复与 rLLM 执行流程，已取代旧版规则代理冒烟脚本。【F:scripts/run_eval_graph_planner.sh†L1-L31】【F:scripts/eval_graph_planner_engine.py†L468-L720】
    - `tests/test_reward_manager_loading.py` 保留 rLLM 奖励管理器的加载兜底用例，确保在缺省配置下训练脚本仍能顺利启动；其他历史冒烟测试已迁移为文档中的手动命令。【F:tests/test_reward_manager_loading.py†L1-L45】
 
 4. **补丁生成与护栏**
@@ -71,16 +71,16 @@ Graph Planner 致力于复现 CGM + Planner 的双智能体代码修复流程：
 
 2. **数据与镜像就绪**
    - 根据训练需求编写 RepoEnv/R2E JSONL 任务描述，并在 `datasets/` 目录下维护。
-   - 预先拉取或构建所有任务对应的 Docker 镜像，保证 `scripts/run_rule_agent.py` 可以顺利启动容器。
+   - 预先拉取或构建所有任务对应的 Docker 镜像，保证 `scripts/eval_graph_planner_engine.py` 在 RepoEnv 模式下能够顺利启动容器。
    - 使用 `scripts/register_graphplanner_dataset.py` 将数据集注册到 rLLM/Verl，确认生成的 parquet 文件可被训练脚本读取。
 
 3. **模型服务配置**
    - 将 Planner LLM、CGM 的本地推理服务端点填入 `.aci/config.json`（或使用环境变量覆盖），并确保接口遵循 OpenAI / CGM 适配器协议。
-   - 通过 `scripts/run_rule_agent.py --agent llm` 进行冒烟测试，确认模型输出合法的 `<function=...>` 块，补丁流程可走通。
+   - 通过 `scripts/eval_graph_planner_engine.py --limit 1 --parallel 1` 配合单容器端口映射进行联调，确认模型输出合法的 `<function=...>` 块，补丁流程可走通。
 
 4. **训练启动**
    - 将基础 checkpoint 拷贝至 `models/Qwen3-14B/`（以及需要的 `models/CodeFuse-CGM/`），脚本会自动使用这些路径作为默认模型目录。
-   - 根据实验计划编辑 `configs/experiments/planner_grpo_4gpu.yaml`（或使用 `--config` 指向自定义 YAML），再运行 `scripts/train_planner_grpo.py`；需要临时覆写时可继续使用 CLI（例如 `--overrides trainer.total_epochs=200`）。
+   - 根据评测需求编辑 `configs/eval/graph_planner_eval_defaults.yaml`（或使用自定义 YAML），再运行 `scripts/run_eval_graph_planner.sh`；训练入口将在 CLI 重构完成后补充。
    - 在训练过程中关注 `logs/` 与 Ray dashboard，确保奖励、轨迹记录符合预期。
 
 ## 缺失信息登记

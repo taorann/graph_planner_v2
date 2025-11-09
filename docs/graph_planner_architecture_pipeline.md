@@ -11,13 +11,16 @@
 > rLLM PPO stack cooperate. It explains the module boundaries, data flow, and end-to-end
 > pipelines for both supervised fine-tuning and reinforcement learning.
 
+⚠️ **2025-11-07 更新**：`scripts/run_rule_agent.py` 与 `scripts/train_planner_grpo.py` 已从仓库移除，以下涉及旧版 CLI 的章节仅作历史记录，最新评测入口请参见 `scripts/run_eval_graph_planner.sh` / `scripts/eval_graph_planner_engine.py`。
+
 ## 1. 顶层结构 / Repository layering
 
 ```
 CLI / Scripts / Tests
 └── scripts/
-    ├── run_rule_agent.py …… 规则 & 本地 LLM 入口
-    └── train_planner_grpo.py …… Planner-only GRPO 训练入口
+    ├── run_eval_graph_planner.sh …… 评测入口（自动调用 Python 主程序）
+    ├── eval_graph_planner_engine.py …… Planner/CGM 评测主程式
+    └── [legacy] train_planner_grpo.py …… 旧版 GRPO 训练 CLI，已移除，历史细节见 docs/legacy_materials.md
 └── tests/
     └── test_reward_manager_loading.py …… rLLM 奖励管理器加载兜底覆盖
 └── rllm/tests/ …… 上游 rLLM 子模块自带的代理/环境/工具单测
@@ -34,7 +37,7 @@ CLI / Scripts / Tests
     └── datasets/ …… 任务描述与 RepoEnv 配置
 ```
 
-- `scripts/run_rule_agent.py` 将配置解析、环境初始化、代理循环封装为单一入口，用于离线调试规则/本地 LLM 决策。【F:scripts/run_rule_agent.py†L1-L136】
+- `scripts/run_rule_agent.py` 曾用于离线调试规则/本地 LLM 决策，现已移除；评测与联调请改用 `scripts/eval_graph_planner_engine.py` 或 Bash 包装脚本。【F:scripts/eval_graph_planner_engine.py†L40-L200】
 - `graph_planner.env.planner_env.PlannerEnv` 负责动作编排、奖励计算、记忆同步，是规则代理、本地 LLM 与 rLLM 环境的共同核心。【F:graph_planner/env/planner_env.py†L32-L173】
 - `graph_planner.runtime.sandbox.SandboxRuntime` 根据配置切换 RepoEnv 与纯 Docker 路径，并统一命令执行与测试流程。【F:graph_planner/runtime/sandbox.py†L32-L214】
 - `graph_planner.integrations` 目录收拢所有外部模型/训练栈：CGM（数据/推理/训练）、Hugging Face 聊天客户端、本地 rLLM 适配层。
@@ -62,7 +65,7 @@ CLI / Scripts / Tests
 | `graph_planner/infra/config.py` | `load_launch_config`、`merge_launch_config` | 解析内置默认值、YAML 与 CLI 覆写，写入 `resolved_config.yaml`，并返回结构化配置以供训练/评估脚本复用。【F:graph_planner/infra/config.py†L42-L285】 |
 | `graph_planner/infra/parallel.py` | `resolve_parallel`、`preflight_check` | 根据最终配置计算张量并行/副本/并发参数，并在启动前校验 GPU、Ray 资源是否匹配，失败时给出修复建议。【F:graph_planner/infra/parallel.py†L1-L134】 |
 | `graph_planner/infra/metrics.py` | `init_wandb`、`log_metrics`、`make_gpu_snapshot` | 初始化 W&B（支持 offline）、记录 Planner/CGM/环境指标，并定期采集 GPU 与 Ray 资源心跳。【F:graph_planner/infra/metrics.py†L1-L93】 |
-| `scripts/train_planner_grpo.py` | CLI helpers | 解析 YAML / dotlist 覆写，注册 JSONL、预拉容器并构建 Ray runtime 后启动 Planner-only GRPO 训练。【F:scripts/train_planner_grpo.py†L322-L468】 |
+| `[legacy] scripts/train_planner_grpo.py` | CLI helpers（已移除） | 旧版 CLI 负责解析 YAML、注册 JSONL、预拉容器并构建 Ray runtime；该入口已下线，历史说明保留在 `docs/legacy_materials.md`。 |
 
 ### 2.1 rLLM 模块导入路径 / rLLM import resolution
 

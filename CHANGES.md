@@ -1,7 +1,7 @@
 # Changelog
 
 ## Unreleased
-- Remove obsolete configs, scripts, and tests now that `train_planner_grpo.py` is the sole training entry point.
-- Refresh README、文档与样例数据集说明，突出 `prepare_datasets.py`、统一的 GRPO 配置以及新的 RepoEnv sample。
-- 精简 `models/`、`datasets/` 等目录结构，仅保留 Planner/CGM 需要的占位目录与最新样例。
-- 更新 `tests/test_dataset_preparation.py` 以覆盖新的数据准备流程并删除失效的 rLLM 集成测试。
+- Prune committed run artifacts (`logs/`, `outputs/`, `wandb/`) and `.aci` backups so the repo only tracks source files.
+- Refresh README、datasets 指南与脚本文档，突出 `run_eval_graph_planner.sh` 评测入口并记录训练 CLI 正在重构。
+- Add `.aci/README.md` 和 `.gitignore` 规则说明缓存目录用途，防止临时文件重新入库。
+- Catalog legacy文档于 `docs/legacy_materials.md`，并在相关文件头部加注提示。
