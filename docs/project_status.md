@@ -27,7 +27,7 @@ Graph Planner 致力于复现 CGM + Planner 的双智能体代码修复流程：
    - `graph_planner.integrations.rllm.agent.GraphPlannerRLLMAgent` 将环境观测整理成系统提示，解析模型输出的 `<function=...>` 区块，并在解析失败时回退到规则策略。
    - `graph_planner.integrations.rllm.env.GraphPlannerRLLMEnv` 将 `PlannerEnv` 暴露给 rLLM，封装奖励、终止条件与 RepoEnv/Sandbox 初始化逻辑。
    - `graph_planner.integrations.rllm.registry` + `graph_planner.infra.vendor.ensure_rllm_importable` 负责定位子模块 rLLM 并在 Hydra/Verl 注册 Graph Planner 自定义 agent/env。
-   - （重构中）新的训练 CLI 计划复用 `eval_graph_planner_engine.py` 的容器与模型编排逻辑，再接入 rLLM/VERL 执行 GRPO；旧版 `scripts/train_planner_grpo.py` 已移除。
+   - （重构中）新的训练 CLI 计划复用 `eval_graph_planner_engine.py` 的容器与模型编排逻辑，再接入 rLLM/VERL 执行 GRPO。
 
 3. **本地运行与冒烟测试脚手架**
    - `scripts/run_eval_graph_planner.sh` + `scripts/eval_graph_planner_engine.py` 负责端到端评测，包含模型服务自动拉起、RepoEnv manifest 修复与 rLLM 执行流程，已取代旧版规则代理冒烟脚本。【F:scripts/run_eval_graph_planner.sh†L1-L31】【F:scripts/eval_graph_planner_engine.py†L468-L720】

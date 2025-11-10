@@ -13,8 +13,6 @@ from typing import Any, Dict, Iterable, Mapping, Optional
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from ...models import toy_lm as _toy_lm  # noqa: F401 - ensure toy model registration
-
 
 def _resolve_dtype(name: Optional[str]) -> Optional[torch.dtype]:
     """Translate a user supplied dtype string into a ``torch.dtype``."""

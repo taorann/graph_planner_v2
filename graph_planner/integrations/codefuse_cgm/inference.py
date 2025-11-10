@@ -45,8 +45,6 @@ def _primary_device(model: AutoModelForCausalLM, fallback: str) -> torch.device:
         return torch.device(fallback)
     return torch.device(param.device)
 
-from ...models import toy_lm as _toy_lm  # noqa: F401 - ensure toy model registration
-
 from .data import CGMExample, GraphLinearizer, SnippetFormatter
 from .formatting import ConversationEncoder
 

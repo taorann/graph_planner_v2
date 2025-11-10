@@ -1,9 +1,7 @@
-> ⚠️ **2025-11-07 提醒**：`scripts/run_rule_agent.py` 与 `scripts/train_planner_grpo.py` 已移除，本文件保留旧版流程以供参考；请结合 `docs/legacy_materials.md` 与 `scripts/eval_graph_planner_engine.py` 获取最新评测入口。
-
 # Graph Planner Pain Points & Resolutions
 
 > 本文汇总 Graph Planner 在演进过程中遇到的核心痛点，并记录目前的缓解方案与后续行动项。
-> **2025-11-03 审核结论**：痛点章节中引用的模块（contracts/sandbox/train_planner_grpo 等）已核实仍在仓库内，对应缓解措施仍适用。
+> **2025-11-03 审核结论**：痛点章节中引用的模块（contracts/sandbox/训练链路相关组件等）已核实仍在仓库内，对应缓解措施仍适用。
 
  Graph Planner 在演进过程中遇到的核心痛点，并记录目前的缓解方案与后续行动项。内容覆盖协议校验、补丁落盘、训练集成与遥测几大模块，便于开发者在排查问题时快速定位到唯一事实来源（SSOT）。
 
@@ -25,7 +23,7 @@
 
 强化学习流水线聚焦在 `graph_planner.integrations.rllm` 与训练脚本：
 
-- [`scripts/train_planner_grpo.py`](../scripts/train_planner_grpo.py) 解析 YAML、注册数据集并拼装 Ray Runtime，启动时自动注入 Planner/CGM 路径与奖励管理器配置。【F:scripts/train_planner_grpo.py†L322-L468】
+- 强化学习训练 CLI 正在重构，新的入口将直接实例化 `AgentTrainer`，并沿用 `graph_planner.integrations.rllm` 中的注册与环境封装逻辑，以保持配置覆写与 Ray 运行时一致性。【F:rllm/rllm/trainer/agent_trainer.py†L1-L75】【F:graph_planner/integrations/rllm/env.py†L13-L178】
 - [`graph_planner/integrations/rllm/env.py`](../graph_planner/integrations/rllm/env.py) 将 RepoEnv / DockerRuntime 包装成 rLLM 兼容的环境，暴露 `step`/`reset` 接口供 PPO 训练循环直接复用。【F:graph_planner/integrations/rllm/env.py†L13-L110】
 - 奖励模型在 `train_agent_ppo._maybe_load_reward_managers` 中按需加载，缺少配置时会回退为 `None`，防止离线调试时因为奖励依赖导致崩溃。【F:rllm/rllm/trainer/verl/train_agent_ppo.py†L124-L195】
 
