@@ -1,10 +1,3 @@
-"""Model helpers bundled with Graph Planner for testing and demos."""
+"""Model helper namespace."""
 
-from .toy_lm import ToyLMConfig, ToyLMForCausalLM, ToyTokenizer, create_toy_checkpoint
-
-__all__ = [
-    "ToyLMConfig",
-    "ToyLMForCausalLM",
-    "ToyTokenizer",
-    "create_toy_checkpoint",
-]
+__all__: list[str] = []

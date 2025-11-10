@@ -1,5 +1,3 @@
-> ⚠️ **2025-11-07 提醒**：`scripts/run_rule_agent.py` 与 `scripts/train_planner_grpo.py` 已移除，本文件保留旧版流程以供参考；请结合 `docs/legacy_materials.md` 与 `scripts/eval_graph_planner_engine.py` 获取最新评测入口。
-
 # 工具与提示协议调研（Graph Planner vs. rLLM / R2E-Gym）
 
 ## 1. Graph Planner 本地工具实现
@@ -10,8 +8,8 @@
 
 | --- | --- | --- | --- |
 | `graph_planner/core/actions.py` | 定义 Planner 可以下发的 5 类动作（explore/memory/repair/submit/noop），规定每类字段与默认值，是文本协议与环境之间的结构桥梁。 | `ExploreAction`/`MemoryAction`/`RepairAction`/`SubmitAction`/`NoopAction` 模型约束了工具调用所需的 anchors、memory target/scope/intent、plan 等字段。【F:graph_planner/core/actions.py†L1-L40】 | Planner 环境根据动作类型分派到扩展、记忆维护、CGM 修复、提交或显式空操作。 |
-| `graph_planner/agents/rule_based/tool_policy.py` | 规则基线的“第 1 步”决策器，结合 issue 描述、失败栈与 token 预算，生成 anchors/terms/hop 等下一步探索配置并建议 `next_tool`。 | `decide(state, cfg)` 根据子图规模、失败路径与 token 软上限裁剪 anchors/terms，决定是否继续扩展或转入查看/测试。【F:graph_planner/agents/rule_based/tool_policy.py†L1-L200】 | 供规则版 Planner 与 RL 小头共享，确保后续工具调用有统一的输入。 |
-| `graph_planner/agents/rule_based/tool_selector.py` | “第 5 步”工具调度器，独立判定下一轮应执行 expand/view/search/edit/test/lint/noop，并附带优先测试列表。 | `choose_next_tool(state)` 按“刚修→test”“lint 失败→lint”“上下文不足→expand”等优先级切换工具；支持 RL 覆盖钩子。【F:graph_planner/agents/rule_based/tool_selector.py†L1-L200】 | 贯穿规则策略、RL 环境与评测脚本，决定 planner 动作序列。 |
+| `graph_planner/memory/anchor_planner.py` | 规则策略使用的锚点/术语/跳数建议器，直接解析 observation pack 并输出 `anchors`、`terms`、`hop` 与 `should_expand`。 | `propose(observation_pack)` 根据 failure frame、issue 文本与 token 预算裁剪 anchors/terms，并在子图稀疏或 tokens 紧张时收紧 hop。【F:graph_planner/memory/anchor_planner.py†L1-L212】 | `PlannerAgent` 与 rLLM 环境在“扩展”阶段复用该启发式，作为本地/远程模型缺席时的兜底策略。 |
+| `graph_planner/agents/rule_based/planner.py` | 规则版 Planner 的状态机入口，封装 expand→memory→read→plan→submit 的流程。 | `_act_expand/_act_read/_act_repair` 调用 `anchor_planner`、`subgraph_store` 与 `cgm_adapter`，在修复失败时回退到重新扩展。【F:graph_planner/agents/rule_based/planner.py†L1-L210】 | 评测脚本及回退逻辑直接使用该代理，替代早期拆散的工具选择/调度模块。 |
 | `graph_planner/env/planner_env.py` | 运行时容器交互层，负责解析动作、执行 Sandbox 操作并回传 Observation。 | `_handle_repair` 先尝试直接应用 Planner 自带 patch，否则构造 `RepairRuntimeState` 调用文本协议修复链，最终把结果合并进 observation。【F:graph_planner/env/planner_env.py†L246-L305】 | 训练与评测时唯一的环境实现，向 rLLM 暴露 `BaseEnv` 接口。 |
 
 ## 2. 文本工具调用格式
@@ -37,7 +35,7 @@
 | `noop` | `<function=noop>`；解析为 `NoopAction`。【F:graph_planner/agents/common/contracts.py†L337-L341】【F:graph_planner/agents/common/chat.py†L123-L151】 | `PlannerEnv.step` 识别 `NoopAction` 并返回 {"kind": "noop"}，不上链任何容器操作。【F:graph_planner/env/planner_env.py†L61-L95】 | 新增显式空操作，便于模型放弃本轮动作且保持协议一致。 |
 Graph Planner 约定 **单回合仅一个 `<function=...>` 块**，内含多段 `<param>`。`parse_action_block` 会验证起止标签、参数唯一性与合法动作名，一旦违规便抛出带错误码的 `ProtocolError`；`format_action_block` 用于 fallback 再输出同样的文本协议。【F:graph_planner/agents/common/contracts.py†L193-L343】【F:graph_planner/agents/common/text_protocol.py†L37-L54】
 
-Planner 将环境 observation 包装成 `<observation for="{name}">{...JSON...}</observation>`，下一轮模型可直接读取；这一封装由 `emit_observation` 统一实现。仓库已移除旧版文本协议 e2e 测试，若需要验证输出，可配合 `scripts/run_rule_agent.py` 手动重放或编写临时脚本调用同一接口。【F:graph_planner/agents/common/text_protocol.py†L275-L279】【F:scripts/run_rule_agent.py†L54-L136】
+Planner 将环境 observation 包装成 `<observation for="{name}">{...JSON...}</observation>`，下一轮模型可直接读取；这一封装由 `emit_observation` 统一实现。【F:graph_planner/agents/common/text_protocol.py†L275-L279】
 
 ## 3. 模型提示模板与输出契约
 

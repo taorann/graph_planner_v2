@@ -35,8 +35,6 @@ env:
   reuse_container: true
 
 graph_planner:
-  shared_actors:
-    spawn: true
   planner:
     propagate_via_ray: false
     env:
