@@ -82,7 +82,7 @@ class CodeFuseCGMGenerator:
         dtype = _resolve_dtype(config.torch_dtype)
 
         tok_path = config.tokenizer_name_or_path or config.model_name_or_path
-        self.tokenizer = AutoTokenizer.from_pretrained(tok_path, use_fast=False)
+        self.tokenizer = AutoTokenizer.from_pretrained(tok_path)
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
