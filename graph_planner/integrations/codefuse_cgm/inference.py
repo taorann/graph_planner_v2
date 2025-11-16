@@ -8,6 +8,7 @@ English summary
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
 import torch
@@ -82,7 +83,15 @@ class CodeFuseCGMGenerator:
         dtype = _resolve_dtype(config.torch_dtype)
 
         tok_path = config.tokenizer_name_or_path or config.model_name_or_path
-        self.tokenizer = AutoTokenizer.from_pretrained(tok_path, use_fast=False)
+        tokenizer_kwargs: Dict[str, Any] = {"use_fast": False}
+        candidate_dir = Path(tok_path)
+        if candidate_dir.is_dir():
+            for filename in ("tokenizer.json", "tokenizer.model"):
+                candidate = candidate_dir / filename
+                if candidate.is_file():
+                    tokenizer_kwargs["tokenizer_file"] = str(candidate)
+                    break
+        self.tokenizer = AutoTokenizer.from_pretrained(tok_path, **tokenizer_kwargs)
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
