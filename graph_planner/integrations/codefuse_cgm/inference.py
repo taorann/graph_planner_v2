@@ -83,15 +83,7 @@ class CodeFuseCGMGenerator:
         dtype = _resolve_dtype(config.torch_dtype)
 
         tok_path = config.tokenizer_name_or_path or config.model_name_or_path
-        tokenizer_kwargs: Dict[str, Any] = {"use_fast": False}
-        candidate_dir = Path(tok_path)
-        if candidate_dir.is_dir():
-            for filename in ("tokenizer.json", "tokenizer.model"):
-                candidate = candidate_dir / filename
-                if candidate.is_file():
-                    tokenizer_kwargs["tokenizer_file"] = str(candidate)
-                    break
-        self.tokenizer = AutoTokenizer.from_pretrained(tok_path, **tokenizer_kwargs)
+        self.tokenizer = AutoTokenizer.from_pretrained(tok_path)
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 

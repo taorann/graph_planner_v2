@@ -190,6 +190,8 @@ PYTHONPATH=. python scripts/eval_graph_planner_engine.py \
      --top-p 0.9 \
      --log-level info
 
+   > **提示**：如果 `--tokenizer` 指向模型目录而不是具体文件，服务会自动查找其中的 `tokenizer.json` 或 `tokenizer.model` 并在需要时把该文件传给 Hugging Face 的 `vocab_file` 参数，从而兼容未提供 `tokenizer_config.json` 的 Qwen/CodeFuse 发布包。
+
    # 全部服务就绪后，在第三个终端运行评测脚本
    export PLANNER_MODEL_API_KEY=dummy-sk
    export CGM_API_KEY=dummy-sk
