@@ -159,7 +159,60 @@ PYTHONPATH=. python scripts/eval_graph_planner_engine.py \
 
    该命令会监听 `http://localhost:30001/generate` 并加载本地模型权重，参数来源同一份默认配置的 `cgm_*` 条目。【F:configs/eval/graph_planner_eval_defaults.yaml†L19-L33】
 
+3. **单机一体化示例** — 下列命令假设你已经下载 `models/Qwen3-14B` 与 `models/CodeFuse-CGM`，并且评测 CLI、vLLM、CGM 服务都在同一台机器上运行：
+
+   ```bash
+   # 先在独立终端启动 Planner vLLM 服务
+   CUDA_VISIBLE_DEVICES="0,1" \
+   python -m vllm.entrypoints.openai.api_server \
+     --model $(pwd)/models/Qwen3-14B \
+     --tokenizer $(pwd)/models/Qwen3-14B \
+     --host localhost \
+     --port 30000 \
+     --served-model-name models/Qwen3-14B \
+     --tensor-parallel-size 2 \
+     --gpu-memory-utilization 0.9 \
+     --max-model-len 8192 \
+     --kv-cache-dtype fp8 \
+     --trust-remote-code
+
+   # 在另一个终端启动 CGM FastAPI 服务
+   CUDA_VISIBLE_DEVICES="2" \
+   python -m graph_planner.integrations.codefuse_cgm.service \
+     --model $(pwd)/models/CodeFuse-CGM \
+     --tokenizer $(pwd)/models/CodeFuse-CGM \
+     --host localhost \
+     --port 30001 \
+     --route /generate \
+     --max-input-tokens 8192 \
+     --max-new-tokens 1024 \
+     --temperature 0.0 \
+     --top-p 0.9 \
+     --log-level info
+
+   # 全部服务就绪后，在第三个终端运行评测脚本
+   export PLANNER_MODEL_API_KEY=dummy-sk
+   export CGM_API_KEY=dummy-sk
+   bash scripts/run_eval_graph_planner.sh \
+     --config configs/eval/graph_planner_eval_defaults.yaml \
+     --planner-base-url http://localhost:30000/v1 \
+     --cgm-endpoint http://localhost:30001/generate \
+     --no-auto-launch-planner-service \
+     --no-auto-launch-cgm-service \
+     --planner-api-key-env PLANNER_MODEL_API_KEY \
+     --cgm-api-key-env CGM_API_KEY
+   ```
+
+   评测命令会直接复用你手动拉起的两个服务：通过 `--no-auto-launch-*` 显式禁用自动拉起逻辑，`planner_base_url` 与 `cgm_endpoint` 指向本机端点，再由 `planner_api_key_env`/`cgm_api_key_env` 提供密钥或占位值。若模型与评测脚本均运行在单机环境，以上顺序即可完成“服务启动 → Graph Planner 评测”的完整闭环。
+
    > ❗️ **说明**：CGM 服务当前通过 Hugging Face 的 `AutoModelForCausalLM` 直接加载权重，不会自动启动 vLLM。多卡场景需要依赖 Transformers 的 `device_map` 或 BitsAndBytes 配置手动切分模型。
+
+   ##### CGM FastAPI 服务如何挑选 GPU / 并行度？
+
+   * `graph_planner.integrations.codefuse_cgm.service` 在 `_build_generator()` 中仅把 CLI 里传入的 `--device`、`--device-map`、`--dtype` 等参数原封不动写进 `CGMGenerationConfig`，然后交给 Hugging Face 的 `CodeFuseCGMGenerator` 去加载模型；如果这些参数为空，Transformers 只会使用首张可见 GPU（或回退到 CPU），**不会**根据本机 GPU 数量自动推断张量并行/切分方案。【F:graph_planner/integrations/codefuse_cgm/service.py†L200-L233】
+   * 评测脚本的 `_auto_launch_cgm_service()` 也只是把 `cgm_service_gpus` 解析成 `CUDA_VISIBLE_DEVICES` 并附加到子进程环境，再把 `cgm_device_map` 透传给 `--device-map`。因此当你声明 `"0,1,2"` 时，FastAPI 进程能看到 3 张卡，但是否真的使用取决于 `--device-map` 的值（例如 `balanced`、`auto` 或显式 JSON 映射）。【F:scripts/eval_graph_planner_engine.py†L720-L785】
+
+   换句话说：要利用多卡，只需在配置/CLI 中同时设置 `cgm_service_gpus="0,1,..."` 与 `cgm_device_map=balanced`（或更细粒度的 JSON 字符串）；仓库不会额外帮你推算 tensor parallel，而是完全沿用 Transformers 提供的切分逻辑。
 
    若需在 **三张 GPU** 上加载模型，可把 `CUDA_VISIBLE_DEVICES` 扩展到三张卡，并把 `--device-map` 设为 `balanced`（或自定义 JSON 映射），例如：
 
