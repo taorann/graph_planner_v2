@@ -1280,9 +1280,25 @@ def _load_tasks(
 
 
 def _build_tokenizer(args: argparse.Namespace):
-    tokenizer_path = str(args.planner_tokenizer or args.planner_model)
+    tokenizer_ref = args.planner_tokenizer or args.planner_model
+    if not tokenizer_ref:
+        LOGGER.warning(
+            "No tokenizer reference supplied; remote planner rollouts will disable local token accounting",
+        )
+        return None
+
+    tokenizer_path = str(tokenizer_ref)
     LOGGER.info("Loading tokenizer from %s", tokenizer_path)
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+    except Exception as exc:  # pragma: no cover - best-effort remote fallback
+        LOGGER.warning(
+            "Failed to load tokenizer from %s (%s). Prompt/token length enforcement will be disabled.",
+            tokenizer_path,
+            exc,
+        )
+        return None
+
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     return tokenizer
@@ -1366,6 +1382,12 @@ def main() -> None:
     )
 
     tokenizer = _build_tokenizer(args)
+    enforce_max_prompt_length = args.enforce_max_prompt_length
+    if tokenizer is None and enforce_max_prompt_length:
+        LOGGER.warning(
+            "Planner tokenizer unavailable; disabling --enforce-max-prompt-length",
+        )
+        enforce_max_prompt_length = False
     sampling_params = {
         "model": args.planner_model,
         "temperature": args.planner_temperature,
@@ -1428,7 +1450,7 @@ def main() -> None:
             retry_limit=args.retry_limit,
             api_retries=args.api_retries,
             max_workers=args.max_workers,
-            enforce_max_prompt_length=args.enforce_max_prompt_length,
+            enforce_max_prompt_length=enforce_max_prompt_length,
             overlong_filter=args.overlong_filter,
         )
 

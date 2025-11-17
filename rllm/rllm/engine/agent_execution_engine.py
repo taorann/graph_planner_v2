@@ -28,6 +28,21 @@ from rllm.router.router import Router
 logger = logging.getLogger(__name__)
 
 
+class _FallbackChatParser:
+    """String-only formatter used when no tokenizer is available."""
+
+    assistant_token = ""
+
+    def parse(self, messages, add_generation_prompt=False, is_first_msg=False, **_):
+        blocks = []
+        for message in messages:
+            role = message.get("role", "user").upper()
+            blocks.append(f"{role}: {message.get('content', '')}")
+        if add_generation_prompt:
+            blocks.append("ASSISTANT:")
+        return "\n\n".join(blocks)
+
+
 class AgentExecutionEngine:
     def __init__(
         self,
@@ -75,7 +90,7 @@ class AgentExecutionEngine:
         self.max_steps = max_steps
         self.max_response_length = max_response_length
         self.max_prompt_length = max_prompt_length
-        self.enforce_max_prompt_length = enforce_max_prompt_length
+        self.enforce_max_prompt_length = enforce_max_prompt_length and tokenizer is not None
 
         self.agent_class = agent_class
         self.agent_args = agent_args
@@ -111,7 +126,13 @@ class AgentExecutionEngine:
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
 
         if chat_parser is None:
-            self.chat_parser = ChatTemplateParser.get_parser(self.tokenizer, disable_thinking=kwargs.get("disable_thinking", False))
+            if self.tokenizer is not None:
+                self.chat_parser = ChatTemplateParser.get_parser(
+                    self.tokenizer,
+                    disable_thinking=kwargs.get("disable_thinking", False),
+                )
+            else:
+                self.chat_parser = _FallbackChatParser()
         else:
             self.chat_parser = chat_parser
 
@@ -262,12 +283,21 @@ class AgentExecutionEngine:
             info=info,
         )
         messages = agent.chat_completions
-        prompt_tokens, _ = convert_messages_to_tokens_and_masks(messages, tokenizer=self.tokenizer, parser=self.chat_parser, contains_first_msg=True, contains_generation_msg=True)
-        prompt_token_len = len(prompt_tokens)
-        # Note, this should never happen!
-        if prompt_token_len > self.max_prompt_length:
-            agent.reset()
-            raise Exception(f"Trajectory {idx}: initial prompt length {prompt_token_len} already exceeded max_prompt_length {self.max_prompt_length}, retrying")
+        if self.tokenizer is not None:
+            prompt_tokens, _ = convert_messages_to_tokens_and_masks(
+                messages,
+                tokenizer=self.tokenizer,
+                parser=self.chat_parser,
+                contains_first_msg=True,
+                contains_generation_msg=True,
+            )
+            prompt_token_len = len(prompt_tokens)
+            # Note, this should never happen!
+            if prompt_token_len > self.max_prompt_length:
+                agent.reset()
+                raise Exception(
+                    f"Trajectory {idx}: initial prompt length {prompt_token_len} already exceeded max_prompt_length {self.max_prompt_length}, retrying",
+                )
 
         for step_idx in range(self.max_steps):
             # Get action from agent
@@ -280,8 +310,14 @@ class AgentExecutionEngine:
                 max_tokens = self.max_response_length
 
                 # since max prompt is enforced, we filter out too long prompts.
-                prompt_str = self.chat_parser.parse(prompt_messages, add_generation_prompt=True, is_first_msg=True)
-                prompt_len = len(self.tokenizer.encode(prompt_str, add_special_tokens=False))
+                prompt_len = 0
+                if self.tokenizer is not None:
+                    prompt_str = self.chat_parser.parse(
+                        prompt_messages,
+                        add_generation_prompt=True,
+                        is_first_msg=True,
+                    )
+                    prompt_len = len(self.tokenizer.encode(prompt_str, add_special_tokens=False))
                 if prompt_len > self.max_prompt_length:
                     termination_reason = "PROMPT_TRUNCATION"
                     break
@@ -345,42 +381,55 @@ class AgentExecutionEngine:
             # Check and convert to tokens if necessary
             assert assistant_message is not None or mode != "Token", "Assistant messages is none when accumulating token trajectories which should be conversations. This should not happen."
             assert env_messages is not None or mode != "Token", "Environment messages is none when accumulating token trajectories which should be conversations. This should not happen."
-            assistant_msg_tokens, assistant_msg_masks = [], []
-            env_msg_tokens, env_msg_masks = [], []
-            if assistant_message:
-                assistant_msg_tokens, assistant_msg_masks = convert_messages_to_tokens_and_masks([assistant_message], tokenizer=self.tokenizer, parser=self.chat_parser, contains_first_msg=False, contains_generation_msg=False)
-            if env_messages:
-                env_msg_tokens, env_msg_masks = convert_messages_to_tokens_and_masks(env_messages, tokenizer=self.tokenizer, parser=self.chat_parser, contains_first_msg=False, contains_generation_msg=True)
+            if self.tokenizer is not None:
+                assistant_msg_tokens, assistant_msg_masks = [], []
+                env_msg_tokens, env_msg_masks = [], []
+                if assistant_message:
+                    assistant_msg_tokens, assistant_msg_masks = convert_messages_to_tokens_and_masks(
+                        [assistant_message],
+                        tokenizer=self.tokenizer,
+                        parser=self.chat_parser,
+                        contains_first_msg=False,
+                        contains_generation_msg=False,
+                    )
+                if env_messages:
+                    env_msg_tokens, env_msg_masks = convert_messages_to_tokens_and_masks(
+                        env_messages,
+                        tokenizer=self.tokenizer,
+                        parser=self.chat_parser,
+                        contains_first_msg=False,
+                        contains_generation_msg=True,
+                    )
 
-            # Update repsonse token length
-            response_token_len += len(assistant_msg_tokens) + len(env_msg_tokens)
-            # Reached maximum number of tokens for the trajectory
-            if not self.enforce_max_prompt_length and response_token_len >= self.max_response_length:
-                # Truncation length
-                truncation_length = self.max_response_length - response_token_len
-                # Truncate the response and masks
-                if truncation_length < 0:
-                    truncated_response_tokens = (assistant_msg_tokens + env_msg_tokens)[:truncation_length]
-                    truncated_response_masks = (assistant_msg_masks + env_msg_masks)[:truncation_length]
-                else:
-                    # Edge case where the response is exactly the max response length.
-                    truncated_response_tokens = assistant_msg_tokens + env_msg_tokens
-                    truncated_response_masks = assistant_msg_masks + env_msg_masks
-                # Update token collections
-                response_tokens.extend(truncated_response_tokens)
-                response_masks.extend(truncated_response_masks)
+                # Update response token length
+                response_token_len += len(assistant_msg_tokens) + len(env_msg_tokens)
+                # Reached maximum number of tokens for the trajectory
+                if not self.enforce_max_prompt_length and response_token_len >= self.max_response_length:
+                    # Truncation length
+                    truncation_length = self.max_response_length - response_token_len
+                    # Truncate the response and masks
+                    if truncation_length < 0:
+                        truncated_response_tokens = (assistant_msg_tokens + env_msg_tokens)[:truncation_length]
+                        truncated_response_masks = (assistant_msg_masks + env_msg_masks)[:truncation_length]
+                    else:
+                        # Edge case where the response is exactly the max response length.
+                        truncated_response_tokens = assistant_msg_tokens + env_msg_tokens
+                        truncated_response_masks = assistant_msg_masks + env_msg_masks
+                    # Update token collections
+                    response_tokens.extend(truncated_response_tokens)
+                    response_masks.extend(truncated_response_masks)
 
-                cur_step = agent.get_current_state()
-                if response_token_len - len(env_msg_tokens) > self.max_response_length:
-                    cur_step.reward = 0.0
-                cur_step.done = True
-                termination_reason = "TRUNCATION"
-                # handle returning
-                break
+                    cur_step = agent.get_current_state()
+                    if response_token_len - len(env_msg_tokens) > self.max_response_length:
+                        cur_step.reward = 0.0
+                    cur_step.done = True
+                    termination_reason = "TRUNCATION"
+                    # handle returning
+                    break
 
-            # Update the token version of trajectory
-            response_tokens.extend(assistant_msg_tokens)
-            response_masks.extend(assistant_msg_masks)
+                # Update the token version of trajectory
+                response_tokens.extend(assistant_msg_tokens)
+                response_masks.extend(assistant_msg_masks)
             observation = next_observation
 
             if total_time >= self.trajectory_timeout:
@@ -395,8 +444,9 @@ class AgentExecutionEngine:
                 termination_reason = "ENV_DONE"
                 break
 
-            response_tokens.extend(env_msg_tokens)
-            response_masks.extend(env_msg_masks)
+            if self.tokenizer is not None and env_messages:
+                response_tokens.extend(env_msg_tokens)
+                response_masks.extend(env_msg_masks)
 
             if step_idx == self.max_steps - 1:
                 termination_reason = "MAX_STEPS"
