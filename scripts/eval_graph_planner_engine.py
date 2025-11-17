@@ -978,7 +978,6 @@ def _parse_args() -> argparse.Namespace:
     # Normalise path-like arguments when defaults originate from config files.
     path_fields = [
         "dataset",
-        "planner_tokenizer",
         "planner_model_path",
         "planner_system_prompt",
         "results_path",
@@ -993,21 +992,28 @@ def _parse_args() -> argparse.Namespace:
 
     must_exist_fields = {
         "dataset",
-        "planner_tokenizer",
-        "planner_model_path",
         "planner_system_prompt",
-        "cgm_model_path",
-        "cgm_tokenizer_path",
         "agent_system_prompt_path",
     }
     for field in path_fields:
         value = getattr(args, field, None)
         if value is None:
             continue
+        must_exist = field in must_exist_fields
+        if field == "planner_model_path" and args.auto_launch_planner_service:
+            must_exist = True
+        if field == "cgm_model_path" and args.auto_launch_cgm_service:
+            must_exist = True
+        if (
+            field == "cgm_tokenizer_path"
+            and args.auto_launch_cgm_service
+            and value is not None
+        ):
+            must_exist = True
         resolved = _resolve_path(
             value,
             config_path=config_path,
-            must_exist=field in must_exist_fields,
+            must_exist=must_exist,
         )
         setattr(args, field, resolved)
 
