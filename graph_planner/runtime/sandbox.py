@@ -11,6 +11,9 @@ from ..agents.common.contracts import CGM_CONTRACT, CGMPatchErrorCode, ProtocolE
 # 遥测
 from ..infra import telemetry as telemetry_mod
 
+from .apptainer_queue_runtime import ApptainerQueueRuntime
+from .queue_protocol import ExecResult
+
 # R2E 组件（可选）
 try:
     from r2egym.agenthub.runtime.docker import DockerRuntime as R2EDockerRuntime
@@ -39,12 +42,15 @@ class SandboxConfig:
     pytest_cache_root: Optional[str] = None
     commit_hash: Optional[str] = None
     # 统一后端切换：
-    backend: str = "auto"            # "auto" | "r2e" | "repoenv" | "docker"
+    backend: str = "auto"            # "auto" | "r2e" | "repoenv" | "docker" | "apptainer_queue"
     r2e_ds_json: Optional[str] = None  # 指向一个 JSON 文件，内容是 r2e 期望的 ds dict
     requires_build: bool = False       # SWE-bench 元数据：提示容器是否需要 build
     swebench_spec: Optional[Dict[str, Any]] = None  # 透传 swe-bench 的构建脚本信息
     force_docker_backend: bool = False
     port_forwards: Optional[List[Dict[str, Any]]] = None
+    queue_root: Optional[str] = None
+    sif_dir: Optional[str] = None
+    num_runners: int = 1
 
 class SandboxRuntime:
     """
@@ -56,8 +62,9 @@ class SandboxRuntime:
       - "docker"   : 纯 docker-py（最自由）
       - "auto"     : 有 ds 用 "repoenv"，否则 "docker"
     """
-    def __init__(self, cfg: SandboxConfig, force_backend: Optional[str] = None):
+    def __init__(self, cfg: SandboxConfig, force_backend: Optional[str] = None, run_id: Optional[str] = None):
         self.cfg = cfg
+        self.run_id = run_id or "__default__"
         preferred_mode = force_backend or cfg.backend or "docker"
         if cfg.force_docker_backend:
             preferred_mode = "docker"
@@ -68,6 +75,7 @@ class SandboxRuntime:
         self._mode = preferred_mode
 
         self._env = None  # only populated when using RepoEnv as the backend
+        self._aq: Optional[ApptainerQueueRuntime] = None
 
         if self._mode == "repoenv":
             try:
@@ -78,6 +86,8 @@ class SandboxRuntime:
                 self._init_docker_backend()
         elif self._mode == "r2e":
             self._init_r2e_backend()
+        elif self._mode == "apptainer_queue":
+            self._init_apptainer_backend()
         else:
             self._init_docker_backend()
         self._exposed_ports: List[Dict[str, Any]] = getattr(self, "_exposed_ports", [])
@@ -157,6 +167,20 @@ class SandboxRuntime:
         self._rt.run(f"git config --global --add safe.directory {repo_path} || true", timeout=30)
         self._rt.run("python -m pip -q install pytest >/dev/null 2>&1 || true", timeout=300)
         self.repo = None
+
+    def _init_apptainer_backend(self) -> None:
+        cfg = self.cfg
+        if not cfg.queue_root or not cfg.sif_dir:
+            raise ValueError("backend='apptainer_queue' requires queue_root and sif_dir.")
+        queue_root = Path(os.path.expanduser(cfg.queue_root)).resolve()
+        sif_dir = Path(os.path.expanduser(cfg.sif_dir)).resolve()
+        self._aq = ApptainerQueueRuntime(
+            queue_root=queue_root,
+            sif_dir=sif_dir,
+            num_runners=int(cfg.num_runners or 1),
+        )
+        self.workdir = cfg.workdir or "."
+        _dbg(f"apptainer_queue backend initialized: workdir={self.workdir!r}")
 
     # ---------- backend: docker-py（自管容器） ----------
     def _init_docker_backend(self):
@@ -252,6 +276,20 @@ class SandboxRuntime:
 
     # ---------- 通用执行 ----------
     def _exec(self, cmd: str, timeout: int = 900) -> Tuple[str, int]:
+        if self._mode == "apptainer_queue":
+            q = "'" + cmd.replace("'", "'\"'\"'") + "'"
+            exec_cmd = ["bash", "-lc", q]
+            result: ExecResult = self._aq.exec(
+                run_id=self.run_id,
+                docker_image=self.cfg.docker_image,
+                cmd=exec_cmd,
+                cwd=Path(self.workdir),
+                env=self.cfg.env,
+                timeout_sec=float(timeout),
+                meta={"src": "sandbox", "op": "exec"},
+            )
+            out = (result.stdout or "") + (result.stderr or "")
+            return out, int(result.returncode)
         if self._mode in ("r2e", "repoenv"):
             out, rc = self._rt.run(cmd, timeout=timeout)
             try:
@@ -410,6 +448,8 @@ class SandboxRuntime:
                     pass
                 self._env = None
             self._rt = None
+        elif self._mode == "apptainer_queue":
+            self._aq = None
         else:
             try: self.container.stop(timeout=5)
             except Exception: pass

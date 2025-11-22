@@ -116,7 +116,12 @@ class PlannerEnv:
         self.issue: Dict[str, Any] = issue or {}
         self.issue_id: str = str(self.issue.get("id") or "__default__")
         self.sandbox_cfg = sandbox_cfg
-        self.box = SandboxRuntime(sandbox_cfg)
+        effective_run_id = (
+            os.environ.get("GRAPH_PLANNER_RUN_ID", "")
+            or issue.get("run_id", "")
+            or str(self.issue.get("id") or "__default__")
+        )
+        self.box = SandboxRuntime(sandbox_cfg, run_id=effective_run_id)
         self.config: Config = load_config()
         self.config_dict: Dict[str, Any] = self.config.to_dict()
         io_cfg = self.config_dict.get("io") if isinstance(self.config_dict, Mapping) else {}
